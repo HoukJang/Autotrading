@@ -204,11 +204,10 @@ Backtester → Historical strategy validation
 
 The Autotrading system uses PostgreSQL 17.4 with a focus on time-series data optimization and real-time trading operations. The schema is designed for high-frequency data ingestion and efficient querying of market data.
 
-### Recent Schema Improvements `#database`
-- **Timestamp Column Clarity**: Renamed confusing timestamp columns for better developer experience
-  - `updated_at` → `record_modified_at` (database record changes)
-  - `last_updated` → `market_data_refreshed_at` (external API data sync)
-- **Enhanced Indexing**: Added optimized indexes for data freshness queries
+### Database Schema Status `#database`
+- **Current Schema**: Production schema verified and documented below
+- **Column Names**: All column names match actual database implementation
+- **Enhanced Indexing**: Optimized indexes for data freshness queries and time-series operations
 
 ### Database Design Principles `#database`
 - **UTC standardization**: All timestamps stored in UTC timezone with 1-minute precision
@@ -224,19 +223,33 @@ The Autotrading system uses PostgreSQL 17.4 with a focus on time-series data opt
 ```sql
 CREATE TABLE tickers (
     symbol TEXT NOT NULL,                            -- Stock symbol (e.g., 'AAPL', 'MSFT')
-    is_active BOOLEAN DEFAULT true,                  -- Active status (delisting detection)
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- Initial creation timestamp
-    record_modified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), -- Database record changes
-    market_data_refreshed_at TIMESTAMPTZ,           -- Last successful API data sync
+    symbol_clean TEXT NOT NULL,                      -- Cleaned symbol for processing
+    symbol_type TEXT NOT NULL DEFAULT 'equity',     -- Symbol type (equity, etf, etc.)
     exchange TEXT,                                   -- Trading exchange
+    company_name TEXT,                               -- Full company name
+    sector TEXT,                                     -- Business sector
+    industry TEXT,                                   -- Business industry
+    currency TEXT DEFAULT 'USD',                    -- Trading currency
+    country TEXT DEFAULT 'US',                      -- Country of incorporation
+
+    -- Status Fields
+    is_active BOOLEAN DEFAULT true,                  -- Active status (delisting detection)
+    is_etf BOOLEAN DEFAULT false,                    -- ETF flag
+    has_options BOOLEAN DEFAULT false,               -- Options availability
 
     -- Market Data Fields
-    last_price NUMERIC(18,8),                       -- Most recent price
-    market_cap NUMERIC(28,8),                       -- Market capitalization
-    pe_ratio NUMERIC(10,4),                         -- Price-to-earnings ratio
-    dividend_yield NUMERIC(8,4),                    -- Dividend yield percentage
-    beta NUMERIC(8,4),                              -- Beta coefficient
-    avg_volume_30d NUMERIC(28,8),                   -- 30-day average volume
+    market_cap BIGINT,                               -- Market capitalization
+    dividend_yield NUMERIC,                          -- Dividend yield percentage
+    pe_ratio NUMERIC,                                -- Price-to-earnings ratio
+    beta NUMERIC,                                    -- Beta coefficient
+    avg_volume_30d BIGINT,                           -- 30-day average volume
+    last_price NUMERIC,                              -- Most recent price
+    last_updated TIMESTAMPTZ,                        -- Last successful API data sync
+    data_source TEXT DEFAULT 'schwab',              -- Data source identifier
+
+    -- Audit Fields
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- Initial creation timestamp
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- Database record changes
 
     PRIMARY KEY (symbol)
 );
@@ -295,7 +308,7 @@ CREATE TABLE candles (
 CREATE TABLE status (
     name TEXT PRIMARY KEY,                   -- Component identifier
     state TEXT NOT NULL,                     -- Current operational state
-    record_modified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), -- Last state change
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), -- Last state change
     details JSONB NOT NULL DEFAULT '{}',    -- Flexible metadata storage
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()  -- Initial creation time
 );
@@ -343,14 +356,14 @@ CREATE INDEX idx_candles_symbol ON candles (symbol);
 CREATE INDEX idx_candles_symbol_ts ON candles (symbol, ts DESC);
 
 -- Status monitoring and alerting
-CREATE INDEX idx_status_record_modified_at ON status (record_modified_at DESC);
+CREATE INDEX idx_status_updated_at ON status (updated_at DESC);
 ```
 
 **Index Usage Patterns**:
 - `idx_candles_ts_desc`: Latest market data across all symbols
 - `idx_candles_symbol`: All historical data for specific symbol
 - `idx_candles_symbol_ts`: Time-range queries for specific symbol (primary pattern)
-- `idx_status_record_modified_at`: Recent component status changes
+- `idx_status_updated_at`: Recent component status changes
 
 ### Query Performance Guidelines `#indexes`
 
@@ -470,11 +483,11 @@ WHERE symbol = $1
 SELECT
     name,
     state,
-    record_modified_at,
-    NOW() - record_modified_at as time_since_update,
+    updated_at,
+    NOW() - updated_at as time_since_update,
     details->>'last_action' as last_action
 FROM status
-ORDER BY record_modified_at DESC;
+ORDER BY updated_at DESC;
 ```
 
 **Data Freshness Monitoring**:
@@ -524,7 +537,7 @@ The status table provides real-time visibility into system component health:
 UPDATE status
 SET
     state = $1,
-    record_modified_at = NOW(),
+    updated_at = NOW(),
     details = details || $2::jsonb
 WHERE name = $3;
 ```
@@ -535,13 +548,13 @@ WHERE name = $3;
 SELECT
     s.name,
     s.state,
-    s.record_modified_at,
-    EXTRACT(EPOCH FROM (NOW() - s.record_modified_at))/60 as minutes_since_update,
+    s.updated_at,
+    EXTRACT(EPOCH FROM (NOW() - s.updated_at))/60 as minutes_since_update,
     s.details,
     CASE
         WHEN s.state = 'error' THEN 'CRITICAL'
         WHEN s.state IN ('stopped', 'initialized') THEN 'WARNING'
-        WHEN EXTRACT(EPOCH FROM (NOW() - s.record_modified_at))/60 > 30 THEN 'STALE'
+        WHEN EXTRACT(EPOCH FROM (NOW() - s.updated_at))/60 > 30 THEN 'STALE'
         ELSE 'OK'
     END as health_status
 FROM status s
@@ -552,7 +565,7 @@ ORDER BY
         WHEN 'initialized' THEN 3
         ELSE 4
     END,
-    s.record_modified_at DESC;
+    s.updated_at DESC;
 ```
 
 ### Data Quality Monitoring `#monitoring`

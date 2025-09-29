@@ -42,7 +42,7 @@ class StatusInfo:
     name: str
     state: ComponentState
     details: Dict[str, Any]
-    record_modified_at: datetime
+    updated_at: datetime
     created_at: datetime
 
     def to_dict(self) -> Dict[str, Any]:
@@ -51,7 +51,7 @@ class StatusInfo:
             "name": self.name,
             "state": self.state.value,
             "details": self.details,
-            "record_modified_at": self.record_modified_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
             "created_at": self.created_at.isoformat()
         }
 
@@ -115,12 +115,12 @@ class StatusHandler:
             details = details or {}
 
             query = """
-                INSERT INTO status (name, state, record_modified_at, details)
+                INSERT INTO status (name, state, updated_at, details)
                 VALUES ($1, $2, NOW(), $3)
                 ON CONFLICT (name)
                 DO UPDATE SET
                     state = EXCLUDED.state,
-                    record_modified_at = NOW(),
+                    updated_at = NOW(),
                     details = status.details || EXCLUDED.details
             """
 
@@ -146,7 +146,7 @@ class StatusHandler:
         """
         try:
             query = """
-                SELECT name, state, record_modified_at, details, created_at
+                SELECT name, state, updated_at, details, created_at
                 FROM status
                 WHERE name = $1
             """
@@ -159,7 +159,7 @@ class StatusHandler:
                         name=row['name'],
                         state=ComponentState(row['state']),
                         details=row['details'] or {},
-                        record_modified_at=row['record_modified_at'],
+                        updated_at=row['updated_at'],
                         created_at=row['created_at']
                     )
 
@@ -178,9 +178,9 @@ class StatusHandler:
         """
         try:
             query = """
-                SELECT name, state, record_modified_at, details, created_at
+                SELECT name, state, updated_at, details, created_at
                 FROM status
-                ORDER BY record_modified_at DESC
+                ORDER BY updated_at DESC
             """
 
             async with self.database_pool.acquire() as conn:
@@ -191,7 +191,7 @@ class StatusHandler:
                         name=row['name'],
                         state=ComponentState(row['state']),
                         details=row['details'] or {},
-                        record_modified_at=row['record_modified_at'],
+                        updated_at=row['updated_at'],
                         created_at=row['created_at']
                     )
                     for row in rows
@@ -213,13 +213,13 @@ class StatusHandler:
                 SELECT
                     name,
                     state,
-                    record_modified_at,
-                    EXTRACT(EPOCH FROM (NOW() - record_modified_at))/60 as minutes_since_update,
+                    updated_at,
+                    EXTRACT(EPOCH FROM (NOW() - updated_at))/60 as minutes_since_update,
                     details,
                     CASE
                         WHEN state = 'error' THEN 'CRITICAL'
                         WHEN state IN ('stopped', 'initialized') THEN 'WARNING'
-                        WHEN EXTRACT(EPOCH FROM (NOW() - record_modified_at))/60 > $1 THEN 'STALE'
+                        WHEN EXTRACT(EPOCH FROM (NOW() - updated_at))/60 > $1 THEN 'STALE'
                         ELSE 'OK'
                     END as health_status
                 FROM status
@@ -230,7 +230,7 @@ class StatusHandler:
                         WHEN 'initialized' THEN 3
                         ELSE 4
                     END,
-                    record_modified_at DESC
+                    updated_at DESC
             """
 
             async with self.database_pool.acquire() as conn:
@@ -283,18 +283,18 @@ class StatusHandler:
         try:
             # 긴급 상황 (에러 상태)
             critical_query = """
-                SELECT name, state, record_modified_at, details
+                SELECT name, state, updated_at, details
                 FROM status
                 WHERE state = 'error'
-                    AND record_modified_at > NOW() - INTERVAL '%s minutes'
+                    AND updated_at > NOW() - INTERVAL '%s minutes'
             """ % self.alert_thresholds["critical_error_minutes"]
 
             # 경고 상황 (오래된 업데이트)
             warning_query = """
-                SELECT name, state, record_modified_at, details,
-                       EXTRACT(EPOCH FROM (NOW() - record_modified_at))/60 as minutes_stale
+                SELECT name, state, updated_at, details,
+                       EXTRACT(EPOCH FROM (NOW() - updated_at))/60 as minutes_stale
                 FROM status
-                WHERE EXTRACT(EPOCH FROM (NOW() - record_modified_at))/60 > $1
+                WHERE EXTRACT(EPOCH FROM (NOW() - updated_at))/60 > $1
                    OR state IN ('stopped', 'initialized')
             """
 
@@ -306,7 +306,7 @@ class StatusHandler:
                         level=AlertLevel.CRITICAL,
                         component=row['name'],
                         issue=f"Component in error state: {row['state']}",
-                        timestamp=row['record_modified_at'],
+                        timestamp=row['updated_at'],
                         details=row['details']
                     ))
 
@@ -322,7 +322,7 @@ class StatusHandler:
                         level=AlertLevel.WARNING,
                         component=row['name'],
                         issue=issue,
-                        timestamp=row['record_modified_at'],
+                        timestamp=row['updated_at'],
                         details=row['details']
                     ))
 
@@ -453,7 +453,7 @@ class StatusDashboard:
                 ComponentState.ERROR: "🚨"
             }.get(status.state, "⚫")
 
-            lines.append(f"{state_emoji} {status.name:<20} | {status.state.value:<12} | {status.record_modified_at.strftime('%H:%M:%S')}")
+            lines.append(f"{state_emoji} {status.name:<20} | {status.state.value:<12} | {status.updated_at.strftime('%H:%M:%S')}")
 
             # 중요한 세부사항만 표시
             if status.details:

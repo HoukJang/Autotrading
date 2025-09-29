@@ -61,10 +61,15 @@ class TickerManager:
     지능형 Ticker 관리자
 
     주요 기능:
-    - 상장폐지 감지 및 비활성화
+    - 통합 ticker 정보 업데이트 및 상장폐지 감지 (update_ticker_info_batch)
     - 신규 ticker 발견 및 추가
     - 데이터 품질 모니터링
     - 배치 처리 오케스트레이션
+
+    설계 변경사항 (v2):
+    - update_ticker_info_batch()에 상장폐지 감지 로직 통합
+    - monitor_delisting_batch()는 하위 호환성을 위해 유지되지만 DEPRECATED
+    - 단일 API 호출로 정보 업데이트와 상장폐지 감지를 동시 처리하여 효율성 향상
     """
 
     def __init__(self, schwab_client: Optional[Client] = None, status_handler: Optional[StatusHandler] = None):
@@ -184,6 +189,8 @@ class TickerManager:
             ))
             self.db_connection.commit()
         except Exception as e:
+            # 트랜잭션 롤백 후 오류 로그
+            self.db_connection.rollback()
             self.logger.error(f"Failed to log ticker error for {symbol}: {e}")
 
     async def _get_error_history(self, symbol: str, days: int = 7) -> List[Dict]:
@@ -201,6 +208,8 @@ class TickerManager:
             columns = ['error_type', 'confidence_level', 'created_at', 'error_message']
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
         except Exception as e:
+            # 조회 오류 시 트랜잭션 롤백
+            self.db_connection.rollback()
             self.logger.error(f"Failed to get error history for {symbol}: {e}")
             return []
 
@@ -239,22 +248,39 @@ class TickerManager:
 
         return False
 
-    async def _update_status_via_handler(self, details: Dict[str, Any]) -> None:
+    async def _update_status_via_handler(self, state: ComponentState, details: Dict[str, Any]) -> None:
         """
         StatusHandler를 통한 상태 업데이트 헬퍼 메서드
 
         Args:
+            state: 설정할 상태
             details: 상태에 추가할 세부 정보
         """
         try:
             if self.status_handler:
                 await self.status_handler.update_status(
                     component_name="ticker_manager",
-                    state=ComponentState.RUNNING,
+                    state=state,
                     details=details
                 )
         except Exception as e:
             self.logger.error(f"Failed to update status via handler: {e}")
+
+    def _show_progress(self, current: int, total: int, success: int, errors: int, deactivated: int):
+        """프로그레스 바 표시"""
+        if total == 0:
+            return
+
+        progress = current / total
+        bar_length = 40
+        filled_length = int(bar_length * progress)
+        bar = '=' * filled_length + '-' * (bar_length - filled_length)
+
+        percent = progress * 100
+        status = f"\r[{bar}] {percent:.1f}% ({current}/{total}) | "
+        status += f"OK:{success} ERR:{errors} DEL:{deactivated}"
+
+        print(status, end='', flush=True)
 
     async def _deactivate_ticker(self, symbol: str, reason: str):
         """Ticker 비활성화"""
@@ -263,16 +289,17 @@ class TickerManager:
             cursor.execute("""
                 UPDATE tickers
                 SET is_active = false,
-                    record_modified_at = NOW()
+                    updated_at = NOW()
                 WHERE symbol = %s
             """, (symbol,))
 
             self.db_connection.commit()
-            self.logger.warning(f"Ticker {symbol} deactivated: {reason}")
+            # 프로그레스 바 모드에서는 개별 워닝 로그 억제
+            # self.logger.warning(f"Ticker {symbol} deactivated: {reason}")
 
             # StatusHandler를 통한 상태 업데이트
             if self.status_handler:
-                await self._update_status_via_handler({
+                await self._update_status_via_handler(ComponentState.RUNNING, {
                     "deactivated_ticker": symbol,
                     "reason": reason,
                     "timestamp": datetime.utcnow().isoformat()
@@ -281,12 +308,12 @@ class TickerManager:
         except Exception as e:
             self.logger.error(f"Failed to deactivate ticker {symbol}: {e}")
 
-    async def monitor_delisting_batch(self, batch_size: Optional[int] = None) -> BatchResult:
+    async def _monitor_delisting_internal(self, batch_size: Optional[int] = None) -> BatchResult:
         """
-        배치 상장폐지 모니터링
+        내부 상장폐지 모니터링 메서드
 
-        오케스트레이터에서 호출하는 주요 메서드입니다.
-        활성 ticker들의 상태를 확인하고 상장폐지된 것들을 비활성화합니다.
+        이제 update_ticker_info_batch()에 통합되어 있어 중복 호출을 방지합니다.
+        특별한 경우에만 순수 상장폐지 감지가 필요할 때 사용합니다.
 
         Args:
             batch_size: 배치 크기 (기본값: self.batch_size)
@@ -304,7 +331,7 @@ class TickerManager:
                 SELECT symbol
                 FROM tickers
                 WHERE is_active = true
-                ORDER BY COALESCE(market_data_refreshed_at, created_at) ASC
+                ORDER BY COALESCE(last_updated, created_at) ASC
                 LIMIT %s
             """, (batch_size,))
 
@@ -347,7 +374,7 @@ class TickerManager:
                             # market_data_refreshed_at 업데이트
                             cursor.execute("""
                                 UPDATE tickers
-                                SET market_data_refreshed_at = NOW()
+                                SET last_updated = NOW()
                                 WHERE symbol = %s
                             """, (symbol,))
                         else:
@@ -440,24 +467,42 @@ class TickerManager:
 
     async def update_ticker_info_batch(self, batch_size: Optional[int] = None) -> BatchResult:
         """
-        Ticker 정보 업데이트 배치
+        Ticker 정보 업데이트 배치 (통합 상장폐지 감지 포함)
 
-        활성 ticker들의 기본 정보 (가격, 시가총액, 재무지표 등)를 업데이트합니다.
+        활성 ticker들의 기본 정보 (가격, 시가총액, 재무지표 등)를 업데이트하고,
+        동시에 상장폐지된 ticker들을 감지하여 비활성화합니다.
         """
         start_time = datetime.utcnow()
-        batch_size = batch_size or self.batch_size
+        # 배치 크기 처리: 0이면 전체, None이면 기본값 사용
+        if batch_size is None:
+            batch_size = self.batch_size
+        elif batch_size == 0:
+            batch_size = None  # LIMIT 없음 (전체 처리)
 
         try:
             # 오래된 정보를 가진 활성 ticker 조회
             cursor = self.db_connection.cursor()
-            cursor.execute("""
-                SELECT symbol
-                FROM tickers
-                WHERE is_active = true
-                  AND (market_data_refreshed_at IS NULL OR market_data_refreshed_at < NOW() - INTERVAL '1 day')
-                ORDER BY COALESCE(market_data_refreshed_at, created_at) ASC
-                LIMIT %s
-            """, (batch_size,))
+
+            # 배치 크기에 따라 쿼리 분기
+            if batch_size is None:
+                # 전체 처리
+                cursor.execute("""
+                    SELECT symbol
+                    FROM tickers
+                    WHERE is_active = true
+                      AND (last_updated IS NULL OR last_updated < NOW() - INTERVAL '1 day')
+                    ORDER BY COALESCE(last_updated, created_at) ASC
+                """)
+            else:
+                # 제한된 배치 처리
+                cursor.execute("""
+                    SELECT symbol
+                    FROM tickers
+                    WHERE is_active = true
+                      AND (last_updated IS NULL OR last_updated < NOW() - INTERVAL '1 day')
+                    ORDER BY COALESCE(last_updated, created_at) ASC
+                    LIMIT %s
+                """, (batch_size,))
 
             symbols = [row[0] for row in cursor.fetchall()]
 
@@ -465,16 +510,38 @@ class TickerManager:
                 processing_time = (datetime.utcnow() - start_time).total_seconds()
                 return BatchResult(0, 0, 0, 0, [], processing_time)
 
-            self.logger.info(f"Starting ticker info update for {len(symbols)} symbols")
+            self.logger.info(f"Starting ticker info update with delisting detection for {len(symbols)} symbols")
+
+            # Update status to indicate ticker manager is starting batch processing
+            if self.status_handler:
+                batch_size_display = "ALL" if batch_size is None else batch_size
+                await self._update_status_via_handler(ComponentState.RUNNING, {
+                    "operation": "ticker_info_update_batch",
+                    "batch_size": batch_size_display,
+                    "symbols_to_process": len(symbols),
+                    "start_time": start_time.isoformat()
+                })
 
             processed_count = 0
             success_count = 0
             error_count = 0
+            deactivated_count = 0
             errors = []
+
+            # 프로그레스 초기화
+            total_symbols = len(symbols)
+            print(f"\nUpdating {total_symbols} tickers...")
 
             # 배치 처리
             for i in range(0, len(symbols), 10):
                 batch_symbols = symbols[i:i+10]
+
+                # Ctrl+C 체크
+                try:
+                    await asyncio.sleep(0)  # 비동기 중단점 제공
+                except asyncio.CancelledError:
+                    print("\nOperation cancelled by user")
+                    break
 
                 try:
                     response = self.schwab_client.get_quotes(batch_symbols)
@@ -486,20 +553,32 @@ class TickerManager:
                         if symbol in response_data:
                             quote_data = response_data[symbol]
 
-                            # Ticker 정보 업데이트
+                            # 거래 중단 여부 확인
+                            if quote_data.get('tradingHalted', False):
+                                # 프로그레스 바 모드에서는 개별 워닝 로그 억제
+                                # self.logger.warning(f"Trading halted for {symbol}")
+                                # 거래 중단은 일시적일 수 있으므로 즉시 비활성화하지 않음
+                                pass
+
+                            # Ticker 정보 업데이트 (기본 정보 + 가격/재무 정보)
+                            reference_data = quote_data.get('reference', {})
                             cursor.execute("""
                                 UPDATE tickers SET
+                                    company_name = %(company_name)s,
+                                    exchange = %(exchange)s,
                                     last_price = %(last_price)s,
                                     market_cap = %(market_cap)s,
                                     pe_ratio = %(pe_ratio)s,
                                     dividend_yield = %(dividend_yield)s,
                                     beta = %(beta)s,
                                     avg_volume_30d = %(avg_volume_30d)s,
-                                    market_data_refreshed_at = NOW(),
-                                    record_modified_at = NOW()
+                                    last_updated = NOW(),
+                                    updated_at = NOW()
                                 WHERE symbol = %(symbol)s
                             """, {
                                 'symbol': symbol,
+                                'company_name': reference_data.get('description'),
+                                'exchange': reference_data.get('exchange'),
                                 'last_price': quote_data.get('quote', {}).get('lastPrice'),
                                 'market_cap': None,  # Not available in quotes API
                                 'pe_ratio': quote_data.get('fundamental', {}).get('peRatio'),
@@ -509,37 +588,120 @@ class TickerManager:
                             })
 
                             success_count += 1
-                        else:
+
+                        # 프로그레스 바 업데이트
+                        self._show_progress(processed_count, total_symbols, success_count, error_count, deactivated_count)
+
+                        if symbol not in response_data:
+                            # 응답에 심볼이 없음 - 상장폐지 감지 로직 적용
+                            error_analysis = ErrorAnalysis(
+                                error_type="missing_quote",
+                                confidence=ErrorConfidence.MEDIUM,
+                                should_deactivate=False,
+                                retry_recommended=True,
+                                message=f"Symbol {symbol} not in quote response"
+                            )
+
+                            await self._log_ticker_error(symbol, error_analysis, 200)
+
+                            if await self._should_deactivate_ticker(symbol, error_analysis):
+                                await self._deactivate_ticker(symbol, "Missing from quote response during info update")
+                                deactivated_count += 1
+
                             error_count += 1
                             errors.append(f"No quote data for {symbol}")
 
                 except Exception as e:
+                    # API 오류 발생 - 각 심볼에 대해 개별 오류 처리
                     error_msg = str(e)
-                    self.logger.error(f"Quote update batch failed: {error_msg}")
-                    error_count += len(batch_symbols)
+                    # 프로그레스 바 모드에서는 개별 배치 오류 로그 억제
+                    # self.logger.error(f"Quote update batch failed: {error_msg}")
+
+                    for symbol in batch_symbols:
+                        processed_count += 1
+
+                        # HTTP 상태 코드 추출 시도
+                        status_code = getattr(e, 'status_code', 0)
+                        if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                            status_code = e.response.status_code
+
+                        error_analysis = self._analyze_api_error(symbol, status_code, error_msg)
+                        await self._log_ticker_error(symbol, error_analysis, status_code)
+
+                        if await self._should_deactivate_ticker(symbol, error_analysis):
+                            await self._deactivate_ticker(symbol, f"API error during info update: {error_msg}")
+                            deactivated_count += 1
+
+                        error_count += 1
+
                     errors.append(f"Batch {i//10 + 1}: {error_msg}")
 
+                # Rate limit 준수
                 await asyncio.sleep(1.0)
 
             self.db_connection.commit()
+
+            # 최종 프로그레스 바 표시 및 개행
+            print(f"\r[{'=' * 40}] 100.0% ({total_symbols}/{total_symbols}) | OK:{success_count} ERR:{error_count} DEL:{deactivated_count}")
+            print()  # 개행
+
             processing_time = (datetime.utcnow() - start_time).total_seconds()
 
             result = BatchResult(
                 processed_count=processed_count,
                 success_count=success_count,
                 error_count=error_count,
-                deactivated_count=0,
+                deactivated_count=deactivated_count,
                 errors=errors,
                 processing_time=processing_time
             )
 
-            self.logger.info(f"Ticker info update completed: {result}")
+            # Update status with completion results - mark as completed
+            if self.status_handler:
+                await self._update_status_via_handler(ComponentState.HEALTHY, {
+                    "operation": "ticker_info_update_batch_completed",
+                    "result": {
+                        "processed": processed_count,
+                        "updated": success_count,
+                        "errors": error_count,
+                        "deactivated": deactivated_count,
+                        "processing_time": processing_time
+                    },
+                    "completion_time": datetime.utcnow().isoformat()
+                })
+
+            self.logger.info(f"Ticker info update with delisting detection completed: {result}")
             return result
 
         except Exception as e:
+            # 메인 트랜잭션 오류 시 롤백
+            try:
+                self.db_connection.rollback()
+            except Exception as rollback_error:
+                self.logger.error(f"Failed to rollback transaction: {rollback_error}")
+
             self.logger.error(f"Ticker info update batch failed: {e}")
             processing_time = (datetime.utcnow() - start_time).total_seconds()
             return BatchResult(0, 0, 1, 0, [str(e)], processing_time)
+
+    async def monitor_delisting_batch(self, batch_size: Optional[int] = None) -> BatchResult:
+        """
+        배치 상장폐지 모니터링 (하위 호환성 래퍼)
+
+        ⚠️ DEPRECATED: 이 메서드는 이제 update_ticker_info_batch()에 통합되었습니다.
+        중복 API 호출을 방지하기 위해 update_ticker_info_batch()를 사용하세요.
+
+        Args:
+            batch_size: 배치 크기 (기본값: self.batch_size)
+
+        Returns:
+            BatchResult: 배치 처리 결과
+        """
+        self.logger.warning(
+            "monitor_delisting_batch() is deprecated. "
+            "Use update_ticker_info_batch() which includes integrated delisting detection."
+        )
+        return await self._monitor_delisting_internal(batch_size)
 
     async def validate_data_quality_batch(self) -> BatchResult:
         """
@@ -577,7 +739,7 @@ class TickerManager:
 
                         # StatusHandler를 통한 상태 업데이트
                         if self.status_handler:
-                            await self._update_status_via_handler({
+                            await self._update_status_via_handler(ComponentState.RUNNING, {
                                 "quality_issue": check_name,
                                 "affected_symbols": len(problematic_symbols),
                                 "timestamp": datetime.utcnow().isoformat()
@@ -609,13 +771,39 @@ class TickerManager:
 
 # 오케스트레이터에서 사용할 수 있는 편의 함수들
 async def run_delisting_monitor(batch_size: int = 50, status_handler: Optional[StatusHandler] = None) -> BatchResult:
-    """상장폐지 모니터링 실행"""
+    """
+    상장폐지 모니터링 실행 (DEPRECATED)
+
+    ⚠️ DEPRECATED: 이 함수는 더 이상 권장되지 않습니다.
+    대신 run_ticker_update()를 사용하세요. 이는 ticker 정보 업데이트와 상장폐지 감지를
+    하나의 API 호출로 통합하여 효율적입니다.
+    """
+    import warnings
+    warnings.warn(
+        "run_delisting_monitor() is deprecated. Use run_ticker_update() which includes "
+        "integrated delisting detection to avoid duplicate API calls.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+
     async with TickerManager(status_handler=status_handler) as manager:
         return await manager.monitor_delisting_batch(batch_size)
 
 
 async def run_ticker_update(batch_size: int = 50, status_handler: Optional[StatusHandler] = None) -> BatchResult:
-    """Ticker 정보 업데이트 실행"""
+    """
+    Ticker 정보 업데이트 실행 (통합 상장폐지 감지 포함)
+
+    ticker 정보를 업데이트하면서 동시에 상장폐지된 ticker들을 감지하고 비활성화합니다.
+    이는 이전의 별도 상장폐지 모니터링 기능을 통합하여 API 호출을 최적화한 것입니다.
+
+    Args:
+        batch_size: 배치 크기 (기본값: 50)
+        status_handler: 상태 핸들러 (선택사항)
+
+    Returns:
+        BatchResult: 처리된 개수, 성공/실패 개수, 비활성화된 ticker 개수 포함
+    """
     async with TickerManager(status_handler=status_handler) as manager:
         return await manager.update_ticker_info_batch(batch_size)
 
