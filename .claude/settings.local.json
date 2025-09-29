@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__sequential-thinking__sequentialthinking",
+      "Bash(mkdir:*)",
+      "Read(//c/Users/linep/**)",
+      "Bash(python test_auth.py:*)",
+      "Bash(python test_auth_simple.py:*)",
+      "Bash(python -m pytest tests/unit/test_authentication.py -v)",
+      "Bash(python -m pytest tests/unit/ tests/integration/ -v --tb=short)",
+      "SlashCommand(/sc:explain:*)",
+      "Bash(pg_isready:*)",
+      "Bash(ipconfig)",
+      "Bash(findstr:*)",
+      "Bash(net localgroup:*)",
+      "Bash(dir C:Userslinep.ssh)",
+      "WebSearch",
+      "Bash(sc query:*)",
+      "Bash(netsh:*)",
+      "Bash(ssh:*)",
+      "Bash(ssh-keygen:*)",
+      "Bash(powershell:*)",
+      "Read(//c/ProgramData/ssh/**)",
+      "Bash(icacls:*)",
+      "Bash(dir C:UserslinepAutotrading)",
+      "Bash(python:*)",
+      "Bash(move autotradingcorestatus_monitor.py autotradingcorestatus_handler.py)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
