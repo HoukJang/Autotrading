@@ -1,0 +1,142 @@
+{
+  "timestamp": "2025-09-29T02:28:36.134116+00:00",
+  "health_check": {
+    "overall_health": "WARNING",
+    "total_components": 6,
+    "healthy_components": 0,
+    "components": [
+      {
+        "name": "ticker_update_script",
+        "state": "stopped",
+        "health_status": "WARNING",
+        "minutes_since_update": 21.723064533333332,
+        "details": "{\"pid\": 25008, \"stop_time\": \"2025-09-29T02:06:52.748175+00:00\", \"start_time\": \"2025-09-29T02:06:51.744506+00:00\", \"final_stats\": {\"last_run\": \"2025-09-29T02:06:52.748175+00:00\", \"start_time\": \"2025-09-29T02:06:51.662399+00:00\", \"total_errors\": 2, \"total_updated\": 3, \"runs_completed\": 1, \"total_processed\": 5, \"total_deactivated\": 0}, \"script_args\": {\"dry_run\": true, \"verbose\": true, \"interval\": 3600, \"log_file\": null, \"batch_size\": 5, \"continuous\": false, \"config_check\": false}}"
+      },
+      {
+        "name": "ticker_manager",
+        "state": "initialized",
+        "health_status": "WARNING",
+        "minutes_since_update": 1400.138019,
+        "details": "{\"error_count\": 0, \"active_tickers\": 11609, \"setup_completed\": \"2025-09-28T03:08:27.862385\", \"inactive_tickers\": 0, \"last_info_update\": null, \"deactivated_count\": 0, \"last_quality_check\": null, \"last_delisting_check\": null, \"total_tickers_managed\": 11609}"
+      },
+      {
+        "name": "data_collector",
+        "state": "initialized",
+        "health_status": "WARNING",
+        "minutes_since_update": 1463.9660577166667,
+        "details": "{\"status\": \"ready\", \"symbols\": [], \"last_run\": null}"
+      },
+      {
+        "name": "analyzer",
+        "state": "initialized",
+        "health_status": "WARNING",
+        "minutes_since_update": 1463.9660577166667,
+        "details": "{\"signals\": [], \"indicators\": [], \"last_analysis\": null}"
+      },
+      {
+        "name": "trader",
+        "state": "initialized",
+        "health_status": "WARNING",
+        "minutes_since_update": 1463.9660577166667,
+        "details": "{\"orders\": [], \"positions\": [], \"last_trade\": null}"
+      },
+      {
+        "name": "system",
+        "state": "healthy",
+        "health_status": "STALE",
+        "minutes_since_update": 1463.9660577166667,
+        "details": "{\"uptime\": \"0s\", \"version\": \"0.1.0\", \"environment\": \"development\"}"
+      }
+    ],
+    "timestamp": "2025-09-29T02:28:36.133117+00:00"
+  },
+  "component_count": 6,
+  "statuses": [
+    {
+      "name": "ticker_update_script",
+      "state": "stopped",
+      "details": "{\"pid\": 25008, \"stop_time\": \"2025-09-29T02:06:52.748175+00:00\", \"start_time\": \"2025-09-29T02:06:51.744506+00:00\", \"final_stats\": {\"last_run\": \"2025-09-29T02:06:52.748175+00:00\", \"start_time\": \"2025-09-29T02:06:51.662399+00:00\", \"total_errors\": 2, \"total_updated\": 3, \"runs_completed\": 1, \"total_processed\": 5, \"total_deactivated\": 0}, \"script_args\": {\"dry_run\": true, \"verbose\": true, \"interval\": 3600, \"log_file\": null, \"batch_size\": 5, \"continuous\": false, \"config_check\": false}}",
+      "updated_at": "2025-09-29T02:06:52.748654+00:00",
+      "created_at": "2025-09-29T02:06:51.744624+00:00"
+    },
+    {
+      "name": "ticker_manager",
+      "state": "initialized",
+      "details": "{\"error_count\": 0, \"active_tickers\": 11609, \"setup_completed\": \"2025-09-28T03:08:27.862385\", \"inactive_tickers\": 0, \"last_info_update\": null, \"deactivated_count\": 0, \"last_quality_check\": null, \"last_delisting_check\": null, \"total_tickers_managed\": 11609}",
+      "updated_at": "2025-09-28T03:08:27.851386+00:00",
+      "created_at": "2025-09-28T03:08:27.851386+00:00"
+    },
+    {
+      "name": "data_collector",
+      "state": "initialized",
+      "details": "{\"status\": \"ready\", \"symbols\": [], \"last_run\": null}",
+      "updated_at": "2025-09-28T02:04:38.169063+00:00",
+      "created_at": "2025-09-28T02:04:38.169063+00:00"
+    },
+    {
+      "name": "analyzer",
+      "state": "initialized",
+      "details": "{\"signals\": [], \"indicators\": [], \"last_analysis\": null}",
+      "updated_at": "2025-09-28T02:04:38.169063+00:00",
+      "created_at": "2025-09-28T02:04:38.169063+00:00"
+    },
+    {
+      "name": "trader",
+      "state": "initialized",
+      "details": "{\"orders\": [], \"positions\": [], \"last_trade\": null}",
+      "updated_at": "2025-09-28T02:04:38.169063+00:00",
+      "created_at": "2025-09-28T02:04:38.169063+00:00"
+    },
+    {
+      "name": "system",
+      "state": "healthy",
+      "details": "{\"uptime\": \"0s\", \"version\": \"0.1.0\", \"environment\": \"development\"}",
+      "updated_at": "2025-09-28T02:04:38.169063+00:00",
+      "created_at": "2025-09-28T02:04:38.169063+00:00"
+    }
+  ],
+  "alerts": [
+    {
+      "level": "WARNING",
+      "component": "data_collector",
+      "issue": "Component in initialized state",
+      "timestamp": "2025-09-28T02:04:38.169063+00:00",
+      "details": "{\"status\": \"ready\", \"symbols\": [], \"last_run\": null}"
+    },
+    {
+      "level": "WARNING",
+      "component": "analyzer",
+      "issue": "Component in initialized state",
+      "timestamp": "2025-09-28T02:04:38.169063+00:00",
+      "details": "{\"signals\": [], \"indicators\": [], \"last_analysis\": null}"
+    },
+    {
+      "level": "WARNING",
+      "component": "trader",
+      "issue": "Component in initialized state",
+      "timestamp": "2025-09-28T02:04:38.169063+00:00",
+      "details": "{\"orders\": [], \"positions\": [], \"last_trade\": null}"
+    },
+    {
+      "level": "WARNING",
+      "component": "system",
+      "issue": "No updates for 1463 minutes",
+      "timestamp": "2025-09-28T02:04:38.169063+00:00",
+      "details": "{\"uptime\": \"0s\", \"version\": \"0.1.0\", \"environment\": \"development\"}"
+    },
+    {
+      "level": "WARNING",
+      "component": "ticker_manager",
+      "issue": "Component in initialized state",
+      "timestamp": "2025-09-28T03:08:27.851386+00:00",
+      "details": "{\"error_count\": 0, \"active_tickers\": 11609, \"setup_completed\": \"2025-09-28T03:08:27.862385\", \"inactive_tickers\": 0, \"last_info_update\": null, \"deactivated_count\": 0, \"last_quality_check\": null, \"last_delisting_check\": null, \"total_tickers_managed\": 11609}"
+    },
+    {
+      "level": "WARNING",
+      "component": "ticker_update_script",
+      "issue": "Component in stopped state",
+      "timestamp": "2025-09-29T02:06:52.748654+00:00",
+      "details": "{\"pid\": 25008, \"stop_time\": \"2025-09-29T02:06:52.748175+00:00\", \"start_time\": \"2025-09-29T02:06:51.744506+00:00\", \"final_stats\": {\"last_run\": \"2025-09-29T02:06:52.748175+00:00\", \"start_time\": \"2025-09-29T02:06:51.662399+00:00\", \"total_errors\": 2, \"total_updated\": 3, \"runs_completed\": 1, \"total_processed\": 5, \"total_deactivated\": 0}, \"script_args\": {\"dry_run\": true, \"verbose\": true, \"interval\": 3600, \"log_file\": null, \"batch_size\": 5, \"continuous\": false, \"config_check\": false}}"
+    }
+  ]
+}

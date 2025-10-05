@@ -25,7 +25,12 @@
       "Bash(dir C:UserslinepAutotrading)",
       "Bash(python:*)",
       "Bash(move autotradingcorestatus_monitor.py autotradingcorestatus_handler.py)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)",
+      "Bash(git push:*)",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__get-library-docs"
     ],
     "deny": [],
     "ask": []

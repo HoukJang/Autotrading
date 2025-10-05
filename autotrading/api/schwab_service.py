@@ -332,6 +332,33 @@ class SchwabAPIService:
             logger.error(f"Failed to get quotes for {symbols}: {e}")
             raise SchwabAPIException(f"Failed to get quotes: {e}")
 
+    async def get_accounts(self) -> List[Dict[str, Any]]:
+        """
+        계좌 목록 조회
+
+        Returns:
+            계좌 목록
+        """
+        try:
+            accounts = await self._execute_with_resilience(
+                "get_accounts",
+                lambda: self._client.get_accounts()
+            )
+            account_data = accounts.json() if hasattr(accounts, 'json') else accounts
+
+            # 계좌 목록이 배열 형태로 반환되는지 확인
+            if isinstance(account_data, list):
+                return account_data
+            elif isinstance(account_data, dict) and 'accounts' in account_data:
+                return account_data['accounts']
+            else:
+                logger.warning(f"Unexpected account data format: {account_data}")
+                return []
+
+        except Exception as e:
+            logger.error(f"Failed to get accounts: {e}")
+            raise SchwabAPIException(f"Failed to get accounts: {e}")
+
     async def get_account_info(self, account_hash: str) -> Dict[str, Any]:
         """
         계좌 정보 조회
@@ -370,7 +397,34 @@ class SchwabAPIService:
                 lambda: self._client.place_order(account_hash, order)
             )
             logger.info(f"Order placed successfully for account {account_hash}")
-            return result.json() if hasattr(result, 'json') else result
+
+            # 201 Created 응답 처리 (주문 성공)
+            if hasattr(result, 'status_code') and result.status_code == 201:
+                # 성공적인 주문은 보통 빈 응답이나 Location 헤더만 반환
+                order_id = None
+                if hasattr(result, 'headers') and 'Location' in result.headers:
+                    # Location 헤더에서 주문 ID 추출
+                    location = result.headers['Location']
+                    if '/orders/' in location:
+                        order_id = location.split('/orders/')[-1]
+
+                return {
+                    'status': 'success',
+                    'status_code': result.status_code,
+                    'order_id': order_id,
+                    'message': 'Order placed successfully'
+                }
+
+            # 다른 응답의 경우 JSON 파싱 시도
+            try:
+                return result.json() if hasattr(result, 'json') else result
+            except Exception:
+                # JSON 파싱 실패 시 상태 정보만 반환
+                return {
+                    'status': 'unknown',
+                    'status_code': getattr(result, 'status_code', None),
+                    'message': 'Order response received but could not parse JSON'
+                }
 
         except Exception as e:
             logger.error(f"Failed to place order for {account_hash}: {e}")
