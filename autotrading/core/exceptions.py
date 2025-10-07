@@ -141,6 +141,13 @@ class RiskError(TradingSystemError):
         super().__init__(message, component='risk', **kwargs)
 
 
+class ExecutionError(TradingSystemError):
+    """Order execution related errors"""
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(message, component='execution', **kwargs)
+
+
 class StrategyError(TradingSystemError):
     """Strategy-related errors"""
 

@@ -1,7 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(time:*)"
+      "Bash(time:*)",
+      "Bash(venv/Scripts/python.exe tests/test_phase2_ib.py:*)",
+      "Bash(venvScriptspython.exe autotradingteststest_phase2_ib_async.py)",
+      "Bash(venv/Scripts/python.exe:*)",
+      "Bash(autotrading/venv/Scripts/python.exe autotrading/tests/test_phase2_ib_async.py)",
+      "Bash(autotrading/venv/Scripts/python.exe autotrading/tests/test_phase2_ib_real.py)",
+      "Bash(git log:*)",
+      "Bash(cat:*)",
+      "Bash(if exist nul del nul)",
+      "Bash(if exist test_tws_connection.py del test_tws_connection.py)",
+      "Bash(if exist:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []
