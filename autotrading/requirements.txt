@@ -1,0 +1,22 @@
+# Core Dependencies
+ib_async>=0.9.86
+asyncpg>=0.27.0
+
+# Database
+psycopg2-binary>=2.9.6
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Configuration
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+PyYAML>=6.0
+
+# Logging
+python-json-logger>=2.0.7
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
