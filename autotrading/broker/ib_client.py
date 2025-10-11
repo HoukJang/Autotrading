@@ -126,12 +126,25 @@ class IBClient:
             return True
 
         try:
-            # Create contract
-            contract = ContractFactory.create_continuous_futures(symbol)
+            # Create front month contract
+            contract = ContractFactory.create_futures(symbol).to_ib_contract()
+
+            # Qualify contract to get all available contracts
+            qualified_contracts = await self._ib.qualifyContractsAsync(contract)
+
+            if not qualified_contracts or len(qualified_contracts) == 0:
+                logger.error(f"Failed to qualify contract for {symbol}")
+                return False
+
+            # Sort by expiry date and use the front month (nearest expiry)
+            qualified_contracts.sort(key=lambda c: c.lastTradeDateOrContractMonth)
+            qualified_contract = qualified_contracts[0]
+
+            logger.info(f"Qualified contract for {symbol}: {qualified_contract.localSymbol} (expires: {qualified_contract.lastTradeDateOrContractMonth}), conId={qualified_contract.conId}")
 
             # Request market data
             ticker = self._ib.reqMktData(
-                contract,
+                qualified_contract,
                 genericTickList='',
                 snapshot=False,
                 regulatorySnapshot=False,
@@ -241,11 +254,23 @@ class IBClient:
             # Create contract
             contract = ContractFactory.create_futures(symbol).to_ib_contract()
 
+            # Qualify contract to get all available contracts
+            qualified_contracts = await self._ib.qualifyContractsAsync(contract)
+
+            if not qualified_contracts or len(qualified_contracts) == 0:
+                raise ExecutionError(f"Failed to qualify contract for {symbol}")
+
+            # Sort by expiry date and use the front month (nearest expiry)
+            qualified_contracts.sort(key=lambda c: c.lastTradeDateOrContractMonth)
+            qualified_contract = qualified_contracts[0]
+
+            logger.info(f"Qualified contract for order: {symbol} {qualified_contract.localSymbol} (expires: {qualified_contract.lastTradeDateOrContractMonth}), conId={qualified_contract.conId}")
+
             # Create market order
             order = MarketOrder(action=action, totalQuantity=abs(quantity))
 
             # Place order
-            trade = self._ib.placeOrder(contract, order)
+            trade = self._ib.placeOrder(qualified_contract, order)
 
             # Store active order
             self._active_orders[trade.order.orderId] = trade
@@ -258,7 +283,7 @@ class IBClient:
                 self._on_order_fill(trade, fill)
             )
 
-            logger.info(f"Placed market order: {action} {quantity} {symbol}")
+            logger.info(f"Placed market order: {action} {quantity} {symbol}, Order ID: {trade.order.orderId}")
             return trade.order.orderId
 
         except Exception as e:
@@ -449,24 +474,37 @@ class IBClient:
             return {}
 
         try:
-            # Request account summary
-            summary = self._ib.accountSummary()
+            # Get managed accounts
+            accounts = self._ib.managedAccounts()
+            if not accounts:
+                logger.warning("No managed accounts found")
+                return {}
+
+            account_id = accounts[0]
+
+            # Request account summary using reqAccountSummary
+            summary = await self._ib.reqAccountSummaryAsync()
 
             account_dict = {}
             for item in summary:
                 account_dict[item.tag] = {
                     'value': item.value,
-                    'currency': item.currency
+                    'currency': item.currency,
+                    'account': item.account
                 }
 
             # Get key values
             result = {
+                'account_id': account_id,
                 'net_liquidation': float(account_dict.get('NetLiquidation', {}).get('value', 0)),
+                'available_funds': float(account_dict.get('AvailableFunds', {}).get('value', 0)),
                 'buying_power': float(account_dict.get('BuyingPower', {}).get('value', 0)),
+                'excess_liquidity': float(account_dict.get('ExcessLiquidity', {}).get('value', 0)),
                 'total_cash': float(account_dict.get('TotalCashValue', {}).get('value', 0)),
                 'realized_pnl': float(account_dict.get('RealizedPnL', {}).get('value', 0)),
                 'unrealized_pnl': float(account_dict.get('UnrealizedPnL', {}).get('value', 0)),
-                'margin_used': float(account_dict.get('InitMarginReq', {}).get('value', 0))
+                'full_init_margin_req': float(account_dict.get('FullInitMarginReq', {}).get('value', 0)),
+                'full_maint_margin_req': float(account_dict.get('FullMaintMarginReq', {}).get('value', 0))
             }
 
             return result

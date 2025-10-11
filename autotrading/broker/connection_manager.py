@@ -114,7 +114,6 @@ class IBConnectionManager:
             # Verify connection
             if self.ib.isConnected():
                 self.state = ConnectionState.CONNECTED
-                self.reconnect_attempts = 0
                 self.last_health_check = datetime.now()
 
                 # Start health check task
@@ -200,7 +199,12 @@ class IBConnectionManager:
 
         try:
             # Try to reconnect
-            return await self.connect()
+            result = await self.connect()
+
+            if result:
+                logger.info("Reconnection successful")
+
+            return result
         except Exception as e:
             logger.error(f"Reconnection attempt failed: {e}")
 

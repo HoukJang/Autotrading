@@ -46,13 +46,25 @@ class BrokerConfig:
 
     @property
     def is_tws(self) -> bool:
-        """Check if using TWS (port 7497) or Gateway (port 4001)"""
-        return self.port == 7497
+        """Check if using TWS (ports 7496/7497) or Gateway (ports 4001/4002)"""
+        return self.port in [7496, 7497]
+
+    @property
+    def is_paper_trading(self) -> bool:
+        """Check if using paper trading (TWS: 7497, Gateway: 4002)"""
+        return self.port in [7497, 4002]
+
+    @property
+    def is_live_trading(self) -> bool:
+        """Check if using live trading (TWS: 7496, Gateway: 4001)"""
+        return self.port in [7496, 4001]
 
     @property
     def connection_name(self) -> str:
-        """Get connection type name"""
-        return "TWS" if self.is_tws else "IB Gateway"
+        """Get connection type name with trading mode"""
+        platform = "TWS" if self.is_tws else "IB Gateway"
+        mode = "Paper" if self.is_paper_trading else "Live"
+        return f"{platform} ({mode})"
 
 
 @dataclass
@@ -246,9 +258,11 @@ class TradingConfig:
             )
 
         # Check broker connection
-        if self.broker.port not in [7497, 4001]:
+        valid_ports = [7496, 7497, 4001, 4002]
+        if self.broker.port not in valid_ports:
             raise ConfigurationError(
-                f"Invalid IB port: {self.broker.port}. Must be 7497 (TWS) or 4001 (Gateway)",
+                f"Invalid IB port: {self.broker.port}. "
+                f"Must be 7496 (TWS Live), 7497 (TWS Paper), 4001 (Gateway Live), or 4002 (Gateway Paper)",
                 config_key='IB_PORT',
                 actual_value=self.broker.port
             )
