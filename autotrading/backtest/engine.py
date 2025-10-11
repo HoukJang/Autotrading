@@ -110,15 +110,22 @@ class BacktestEngine:
             for order in filled_orders:
                 strategy.on_order_filled(order, context)
 
-            # 2. Call strategy to generate new orders
+            # 2. Dynamic exit management (if strategy uses it)
+            position = broker.get_position()
+            if position and strategy.should_update_exits(position, context):
+                # Strategy wants to update exits
+                new_tp, new_sl = strategy.calculate_dynamic_exits(position, bar, context)
+                broker.update_exit_orders(new_tp, new_sl)
+
+            # 3. Call strategy to generate new orders
             new_orders = strategy.on_bar(bar, context)
 
-            # 3. Place new orders
+            # 4. Place new orders
             if new_orders:
                 for order in new_orders:
                     broker.place_order(order)
 
-            # 4. Track performance
+            # 5. Track performance
             tracker.record_bar(
                 timestamp=bar.timestamp,
                 equity=account.equity,

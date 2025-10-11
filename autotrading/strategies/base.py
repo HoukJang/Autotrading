@@ -30,8 +30,10 @@ class StrategyParams:
             entry_threshold: float = 0.02
             take_profit_pct: float = 0.02
             stop_loss_pct: float = 0.01
+            dynamic_exit: bool = False  # Enable trailing stop
     """
-    pass
+    # Exit management mode
+    dynamic_exit: bool = False  # If True, strategy updates TP/SL every bar
 
 
 class Bar:
@@ -205,6 +207,68 @@ class Strategy(ABC):
             context: Execution context
         """
         pass
+
+    def should_update_exits(self, position: 'Position', context: 'Context') -> bool:
+        """
+        Check if exit orders should be updated (for dynamic exit management).
+
+        Override this method to implement custom update conditions.
+        Default: Update every bar if dynamic_exit is enabled.
+
+        Args:
+            position: Current position
+            context: Execution context
+
+        Returns:
+            True if exits should be updated
+
+        Example:
+            def should_update_exits(self, position, context):
+                # Only update if price moved significantly
+                price_change = abs(context.bar.close - position.entry_price)
+                return price_change > self.params.update_threshold
+        """
+        return self.params.dynamic_exit
+
+    def calculate_dynamic_exits(self, position: 'Position', bar: 'Bar',
+                               context: 'Context') -> tuple[Optional['Order'], Optional['Order']]:
+        """
+        Calculate new TP/SL orders for dynamic exit management.
+
+        Override this method to implement custom dynamic exit logic.
+
+        Args:
+            position: Current position
+            bar: Current bar
+            context: Execution context
+
+        Returns:
+            Tuple of (take_profit_order, stop_loss_order)
+            Either can be None to skip that order.
+
+        Example:
+            def calculate_dynamic_exits(self, position, bar, context):
+                # Trailing stop: move SL up as price increases
+                current_price = bar.close
+                new_sl_price = max(
+                    position.entry_price * 0.99,  # Initial SL
+                    current_price * 0.98           # Trailing SL
+                )
+
+                sl_order = Order(
+                    symbol=position.symbol,
+                    side=OrderSide.SELL,
+                    order_type=OrderType.STOP,
+                    quantity=position.quantity,
+                    stop_price=new_sl_price,
+                    parent_id="virtual_parent"  # Dummy parent
+                )
+
+                return (None, sl_order)  # Only update SL
+        """
+        raise NotImplementedError(
+            "Strategies with dynamic_exit=True must implement calculate_dynamic_exits()"
+        )
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.params})"

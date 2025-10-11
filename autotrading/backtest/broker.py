@@ -47,6 +47,33 @@ class Broker(ABC):
         pass
 
     @abstractmethod
+    def cancel_exit_orders(self) -> List[Order]:
+        """
+        Cancel all pending exit orders (for trailing stop support).
+
+        Returns:
+            List of cancelled orders
+        """
+        pass
+
+    @abstractmethod
+    def update_exit_orders(self, new_tp_order: Optional[Order] = None,
+                          new_sl_order: Optional[Order] = None) -> List[str]:
+        """
+        Update exit orders (cancel old, place new).
+
+        This supports trailing stop and dynamic TP/SL adjustment.
+
+        Args:
+            new_tp_order: New take profit order (None to skip)
+            new_sl_order: New stop loss order (None to skip)
+
+        Returns:
+            List of new order IDs
+        """
+        pass
+
+    @abstractmethod
     def get_position(self) -> Optional[Position]:
         """
         Get current position.
@@ -135,6 +162,63 @@ class BacktestBroker(Broker):
                     self._pending_orders.remove(order)
                     return True
         return False
+
+    def cancel_exit_orders(self) -> List[Order]:
+        """
+        Cancel all pending exit orders (for trailing stop support).
+
+        Returns:
+            List of cancelled orders
+        """
+        cancelled_orders = []
+
+        for order in list(self._pending_orders):
+            # Exit orders are those with parent_id (child orders)
+            if order.is_exit_order() and order.status in [OrderStatus.PENDING, OrderStatus.ACTIVE]:
+                order.status = OrderStatus.CANCELLED
+                cancelled_orders.append(order)
+                self._pending_orders.remove(order)
+
+                # Remove from OCO groups
+                if order.oco_group_id and order.oco_group_id in self._oco_groups:
+                    del self._oco_groups[order.oco_group_id]
+
+        return cancelled_orders
+
+    def update_exit_orders(self, new_tp_order: Optional[Order] = None,
+                          new_sl_order: Optional[Order] = None) -> List[str]:
+        """
+        Update exit orders (cancel old, place new).
+
+        This supports trailing stop and dynamic TP/SL adjustment.
+
+        Args:
+            new_tp_order: New take profit order (None to skip)
+            new_sl_order: New stop loss order (None to skip)
+
+        Returns:
+            List of new order IDs
+        """
+        # Cancel existing exit orders
+        self.cancel_exit_orders()
+
+        # Place new orders
+        new_order_ids = []
+
+        if new_tp_order:
+            order_id = self.place_order(new_tp_order)
+            new_order_ids.append(order_id)
+
+        if new_sl_order:
+            order_id = self.place_order(new_sl_order)
+            new_order_ids.append(order_id)
+
+        # Create OCO group if both TP and SL provided
+        if new_tp_order and new_sl_order:
+            oco_group = OrderGroup([new_tp_order, new_sl_order])
+            self._oco_groups[oco_group.group_id] = oco_group
+
+        return new_order_ids
 
     def get_position(self) -> Optional[Position]:
         """Get current position."""
