@@ -11,14 +11,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal
 import logging
-import sys
-from pathlib import Path
 
-# Fix import path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from config import get_config
-from core.exceptions import DatabaseError
+from ..config import get_config
+from ..core.exceptions import DatabaseError
 
 logger = logging.getLogger(__name__)
 
@@ -386,6 +381,13 @@ class DatabaseManager:
         """
         await self.execute(query, key, value)
 
+    # Whitelist of allowed tables for cleanup operations (SQL injection prevention)
+    _ALLOWED_CLEANUP_TABLES = frozenset({
+        'market_data_1min',
+        'trading_signals',
+        'system_events'
+    })
+
     async def cleanup_old_data(self, days_to_keep: int = 365) -> int:
         """
         Clean up old data
@@ -406,6 +408,11 @@ class DatabaseManager:
 
         total_deleted = 0
         for table, condition in queries:
+            # Validate table name against whitelist (SQL injection prevention)
+            if table not in self._ALLOWED_CLEANUP_TABLES:
+                logger.warning(f"Attempted cleanup on non-whitelisted table: {table}")
+                continue
+            
             query = f"DELETE FROM {table} WHERE {condition}"
             result = await self.execute(query, cutoff_date)
             # Parse result string to get count

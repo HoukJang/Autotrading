@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
 Main Entry Point for Automated Trading System
+
+Run from the project root with:
+    python -m autotrading.main
+or:
+    python autotrading/main.py
 """
 
 import asyncio
@@ -9,12 +14,15 @@ import argparse
 import logging
 from pathlib import Path
 
-# Add current directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Ensure autotrading package is importable when running directly
+if __name__ == "__main__":
+    _project_root = Path(__file__).parent.parent
+    if str(_project_root) not in sys.path:
+        sys.path.insert(0, str(_project_root))
 
-from core import EventBus, TradingLogger, get_logger
-from config import get_config
-from database import get_db_manager
+from autotrading.core import EventBus, TradingLogger, get_logger
+from autotrading.config import get_config
+from autotrading.database import get_db_manager
 
 
 async def initialize_system():

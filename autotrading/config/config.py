@@ -244,11 +244,7 @@ class TradingConfig:
         Returns:
             True if valid, raises exception if not
         """
-        import sys
-        from pathlib import Path
-        # Add parent directory to path for imports
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from core.exceptions import ConfigurationError
+        from ..core.exceptions import ConfigurationError
 
         # Check database password
         if not self.database.password:

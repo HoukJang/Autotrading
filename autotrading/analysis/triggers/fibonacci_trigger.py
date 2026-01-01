@@ -8,7 +8,6 @@ Detects Fibonacci retracement level touches (80%/20%):
 
 from typing import Optional, Dict, Any
 import pandas as pd
-import numpy as np
 
 from .base import BaseTrigger, TriggerSignal
 from ..regime_detector import RegimeResult, RegimeType

@@ -105,18 +105,19 @@ python scripts/backtest.py --strategy ma_crossover --symbol ES --start 2024-01-0
 
 ```
 autotrading/
-├── config/                 # Configuration management
-├── core/                   # Core infrastructure (events, logging)
+├── config/                 # Configuration management (singleton pattern)
+├── core/                   # Core infrastructure (events, logging, exceptions)
 ├── database/               # Database models and migrations
-├── broker/                 # IB API integration
-├── data/                   # Market data processing
-├── strategies/             # Trading strategies
-├── execution/              # Order execution
-├── risk/                   # Risk management
-├── portfolio/              # Portfolio management
-├── monitoring/             # System monitoring
+├── broker/                 # IB API integration (connection, contracts, client)
+├── data/                   # Market data processing (bar builder, collector)
+├── strategies/             # Strategy base classes and samples
+├── strategy/               # Adaptive strategy management system
+├── analysis/               # Market analysis (regime detection, triggers)
+│   └── triggers/           # Technical triggers (Bollinger, MA Cross, etc.)
+├── backtest/               # Backtesting engine
 ├── tests/                  # Test suite
-└── scripts/                # Utility scripts
+├── scripts/                # Utility scripts
+└── utils/                  # Helper utilities
 ```
 
 ## 🔧 Configuration
@@ -168,17 +169,21 @@ pytest --cov=autotrading
 Create a new strategy:
 
 ```python
-from strategies.base_strategy import BaseStrategy
+from autotrading.strategies.base import Strategy, Bar
+from autotrading.backtest.orders import Order, OrderSide, OrderType
 
-class MyStrategy(BaseStrategy):
-    def on_bar(self, bar):
+class MyStrategy(Strategy):
+    def on_bar(self, bar: Bar, context) -> list:
         # Your strategy logic here
+        orders = []
         if self.should_buy(bar):
-            return Signal(
-                signal_type="BUY",
-                quantity=self.position_size,
-                price=bar.close
-            )
+            orders.append(Order(
+                symbol=bar.symbol,
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                quantity=1
+            ))
+        return orders
 ```
 
 ## ⚠️ Risk Management
@@ -269,15 +274,15 @@ For issues and questions:
 
 ## 🎯 Roadmap
 
-- [x] Phase 1: Infrastructure Foundation
-- [ ] Phase 2: IB API Integration
-- [ ] Phase 3: Data Processing Pipeline
-- [ ] Phase 4: Strategy Framework
-- [ ] Phase 5: Risk Management
-- [ ] Phase 6: Performance Monitoring
+- [x] Phase 1: Infrastructure Foundation (Config, Logging, Events)
+- [x] Phase 2: IB API Integration (Connection, Contracts, Client)
+- [x] Phase 3: Data Processing Pipeline (Bar Builder, Collector)
+- [x] Phase 4: Adaptive Strategy Framework (Regime Detection, Triggers)
+- [ ] Phase 5: Risk Management Enhancement
+- [ ] Phase 6: Performance Monitoring Dashboard
 
 ---
 
-**Version**: 1.0.0
-**Last Updated**: 2025-10-06
-**Status**: Development
+**Version**: 1.1.0
+**Last Updated**: 2026-01-01
+**Status**: Active Development

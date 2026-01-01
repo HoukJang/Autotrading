@@ -251,8 +251,8 @@ def update_env_file(password):
             f.writelines(lines)
 
         print(f"[OK] .env file updated with new password")
-        print(f"     Password: {password}")
-        print(f"     [WARNING] Keep this password safe!")
+        print(f"     Password has been saved to .env file (not displayed for security)")
+        print(f"     [WARNING] Keep your .env file secure!")
     else:
         print("[WARNING] No .env file found. Creating new one...")
         with open(env_path, 'w') as f:
@@ -308,7 +308,8 @@ HEALTH_CHECK_INTERVAL=30
 METRICS_INTERVAL=60
 PERFORMANCE_CALC_INTERVAL=300
 """)
-        print(f"[OK] New .env file created with password: {password}")
+        print(f"[OK] New .env file created with database credentials")
+        print(f"     Password has been saved to .env file (not displayed for security)")
 
 
 async def main():

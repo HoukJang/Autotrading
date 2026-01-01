@@ -6,21 +6,16 @@ Handles connection lifecycle, health monitoring, and automatic reconnection
 import asyncio
 import logging
 from typing import Optional, Callable, Dict, Any
-from datetime import datetime, timedelta
-from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 
 import ib_async
 from ib_async import IB
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from core.events import Event, EventType
-from core.event_bus import EventBus
-from core.exceptions import ConnectionError, TradingSystemError
-from config import get_config
+from ..core.events import Event, EventType
+from ..core.event_bus import EventBus
+from ..core.exceptions import ConnectionError, TradingSystemError
+from ..config import get_config
 
 logger = logging.getLogger(__name__)
 

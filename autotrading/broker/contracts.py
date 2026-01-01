@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 from decimal import Decimal
 
-from ib_async import Contract, Future, Stock, Option, Forex
+from ib_async import Future
 
 
 @dataclass
@@ -145,11 +145,53 @@ class ContractFactory:
         )
 
     @classmethod
+    def get_front_month_expiry(cls, reference_date: datetime = None) -> str:
+        """
+        Calculate the front month expiry for CME index futures.
+        
+        CME E-mini futures expire on the 3rd Friday of contract months (H, M, U, Z).
+        Contract months: March (H), June (M), September (U), December (Z)
+        
+        Args:
+            reference_date: Date to calculate from (default: now)
+            
+        Returns:
+            Front month expiry in YYYYMM format
+        """
+        if reference_date is None:
+            reference_date = datetime.now()
+        
+        # Contract months: 3, 6, 9, 12 (March, June, September, December)
+        contract_months = [3, 6, 9, 12]
+        
+        current_year = reference_date.year
+        current_month = reference_date.month
+        
+        # Find the next contract month
+        for month in contract_months:
+            if month >= current_month:
+                # Check if we're past the 3rd Friday of this month
+                third_friday = cls._get_third_friday(current_year, month)
+                if reference_date.date() <= third_friday:
+                    return f"{current_year}{month:02d}"
+        
+        # Next year's first contract (March)
+        return f"{current_year + 1}03"
+    
+    @staticmethod
+    def _get_third_friday(year: int, month: int):
+        """Get the 3rd Friday of a given month."""
+        from calendar import monthcalendar
+        cal = monthcalendar(year, month)
+        # Find all Fridays (index 4 in week)
+        fridays = [week[4] for week in cal if week[4] != 0]
+        return datetime(year, month, fridays[2]).date()
+
+    @classmethod
     def create_es_futures(cls, expiry: Optional[str] = None) -> FuturesContract:
         """Create ES (E-mini S&P 500) futures contract"""
         if expiry is None:
-            # Use December 2024 front month
-            expiry = '202412'
+            expiry = cls.get_front_month_expiry()
         return cls.create_futures('ES', expiry)
 
     @classmethod

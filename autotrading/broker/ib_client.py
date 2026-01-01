@@ -5,23 +5,19 @@ Wraps ib_async and integrates with event bus
 
 import asyncio
 import logging
-from typing import Optional, List, Dict, Any, Set
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from decimal import Decimal
 
-from ib_async import IB, Contract, Order, Trade, Ticker, BarData
-from ib_async import MarketOrder, LimitOrder, StopOrder, BracketOrder
+from ib_async import IB, Trade, Ticker, BarData
+from ib_async import MarketOrder, LimitOrder, BracketOrder
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from broker.connection_manager import IBConnectionManager, ConnectionState
-from broker.contracts import ContractFactory
-from core.events import Event, EventType, MarketDataEvent, OrderEvent, FillEvent
-from core.event_bus import EventBus
-from core.exceptions import TradingSystemError, ExecutionError
-from config import get_config
+from .connection_manager import IBConnectionManager, ConnectionState
+from .contracts import ContractFactory
+from ..core.events import Event, EventType
+from ..core.event_bus import EventBus
+from ..core.exceptions import TradingSystemError, ExecutionError
+from ..config import get_config
 
 logger = logging.getLogger(__name__)
 
