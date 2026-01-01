@@ -307,3 +307,59 @@ class ValidationError(TradingSystemError):
         })
         kwargs['details'] = details
         super().__init__(message, component='validation', **kwargs)
+
+
+class MarketDataError(TradingSystemError):
+    """Market data subscription/retrieval errors"""
+
+    def __init__(
+        self,
+        message: str,
+        symbol: Optional[str] = None,
+        operation: Optional[str] = None,
+        **kwargs
+    ):
+        """
+        Initialize market data error
+
+        Args:
+            message: Error message
+            symbol: Trading symbol
+            operation: Operation that failed (subscribe, unsubscribe, etc.)
+            **kwargs: Additional arguments
+        """
+        details = kwargs.get('details', {})
+        details.update({
+            'symbol': symbol,
+            'operation': operation
+        })
+        kwargs['details'] = details
+        super().__init__(message, component='market_data', **kwargs)
+
+
+class ContractError(TradingSystemError):
+    """Contract qualification/creation errors"""
+
+    def __init__(
+        self,
+        message: str,
+        symbol: Optional[str] = None,
+        contract_type: Optional[str] = None,
+        **kwargs
+    ):
+        """
+        Initialize contract error
+
+        Args:
+            message: Error message
+            symbol: Trading symbol
+            contract_type: Type of contract (futures, options, etc.)
+            **kwargs: Additional arguments
+        """
+        details = kwargs.get('details', {})
+        details.update({
+            'symbol': symbol,
+            'contract_type': contract_type
+        })
+        kwargs['details'] = details
+        super().__init__(message, component='contract', **kwargs)

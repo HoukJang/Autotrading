@@ -16,7 +16,10 @@ from .connection_manager import IBConnectionManager, ConnectionState
 from .contracts import ContractFactory
 from ..core.events import Event, EventType
 from ..core.event_bus import EventBus
-from ..core.exceptions import TradingSystemError, ExecutionError
+from ..core.exceptions import (
+    TradingSystemError, ExecutionError, ValidationError,
+    MarketDataError, ContractError, ConnectionError as IBConnectionError
+)
 from ..config import get_config
 
 logger = logging.getLogger(__name__)
@@ -84,6 +87,57 @@ class IBClient:
 
         logger.info("IBClient initialized")
 
+    def _validate_order_params(self, symbol: str, quantity: int, action: str) -> None:
+        """
+        Validate order parameters
+        
+        Args:
+            symbol: Trading symbol
+            quantity: Order quantity
+            action: Order action (BUY/SELL)
+            
+        Raises:
+            ValidationError: If parameters are invalid
+        """
+        if not symbol or not symbol.strip():
+            raise ValidationError(
+                "Symbol cannot be empty",
+                field='symbol',
+                expected='non-empty string',
+                actual=symbol
+            )
+        
+        if quantity <= 0:
+            raise ValidationError(
+                f"Quantity must be positive, got {quantity}",
+                field='quantity',
+                expected='> 0',
+                actual=quantity
+            )
+        
+        valid_actions = ('BUY', 'SELL')
+        if action.upper() not in valid_actions:
+            raise ValidationError(
+                f"Action must be BUY or SELL, got '{action}'",
+                field='action',
+                expected='BUY or SELL',
+                actual=action
+            )
+
+    def _ensure_connected(self) -> None:
+        """
+        Ensure client is connected to IB API
+        
+        Raises:
+            IBConnectionError: If not connected
+        """
+        if not self._ib or not self.connection_manager.is_connected():
+            raise IBConnectionError(
+                "Not connected to IB API",
+                host=self.connection_manager.host,
+                port=self.connection_manager.port
+            )
+
     async def connect(self) -> bool:
         """
         Connect to IB API
@@ -118,10 +172,22 @@ class IBClient:
 
         Returns:
             True if subscription successful
+            
+        Raises:
+            IBConnectionError: If not connected
+            ValidationError: If symbol is invalid
+            MarketDataError: If subscription fails
         """
-        if not self._ib or not self.connection_manager.is_connected():
-            logger.error("Not connected to IB API")
-            return False
+        # Validate input
+        if not symbol or not symbol.strip():
+            raise ValidationError(
+                "Symbol cannot be empty",
+                field='symbol',
+                expected='non-empty string',
+                actual=symbol
+            )
+        
+        self._ensure_connected()
 
         async with self._subscriptions_lock:
             if symbol in self._market_data_subscriptions:
@@ -136,8 +202,11 @@ class IBClient:
                 qualified_contracts = await self._ib.qualifyContractsAsync(contract)
 
                 if not qualified_contracts or len(qualified_contracts) == 0:
-                    logger.error(f"Failed to qualify contract for {symbol}")
-                    return False
+                    raise ContractError(
+                        f"Failed to qualify contract for {symbol}",
+                        symbol=symbol,
+                        contract_type='futures'
+                    )
 
                 # Sort by expiry date and use the front month (nearest expiry)
                 qualified_contracts.sort(key=lambda c: c.lastTradeDateOrContractMonth)
@@ -165,9 +234,15 @@ class IBClient:
                 logger.info(f"Subscribed to market data for {symbol}")
                 return True
 
+            except (ContractError, ValidationError):
+                raise
             except Exception as e:
                 logger.error(f"Failed to subscribe to {symbol}: {e}")
-                return False
+                raise MarketDataError(
+                    f"Failed to subscribe to market data: {e}",
+                    symbol=symbol,
+                    operation='subscribe'
+                )
 
     async def unsubscribe_market_data(self, symbol: str) -> bool:
         """
@@ -178,6 +253,9 @@ class IBClient:
 
         Returns:
             True if unsubscription successful
+            
+        Raises:
+            MarketDataError: If unsubscription fails
         """
         async with self._subscriptions_lock:
             if symbol not in self._market_data_subscriptions:
@@ -197,7 +275,11 @@ class IBClient:
 
             except Exception as e:
                 logger.error(f"Failed to unsubscribe from {symbol}: {e}")
-                return False
+                raise MarketDataError(
+                    f"Failed to unsubscribe from market data: {e}",
+                    symbol=symbol,
+                    operation='unsubscribe'
+                )
 
     async def request_historical_bars(self, symbol: str, duration: str = "1 D",
                                      bar_size: str = "1 min",
@@ -271,9 +353,16 @@ class IBClient:
 
         Returns:
             Order ID
+            
+        Raises:
+            ValidationError: If parameters are invalid
+            IBConnectionError: If not connected
+            ContractError: If contract qualification fails
+            ExecutionError: If order placement fails
         """
-        if not self._ib or not self.connection_manager.is_connected():
-            raise ExecutionError("Not connected to IB API")
+        # Validate inputs
+        self._validate_order_params(symbol, quantity, action)
+        self._ensure_connected()
 
         try:
             # Create contract
@@ -283,7 +372,11 @@ class IBClient:
             qualified_contracts = await self._ib.qualifyContractsAsync(contract)
 
             if not qualified_contracts or len(qualified_contracts) == 0:
-                raise ExecutionError(f"Failed to qualify contract for {symbol}")
+                raise ContractError(
+                    f"Failed to qualify contract for {symbol}",
+                    symbol=symbol,
+                    contract_type='futures'
+                )
 
             # Sort by expiry date and use the front month (nearest expiry)
             qualified_contracts.sort(key=lambda c: c.lastTradeDateOrContractMonth)
@@ -292,7 +385,7 @@ class IBClient:
             logger.info(f"Qualified contract for order: {symbol} {qualified_contract.localSymbol} (expires: {qualified_contract.lastTradeDateOrContractMonth}), conId={qualified_contract.conId}")
 
             # Create market order
-            order = MarketOrder(action=action, totalQuantity=abs(quantity))
+            order = MarketOrder(action=action.upper(), totalQuantity=abs(quantity))
 
             # Place order
             trade = self._ib.placeOrder(qualified_contract, order)
@@ -312,6 +405,8 @@ class IBClient:
             logger.info(f"Placed market order: {action} {quantity} {symbol}, Order ID: {trade.order.orderId}")
             return trade.order.orderId
 
+        except (ValidationError, ContractError):
+            raise
         except Exception as e:
             logger.error(f"Failed to place market order: {e}")
             raise ExecutionError(f"Market order failed: {e}")
@@ -329,9 +424,23 @@ class IBClient:
 
         Returns:
             Order ID
+            
+        Raises:
+            ValidationError: If parameters are invalid
+            IBConnectionError: If not connected
+            ExecutionError: If order placement fails
         """
-        if not self._ib or not self.connection_manager.is_connected():
-            raise ExecutionError("Not connected to IB API")
+        # Validate inputs
+        self._validate_order_params(symbol, quantity, action)
+        self._ensure_connected()
+        
+        if price <= 0:
+            raise ValidationError(
+                f"Price must be positive, got {price}",
+                field='price',
+                expected='> 0',
+                actual=price
+            )
 
         try:
             # Create contract
@@ -339,7 +448,7 @@ class IBClient:
 
             # Create limit order
             order = LimitOrder(
-                action=action,
+                action=action.upper(),
                 totalQuantity=abs(quantity),
                 lmtPrice=float(price)
             )
@@ -362,6 +471,8 @@ class IBClient:
             logger.info(f"Placed limit order: {action} {quantity} {symbol} @ {price}")
             return trade.order.orderId
 
+        except ValidationError:
+            raise
         except Exception as e:
             logger.error(f"Failed to place limit order: {e}")
             raise ExecutionError(f"Limit order failed: {e}")
@@ -382,9 +493,25 @@ class IBClient:
 
         Returns:
             List of order IDs [parent, stop, target]
+            
+        Raises:
+            ValidationError: If parameters are invalid
+            IBConnectionError: If not connected
+            ExecutionError: If order placement fails
         """
-        if not self._ib or not self.connection_manager.is_connected():
-            raise ExecutionError("Not connected to IB API")
+        # Validate inputs
+        self._validate_order_params(symbol, quantity, action)
+        self._ensure_connected()
+        
+        # Validate prices
+        for name, price in [('entry_price', entry_price), ('stop_price', stop_price), ('target_price', target_price)]:
+            if price <= 0:
+                raise ValidationError(
+                    f"{name} must be positive, got {price}",
+                    field=name,
+                    expected='> 0',
+                    actual=price
+                )
 
         try:
             # Create contract
@@ -392,7 +519,7 @@ class IBClient:
 
             # Create bracket order
             bracket = BracketOrder(
-                action=action,
+                action=action.upper(),
                 quantity=abs(quantity),
                 limitPrice=float(entry_price),
                 stopPrice=float(stop_price),
@@ -425,6 +552,8 @@ class IBClient:
 
             return order_ids
 
+        except ValidationError:
+            raise
         except Exception as e:
             logger.error(f"Failed to place bracket order: {e}")
             raise ExecutionError(f"Bracket order failed: {e}")
@@ -438,14 +567,28 @@ class IBClient:
 
         Returns:
             True if cancellation successful
+            
+        Raises:
+            ValidationError: If order_id is invalid
+            IBConnectionError: If not connected
+            ExecutionError: If cancellation fails
         """
-        if not self._ib or not self.connection_manager.is_connected():
-            return False
+        if order_id <= 0:
+            raise ValidationError(
+                f"Order ID must be positive, got {order_id}",
+                field='order_id',
+                expected='> 0',
+                actual=order_id
+            )
+        
+        self._ensure_connected()
 
         async with self._orders_lock:
             if order_id not in self._active_orders:
-                logger.warning(f"Order {order_id} not found")
-                return False
+                raise ExecutionError(
+                    f"Order {order_id} not found in active orders",
+                    details={'order_id': order_id}
+                )
 
             try:
                 trade = self._active_orders[order_id]
@@ -456,7 +599,7 @@ class IBClient:
 
             except Exception as e:
                 logger.error(f"Failed to cancel order {order_id}: {e}")
-                return False
+                raise ExecutionError(f"Failed to cancel order {order_id}: {e}")
 
     async def get_positions(self) -> List[Dict[str, Any]]:
         """
