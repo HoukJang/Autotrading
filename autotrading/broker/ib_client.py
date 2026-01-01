@@ -80,6 +80,12 @@ class IBClient:
 
         # Request ID management
         self._next_order_id = 1
+        
+        # Contract qualification cache (symbol -> qualified contract)
+        # Reduces API calls for frequently traded symbols
+        self._contract_cache: Dict[str, Any] = {}
+        self._contract_cache_ttl = 300  # Cache TTL in seconds (5 minutes)
+        self._contract_cache_timestamps: Dict[str, datetime] = {}
 
         # Setup callbacks
         self.connection_manager.add_connection_callback(self._on_connected)
@@ -138,6 +144,67 @@ class IBClient:
                 port=self.connection_manager.port
             )
 
+    async def _get_qualified_contract(self, symbol: str):
+        """
+        Get qualified contract for a symbol, using cache when possible.
+        
+        Args:
+            symbol: Futures symbol
+            
+        Returns:
+            Qualified IB Contract
+            
+        Raises:
+            ContractError: If contract cannot be qualified
+        """
+        # Check cache first
+        if symbol in self._contract_cache:
+            cache_time = self._contract_cache_timestamps.get(symbol)
+            if cache_time and (datetime.now() - cache_time).total_seconds() < self._contract_cache_ttl:
+                logger.debug(f"Using cached contract for {symbol}")
+                return self._contract_cache[symbol]
+        
+        # Qualify contract
+        contract = ContractFactory.create_futures(symbol).to_ib_contract()
+        qualified_contracts = await self._ib.qualifyContractsAsync(contract)
+        
+        if not qualified_contracts or len(qualified_contracts) == 0:
+            raise ContractError(
+                f"Failed to qualify contract for {symbol}",
+                symbol=symbol,
+                contract_type='futures'
+            )
+        
+        # Sort by expiry date and use the front month (nearest expiry)
+        qualified_contracts.sort(key=lambda c: c.lastTradeDateOrContractMonth)
+        qualified_contract = qualified_contracts[0]
+        
+        # Cache the result
+        self._contract_cache[symbol] = qualified_contract
+        self._contract_cache_timestamps[symbol] = datetime.now()
+        
+        logger.info(
+            f"Qualified contract for {symbol}: {qualified_contract.localSymbol} "
+            f"(expires: {qualified_contract.lastTradeDateOrContractMonth}), "
+            f"conId={qualified_contract.conId}"
+        )
+        
+        return qualified_contract
+
+    def _clear_contract_cache(self, symbol: Optional[str] = None) -> None:
+        """
+        Clear contract cache.
+        
+        Args:
+            symbol: Optional specific symbol to clear. If None, clears all.
+        """
+        if symbol:
+            self._contract_cache.pop(symbol, None)
+            self._contract_cache_timestamps.pop(symbol, None)
+        else:
+            self._contract_cache.clear()
+            self._contract_cache_timestamps.clear()
+
     async def connect(self) -> bool:
         """
         Connect to IB API
@@ -195,24 +262,8 @@ class IBClient:
                 return True
 
             try:
-                # Create front month contract
-                contract = ContractFactory.create_futures(symbol).to_ib_contract()
-
-                # Qualify contract to get all available contracts
-                qualified_contracts = await self._ib.qualifyContractsAsync(contract)
-
-                if not qualified_contracts or len(qualified_contracts) == 0:
-                    raise ContractError(
-                        f"Failed to qualify contract for {symbol}",
-                        symbol=symbol,
-                        contract_type='futures'
-                    )
-
-                # Sort by expiry date and use the front month (nearest expiry)
-                qualified_contracts.sort(key=lambda c: c.lastTradeDateOrContractMonth)
-                qualified_contract = qualified_contracts[0]
-
-                logger.info(f"Qualified contract for {symbol}: {qualified_contract.localSymbol} (expires: {qualified_contract.lastTradeDateOrContractMonth}), conId={qualified_contract.conId}")
+                # Get qualified contract (uses cache)
+                qualified_contract = await self._get_qualified_contract(symbol)
 
                 # Request market data
                 ticker = self._ib.reqMktData(
@@ -365,24 +416,8 @@ class IBClient:
         self._ensure_connected()
 
         try:
-            # Create contract
-            contract = ContractFactory.create_futures(symbol).to_ib_contract()
-
-            # Qualify contract to get all available contracts
-            qualified_contracts = await self._ib.qualifyContractsAsync(contract)
-
-            if not qualified_contracts or len(qualified_contracts) == 0:
-                raise ContractError(
-                    f"Failed to qualify contract for {symbol}",
-                    symbol=symbol,
-                    contract_type='futures'
-                )
-
-            # Sort by expiry date and use the front month (nearest expiry)
-            qualified_contracts.sort(key=lambda c: c.lastTradeDateOrContractMonth)
-            qualified_contract = qualified_contracts[0]
-
-            logger.info(f"Qualified contract for order: {symbol} {qualified_contract.localSymbol} (expires: {qualified_contract.lastTradeDateOrContractMonth}), conId={qualified_contract.conId}")
+            # Get qualified contract (uses cache)
+            qualified_contract = await self._get_qualified_contract(symbol)
 
             # Create market order
             order = MarketOrder(action=action.upper(), totalQuantity=abs(quantity))

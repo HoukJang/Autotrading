@@ -11,9 +11,10 @@ Detects market regime (TREND_UP, TREND_DOWN, RANGE) using:
 7. Composite scoring system with configurable weights
 """
 
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import pandas as pd
 import numpy as np
 from scipy import stats
@@ -164,9 +165,13 @@ class RegimeDetector:
         self.weight_bb = weight_bb
         self.weight_snr = weight_snr
 
-        # State for hysteresis
-        self._regime_history: list[RegimeType] = []
+        # State for hysteresis (use deque for efficient fixed-size history)
+        max_history = self.confirmation_bars * 2
+        self._regime_history: deque = deque(maxlen=max_history)
         self._confirmed_regime: Optional[RegimeType] = None
+        
+        # Cache for linear regression results to avoid duplicate calculations
+        self._linreg_cache: Dict[int, Tuple[float, float, float, float, float]] = {}
 
     def detect(self, history: pd.DataFrame) -> RegimeResult:
         """
@@ -326,11 +331,13 @@ class RegimeDetector:
         if len(window_data) < self.r2_window:
             return 0.0, {'r2': 0.0, 'slope': 0.0}, 0.0
 
-        # Linear regression
+        # Linear regression (with caching)
         x = np.arange(len(window_data))
         y = window_data.values
 
-        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+        slope, intercept, r_value, p_value, std_err = self._get_linregress(
+            self.r2_window, x, y
+        )
         r2 = r_value ** 2
 
         # Score calculation
@@ -358,6 +365,45 @@ class RegimeDetector:
         }
 
         return r2_score, metadata, slope
+    
+    def _get_linregress(self, window: int, x: np.ndarray, y: np.ndarray) -> Tuple[float, float, float, float, float]:
+        """
+        Get linear regression results with caching.
+        
+        Cache key is based on window size and last data point hash.
+        This avoids duplicate linregress calls when r2_window == snr_window.
+        
+        Args:
+            window: Window size used
+            x: X values (indices)
+            y: Y values (prices)
+            
+        Returns:
+            (slope, intercept, r_value, p_value, std_err)
+        """
+        # Create cache key from window and data hash
+        data_hash = hash((window, y.tobytes()))
+        
+        if data_hash in self._linreg_cache:
+            return self._linreg_cache[data_hash]
+        
+        # Calculate and cache
+        result = stats.linregress(x, y)
+        self._linreg_cache[data_hash] = (
+            result.slope, result.intercept, result.rvalue, 
+            result.pvalue, result.stderr
+        )
+        
+        # Keep cache small (only need current bar's calculations)
+        if len(self._linreg_cache) > 10:
+            # Clear old entries
+            self._linreg_cache.clear()
+            self._linreg_cache[data_hash] = (
+                result.slope, result.intercept, result.rvalue,
+                result.pvalue, result.stderr
+            )
+        
+        return self._linreg_cache[data_hash]
 
     def _score_to_regime(self, trend_score: float, slope: float) -> RegimeType:
         """
@@ -399,13 +445,8 @@ class RegimeDetector:
         Returns:
             (confirmed_regime, confidence)
         """
-        # Add to history
+        # Add to history (deque automatically maintains max size)
         self._regime_history.append(raw_regime)
-
-        # Keep only recent history
-        max_history = self.confirmation_bars * 2
-        if len(self._regime_history) > max_history:
-            self._regime_history = self._regime_history[-max_history:]
 
         # Check if we have enough consecutive bars
         if len(self._regime_history) < self.confirmation_bars:
@@ -554,11 +595,13 @@ class RegimeDetector:
         if len(window_data) < self.snr_window:
             return 0.0, {'snr': 0.0, 'slope': 0.0, 'resid_std': 0.0}
 
-        # Linear regression
+        # Linear regression (with caching - reuses result if same window as r2)
         x = np.arange(len(window_data))
         y = window_data.values
 
-        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+        slope, intercept, r_value, p_value, std_err = self._get_linregress(
+            self.snr_window, x, y
+        )
 
         # Calculate residuals
         y_pred = slope * x + intercept
@@ -573,10 +616,10 @@ class RegimeDetector:
 
         # Score calculation
         if snr >= self.snr_trend_threshold:
-            # High SNR → trend
+            # High SNR -> trend
             snr_score = min(1.0, snr / (self.snr_trend_threshold * 2))
         else:
-            # Low SNR → range
+            # Low SNR -> range
             snr_score = max(-1.0, (snr - self.snr_trend_threshold) / self.snr_trend_threshold)
 
         metadata = {
@@ -626,5 +669,6 @@ class RegimeDetector:
 
     def reset(self):
         """Reset detector state (useful for new backtest runs)."""
-        self._regime_history = []
+        self._regime_history.clear()
         self._confirmed_regime = None
+        self._linreg_cache.clear()
