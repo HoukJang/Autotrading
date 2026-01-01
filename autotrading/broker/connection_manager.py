@@ -48,12 +48,13 @@ class IBConnectionManager:
     Manages IB API connection with automatic reconnection and health monitoring
     """
 
-    def __init__(self, event_bus: EventBus = None):
+    def __init__(self, event_bus: EventBus = None, client_id: Optional[int] = None):
         """
         Initialize connection manager
 
         Args:
             event_bus: Event bus for publishing connection events
+            client_id: Optional client ID override (for multi-connection scenarios)
         """
         self.config = get_config()
         self.event_bus = event_bus
@@ -63,7 +64,7 @@ class IBConnectionManager:
         # Connection parameters
         self.host = self.config.broker.host
         self.port = self.config.broker.port
-        self.client_id = self.config.broker.client_id
+        self.client_id = client_id if client_id is not None else self.config.broker.client_id
 
         # Reconnection settings
         self.max_reconnect_attempts = 5

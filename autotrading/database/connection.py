@@ -279,22 +279,20 @@ class DatabaseManager:
 
         try:
             async with self.acquire() as conn:
-                # Prepare statement for better performance
-                await conn.execute("PREPARE insert_bar AS " + query)
-
-                count = 0
-                for bar in bars:
-                    await conn.execute(
-                        "EXECUTE insert_bar ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                # Convert bars to tuples for executemany
+                values = [
+                    (
                         bar['symbol'], bar['timestamp'],
                         bar['open_price'], bar['high_price'],
                         bar['low_price'], bar['close_price'],
                         bar['volume'], bar.get('vwap'), bar.get('tick_count')
                     )
-                    count += 1
+                    for bar in bars
+                ]
 
-                await conn.execute("DEALLOCATE insert_bar")
-                return count
+                # Use executemany for bulk insert
+                await conn.executemany(query, values)
+                return len(values)
 
         except Exception as e:
             logger.error(f"Bulk insert failed: {e}")

@@ -54,16 +54,17 @@ class IBClient:
     Main IB API client with event bus integration
     """
 
-    def __init__(self, event_bus: EventBus):
+    def __init__(self, event_bus: EventBus, client_id: Optional[int] = None):
         """
         Initialize IB client
 
         Args:
             event_bus: Event bus for publishing events
+            client_id: Optional client ID override (for multi-connection scenarios)
         """
         self.config = get_config()
         self.event_bus = event_bus
-        self.connection_manager = IBConnectionManager(event_bus)
+        self.connection_manager = IBConnectionManager(event_bus, client_id=client_id)
 
         # IB instance (from connection manager)
         self._ib: Optional[IB] = None
@@ -196,7 +197,9 @@ class IBClient:
             return False
 
     async def request_historical_bars(self, symbol: str, duration: str = "1 D",
-                                     bar_size: str = "1 min") -> List[BarData]:
+                                     bar_size: str = "1 min",
+                                     contract_month: Optional[str] = None,
+                                     target_date: Optional[datetime] = None) -> List[BarData]:
         """
         Request historical bar data
 
@@ -204,6 +207,8 @@ class IBClient:
             symbol: Futures symbol
             duration: Duration string (e.g., "1 D", "1 W")
             bar_size: Bar size (e.g., "1 min", "5 mins")
+            contract_month: Specific contract month in YYYYMM format (None for continuous)
+            target_date: Target date for historical data (if specified, endDateTime is calculated)
 
         Returns:
             List of historical bars
@@ -213,12 +218,29 @@ class IBClient:
 
         try:
             # Create contract
-            contract = ContractFactory.create_continuous_futures(symbol)
+            if contract_month:
+                # Use specific contract month
+                futures_contract = ContractFactory.create_futures(symbol, expiry=contract_month)
+                contract = futures_contract.to_ib_contract()
+            else:
+                # Use continuous contract
+                contract = ContractFactory.create_continuous_futures(symbol)
+
+            # Calculate endDateTime if target_date is provided
+            if target_date:
+                # For full trading day: use next day 17:00 (5 PM)
+                # ES trading: 17:00 ~ next day 16:00 (23 hours, excluding 1-hour break)
+                from datetime import timedelta
+                end_date = target_date + timedelta(days=1)
+                end_datetime_str = end_date.strftime('%Y%m%d 17:00:00')
+                logger.info(f"Requesting data for {target_date.strftime('%Y-%m-%d')}, endDateTime: {end_datetime_str}")
+            else:
+                end_datetime_str = ''
 
             # Request historical data
             bars = await self._ib.reqHistoricalDataAsync(
                 contract,
-                endDateTime='',
+                endDateTime=end_datetime_str,
                 durationStr=duration,
                 barSizeSetting=bar_size,
                 whatToShow='TRADES',
