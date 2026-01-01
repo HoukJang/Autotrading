@@ -65,10 +65,15 @@ class IBClient:
         # IB instance (from connection manager)
         self._ib: Optional[IB] = None
 
-        # Active subscriptions
+        # Active subscriptions (protected by locks for thread safety)
         self._market_data_subscriptions: Dict[str, Ticker] = {}
         self._active_orders: Dict[int, Trade] = {}
         self._positions: Dict[str, Dict] = {}
+        
+        # Locks for thread-safe access to shared dictionaries
+        self._subscriptions_lock = asyncio.Lock()
+        self._orders_lock = asyncio.Lock()
+        self._positions_lock = asyncio.Lock()
 
         # Request ID management
         self._next_order_id = 1
@@ -118,50 +123,51 @@ class IBClient:
             logger.error("Not connected to IB API")
             return False
 
-        if symbol in self._market_data_subscriptions:
-            logger.warning(f"Already subscribed to {symbol}")
-            return True
+        async with self._subscriptions_lock:
+            if symbol in self._market_data_subscriptions:
+                logger.warning(f"Already subscribed to {symbol}")
+                return True
 
-        try:
-            # Create front month contract
-            contract = ContractFactory.create_futures(symbol).to_ib_contract()
+            try:
+                # Create front month contract
+                contract = ContractFactory.create_futures(symbol).to_ib_contract()
 
-            # Qualify contract to get all available contracts
-            qualified_contracts = await self._ib.qualifyContractsAsync(contract)
+                # Qualify contract to get all available contracts
+                qualified_contracts = await self._ib.qualifyContractsAsync(contract)
 
-            if not qualified_contracts or len(qualified_contracts) == 0:
-                logger.error(f"Failed to qualify contract for {symbol}")
+                if not qualified_contracts or len(qualified_contracts) == 0:
+                    logger.error(f"Failed to qualify contract for {symbol}")
+                    return False
+
+                # Sort by expiry date and use the front month (nearest expiry)
+                qualified_contracts.sort(key=lambda c: c.lastTradeDateOrContractMonth)
+                qualified_contract = qualified_contracts[0]
+
+                logger.info(f"Qualified contract for {symbol}: {qualified_contract.localSymbol} (expires: {qualified_contract.lastTradeDateOrContractMonth}), conId={qualified_contract.conId}")
+
+                # Request market data
+                ticker = self._ib.reqMktData(
+                    qualified_contract,
+                    genericTickList='',
+                    snapshot=False,
+                    regulatorySnapshot=False,
+                    mktDataOptions=[]
+                )
+
+                # Store subscription
+                self._market_data_subscriptions[symbol] = ticker
+
+                # Set up ticker callback
+                ticker.updateEvent += lambda ticker, _: asyncio.create_task(
+                    self._on_tick_update(symbol, ticker)
+                )
+
+                logger.info(f"Subscribed to market data for {symbol}")
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed to subscribe to {symbol}: {e}")
                 return False
-
-            # Sort by expiry date and use the front month (nearest expiry)
-            qualified_contracts.sort(key=lambda c: c.lastTradeDateOrContractMonth)
-            qualified_contract = qualified_contracts[0]
-
-            logger.info(f"Qualified contract for {symbol}: {qualified_contract.localSymbol} (expires: {qualified_contract.lastTradeDateOrContractMonth}), conId={qualified_contract.conId}")
-
-            # Request market data
-            ticker = self._ib.reqMktData(
-                qualified_contract,
-                genericTickList='',
-                snapshot=False,
-                regulatorySnapshot=False,
-                mktDataOptions=[]
-            )
-
-            # Store subscription
-            self._market_data_subscriptions[symbol] = ticker
-
-            # Set up ticker callback
-            ticker.updateEvent += lambda ticker, _: asyncio.create_task(
-                self._on_tick_update(symbol, ticker)
-            )
-
-            logger.info(f"Subscribed to market data for {symbol}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to subscribe to {symbol}: {e}")
-            return False
 
     async def unsubscribe_market_data(self, symbol: str) -> bool:
         """
@@ -173,24 +179,25 @@ class IBClient:
         Returns:
             True if unsubscription successful
         """
-        if symbol not in self._market_data_subscriptions:
-            return True
+        async with self._subscriptions_lock:
+            if symbol not in self._market_data_subscriptions:
+                return True
 
-        try:
-            ticker = self._market_data_subscriptions[symbol]
+            try:
+                ticker = self._market_data_subscriptions[symbol]
 
-            # Cancel market data
-            self._ib.cancelMktData(ticker.contract)
+                # Cancel market data
+                self._ib.cancelMktData(ticker.contract)
 
-            # Remove from subscriptions
-            del self._market_data_subscriptions[symbol]
+                # Remove from subscriptions
+                del self._market_data_subscriptions[symbol]
 
-            logger.info(f"Unsubscribed from market data for {symbol}")
-            return True
+                logger.info(f"Unsubscribed from market data for {symbol}")
+                return True
 
-        except Exception as e:
-            logger.error(f"Failed to unsubscribe from {symbol}: {e}")
-            return False
+            except Exception as e:
+                logger.error(f"Failed to unsubscribe from {symbol}: {e}")
+                return False
 
     async def request_historical_bars(self, symbol: str, duration: str = "1 D",
                                      bar_size: str = "1 min",
@@ -290,15 +297,16 @@ class IBClient:
             # Place order
             trade = self._ib.placeOrder(qualified_contract, order)
 
-            # Store active order
-            self._active_orders[trade.order.orderId] = trade
+            # Store active order (thread-safe)
+            async with self._orders_lock:
+                self._active_orders[trade.order.orderId] = trade
 
-            # Set up trade callbacks
-            trade.statusEvent += lambda trade: asyncio.create_task(
-                self._on_order_status(trade)
+            # Set up trade callbacks (use default argument to capture current trade value)
+            trade.statusEvent += lambda t=trade: asyncio.create_task(
+                self._on_order_status(t)
             )
-            trade.fillEvent += lambda trade, fill: asyncio.create_task(
-                self._on_order_fill(trade, fill)
+            trade.fillEvent += lambda t=trade, f=None: asyncio.create_task(
+                self._on_order_fill(t, f)
             )
 
             logger.info(f"Placed market order: {action} {quantity} {symbol}, Order ID: {trade.order.orderId}")
@@ -339,15 +347,16 @@ class IBClient:
             # Place order
             trade = self._ib.placeOrder(contract, order)
 
-            # Store active order
-            self._active_orders[trade.order.orderId] = trade
+            # Store active order (thread-safe)
+            async with self._orders_lock:
+                self._active_orders[trade.order.orderId] = trade
 
-            # Set up trade callbacks
-            trade.statusEvent += lambda trade: asyncio.create_task(
-                self._on_order_status(trade)
+            # Set up trade callbacks (use default argument to capture current trade value)
+            trade.statusEvent += lambda t=trade: asyncio.create_task(
+                self._on_order_status(t)
             )
-            trade.fillEvent += lambda trade, fill: asyncio.create_task(
-                self._on_order_fill(trade, fill)
+            trade.fillEvent += lambda t=trade, f=None: asyncio.create_task(
+                self._on_order_fill(t, f)
             )
 
             logger.info(f"Placed limit order: {action} {quantity} {symbol} @ {price}")
@@ -392,20 +401,21 @@ class IBClient:
 
             # Place bracket order
             trades = []
-            for order in bracket:
-                trade = self._ib.placeOrder(contract, order)
-                trades.append(trade)
+            async with self._orders_lock:
+                for order in bracket:
+                    trade = self._ib.placeOrder(contract, order)
+                    trades.append(trade)
 
-                # Store active order
-                self._active_orders[trade.order.orderId] = trade
+                    # Store active order
+                    self._active_orders[trade.order.orderId] = trade
 
-                # Set up trade callbacks
-                trade.statusEvent += lambda t=trade: asyncio.create_task(
-                    self._on_order_status(t)
-                )
-                trade.fillEvent += lambda t=trade, f=None: asyncio.create_task(
-                    self._on_order_fill(t, f)
-                )
+                    # Set up trade callbacks
+                    trade.statusEvent += lambda t=trade: asyncio.create_task(
+                        self._on_order_status(t)
+                    )
+                    trade.fillEvent += lambda t=trade, f=None: asyncio.create_task(
+                        self._on_order_fill(t, f)
+                    )
 
             order_ids = [t.order.orderId for t in trades]
             logger.info(
@@ -432,20 +442,21 @@ class IBClient:
         if not self._ib or not self.connection_manager.is_connected():
             return False
 
-        if order_id not in self._active_orders:
-            logger.warning(f"Order {order_id} not found")
-            return False
+        async with self._orders_lock:
+            if order_id not in self._active_orders:
+                logger.warning(f"Order {order_id} not found")
+                return False
 
-        try:
-            trade = self._active_orders[order_id]
-            self._ib.cancelOrder(trade.order)
+            try:
+                trade = self._active_orders[order_id]
+                self._ib.cancelOrder(trade.order)
 
-            logger.info(f"Cancelled order {order_id}")
-            return True
+                logger.info(f"Cancelled order {order_id}")
+                return True
 
-        except Exception as e:
-            logger.error(f"Failed to cancel order {order_id}: {e}")
-            return False
+            except Exception as e:
+                logger.error(f"Failed to cancel order {order_id}: {e}")
+                return False
 
     async def get_positions(self) -> List[Dict[str, Any]]:
         """
@@ -461,19 +472,20 @@ class IBClient:
             positions = self._ib.positions()
 
             position_list = []
-            for position in positions:
-                position_dict = {
-                    'symbol': position.contract.symbol,
-                    'quantity': position.position,
-                    'average_cost': position.avgCost,
-                    'market_value': position.marketValue,
-                    'unrealized_pnl': position.unrealizedPNL,
-                    'realized_pnl': position.realizedPNL
-                }
-                position_list.append(position_dict)
+            async with self._positions_lock:
+                for position in positions:
+                    position_dict = {
+                        'symbol': position.contract.symbol,
+                        'quantity': position.position,
+                        'average_cost': position.avgCost,
+                        'market_value': position.marketValue,
+                        'unrealized_pnl': position.unrealizedPNL,
+                        'realized_pnl': position.realizedPNL
+                    }
+                    position_list.append(position_dict)
 
-                # Update internal positions
-                self._positions[position.contract.symbol] = position_dict
+                    # Update internal positions
+                    self._positions[position.contract.symbol] = position_dict
 
             return position_list
 

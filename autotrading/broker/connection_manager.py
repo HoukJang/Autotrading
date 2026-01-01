@@ -270,11 +270,13 @@ class IBConnectionManager:
         if not self.ib:
             return
 
-        # Handle disconnection
-        self.ib.disconnectedEvent += self._on_disconnected
+        # Handle disconnection (wrap async handler for sync event)
+        self.ib.disconnectedEvent += lambda: asyncio.create_task(self._on_disconnected())
 
-        # Handle errors
-        self.ib.errorEvent += self._on_error
+        # Handle errors (wrap async handler for sync event)
+        self.ib.errorEvent += lambda reqId, errorCode, errorString, contract=None: asyncio.create_task(
+            self._on_error(reqId, errorCode, errorString, contract)
+        )
 
     async def _on_disconnected(self) -> None:
         """Handle disconnection event"""

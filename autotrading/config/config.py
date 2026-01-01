@@ -246,10 +246,10 @@ class TradingConfig:
         """
         from ..core.exceptions import ConfigurationError
 
-        # Check database password
-        if not self.database.password:
+        # Check database password (required in production)
+        if self.is_production and not self.database.password:
             raise ConfigurationError(
-                "Database password not set",
+                "Database password is required in production environment",
                 config_key='DB_PASSWORD'
             )
 
@@ -259,6 +259,16 @@ class TradingConfig:
             raise ConfigurationError(
                 f"Invalid IB port: {self.broker.port}. "
                 f"Must be 7496 (TWS Live), 7497 (TWS Paper), 4001 (Gateway Live), or 4002 (Gateway Paper)",
+                config_key='IB_PORT',
+                actual_value=self.broker.port
+            )
+
+        # Production safety: block paper trading ports in production
+        paper_ports = [7497, 4002]
+        if self.is_production and self.broker.port in paper_ports:
+            raise ConfigurationError(
+                f"Paper trading port ({self.broker.port}) cannot be used in production environment. "
+                f"Use live trading ports: 7496 (TWS) or 4001 (Gateway)",
                 config_key='IB_PORT',
                 actual_value=self.broker.port
             )
