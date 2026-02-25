@@ -60,6 +60,9 @@ nul
 .DS_Store
 
 # Project specific
-*.db
+data/*.db
 *.sqlite
 *.sqlite3
+config/.env
+.ruff_cache/
+.venv/

@@ -1,0 +1,28 @@
+system:
+  name: "AutoTrader v2"
+  log_level: "INFO"
+  log_dir: "logs"
+
+broker:
+  type: "paper"  # paper | alpaca
+  paper_balance: 100000.0
+
+alpaca:
+  feed: "iex"  # iex (free) | sip (paid)
+  paper: true
+
+data:
+  bar_history_size: 500
+  store_type: "sqlite"  # sqlite | postgres
+  sqlite_path: "data/autotrader.db"
+
+risk:
+  max_position_pct: 0.10       # 10% of account per symbol
+  daily_loss_limit_pct: 0.02   # 2% of account
+  max_drawdown_pct: 0.05       # 5% of account
+  max_open_positions: 5
+
+symbols:
+  - "AAPL"
+  - "MSFT"
+  - "GOOGL"
