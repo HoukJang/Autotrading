@@ -20,6 +20,12 @@
 - Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `perf`
 - 한국어 커밋 메시지 금지 (영어만)
 
+## Work Delegation
+
+- 오케스트레이터(메인 에이전트)에서 직접 구현 작업을 하지 않는다
+- 작업은 적절한 팀/서브에이전트를 호출해서 위임한다
+- 적절한 팀이 없으면 새로 생성한다
+
 ## Project Docs
 
 - System design: `docs/plans/2026-02-24-autotrader-v2-design.md`
