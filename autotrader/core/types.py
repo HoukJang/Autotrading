@@ -158,5 +158,5 @@ class MarketContext:
     """
     symbol: str
     bar: Bar
-    indicators: dict[str, float | dict]
+    indicators: dict[str, float | dict | None]
     history: deque[Bar]

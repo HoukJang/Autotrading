@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from typing import Any, Callable, Union
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
@@ -48,6 +48,7 @@ class AlpacaAdapter(BrokerAdapter):
         side = _SIDE_MAP[order.side]
         tif = _TIF_MAP.get(order.time_in_force, TimeInForce.DAY)
 
+        req: Union[MarketOrderRequest, LimitOrderRequest, StopOrderRequest]
         if order.order_type == "market":
             req = MarketOrderRequest(symbol=order.symbol, qty=order.quantity, side=side, time_in_force=tif)
         elif order.order_type == "limit":
@@ -63,11 +64,11 @@ class AlpacaAdapter(BrokerAdapter):
         else:
             raise ValueError(f"Unsupported order type: {order.order_type}")
 
-        result = self._client.submit_order(req)
+        result: Any = self._client.submit_order(req)
         return OrderResult(
             order_id=str(result.id),
-            symbol=result.symbol,
-            status=str(result.status),
+            symbol=str(result.symbol),
+            status=str(result.status),  # type: ignore[arg-type]
             filled_qty=float(result.filled_qty or 0),
             filled_price=float(result.filled_avg_price or 0),
         )
@@ -83,7 +84,7 @@ class AlpacaAdapter(BrokerAdapter):
 
     async def get_positions(self) -> list[Position]:
         assert self._client is not None
-        raw = self._client.get_all_positions()
+        raw: Any = self._client.get_all_positions()
         return [
             Position(
                 symbol=p.symbol,
@@ -98,7 +99,7 @@ class AlpacaAdapter(BrokerAdapter):
 
     async def get_account(self) -> AccountInfo:
         assert self._client is not None
-        a = self._client.get_account()
+        a: Any = self._client.get_account()
         return AccountInfo(
             account_id=str(a.id),
             buying_power=float(a.buying_power),
