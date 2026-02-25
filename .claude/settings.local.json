@@ -15,7 +15,11 @@
       "Bash(autotrading/venv/Scripts/python.exe test_oct6.py)",
       "Bash(autotrading/venv/Scripts/python.exe test_updated_historical.py)",
       "Bash(autotrading/venv/Scripts/python.exe test_sep30.py)",
-      "Bash(autotrading/venv/Scripts/python.exe test_contract_rollover.py)"
+      "Bash(autotrading/venv/Scripts/python.exe test_contract_rollover.py)",
+      "Bash(npm update:*)",
+      "Bash(cd:*)",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs"
     ],
     "deny": [],
     "ask": []
