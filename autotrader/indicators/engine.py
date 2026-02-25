@@ -6,13 +6,16 @@ from autotrader.core.types import Bar
 from autotrader.indicators.base import Indicator, IndicatorSpec
 from autotrader.indicators.builtin.moving_average import SMA, EMA
 from autotrader.indicators.builtin.momentum import RSI
-from autotrader.indicators.builtin.volatility import ATR
+from autotrader.indicators.builtin.trend import ADX
+from autotrader.indicators.builtin.volatility import ATR, BollingerBands
 
 _INDICATOR_REGISTRY: dict[str, type[Indicator]] = {
     "SMA": SMA,
     "EMA": EMA,
     "RSI": RSI,
     "ATR": ATR,
+    "ADX": ADX,
+    "BBANDS": BollingerBands,
 }
 
 
