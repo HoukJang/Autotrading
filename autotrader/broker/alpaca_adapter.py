@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import timezone
 from typing import Any, Callable, Union
 
 from alpaca.trading.client import TradingClient
@@ -13,7 +15,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.live import StockDataStream
 
 from autotrader.broker.base import BrokerAdapter
-from autotrader.core.types import AccountInfo, Order, OrderResult, Position
+from autotrader.core.types import AccountInfo, Bar, Order, OrderResult, Position
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +110,30 @@ class AlpacaAdapter(BrokerAdapter):
             equity=float(a.equity),
         )
 
+    def _convert_bar(self, alpaca_bar: Any) -> Bar:
+        ts = alpaca_bar.timestamp
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return Bar(
+            symbol=str(alpaca_bar.symbol),
+            timestamp=ts,
+            open=float(alpaca_bar.open),
+            high=float(alpaca_bar.high),
+            low=float(alpaca_bar.low),
+            close=float(alpaca_bar.close),
+            volume=float(alpaca_bar.volume),
+        )
+
     async def subscribe_bars(self, symbols: list[str], callback: Callable) -> None:
-        self._stream = StockDataStream(self._api_key, self._secret_key)
-        self._stream.subscribe_bars(callback, *symbols)
+        self._stream = StockDataStream(self._api_key, self._secret_key, feed=self._feed)
+        self._loop = asyncio.get_running_loop()
+
+        async def _bridge(alpaca_bar: Any) -> None:
+            bar = self._convert_bar(alpaca_bar)
+            asyncio.run_coroutine_threadsafe(callback(bar), self._loop)
+
+        self._stream.subscribe_bars(_bridge, *symbols)
+
+    def run_stream(self) -> None:
+        assert self._stream is not None
+        self._stream.run()
