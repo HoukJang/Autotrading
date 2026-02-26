@@ -34,6 +34,9 @@ from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
 from autotrader.strategy.adx_pullback import AdxPullback
 from autotrader.strategy.overbought_short import OverboughtShort
 from autotrader.strategy.regime_momentum import RegimeMomentum
+from autotrader.universe.provider import SP500Provider
+from autotrader.universe.selector import UniverseSelector
+from autotrader.universe.earnings import EarningsCalendar
 
 logger = logging.getLogger(__name__)
 
@@ -402,11 +405,79 @@ class AutoTrader:
                 if self._rotation_manager is not None:
                     asyncio.ensure_future(self._execute_event_rotation(reason))
 
+    async def _run_universe_selection(self) -> None:
+        """Run the full universe selection pipeline and apply rotation."""
+        logger.info("Starting universe selection pipeline...")
+
+        # Step 1: Fetch S&P 500 list
+        provider = SP500Provider()
+        infos = await asyncio.to_thread(provider.fetch)
+        logger.info("Fetched %d S&P 500 constituents", len(infos))
+
+        # Step 2: Fetch earnings calendar
+        earnings_cal = EarningsCalendar()
+        all_symbols = [i.symbol for i in infos]
+        max_candidates = self._settings.scheduler.universe_max_candidates
+        try:
+            await asyncio.to_thread(
+                earnings_cal.fetch, all_symbols[:max_candidates],
+            )
+        except Exception:
+            logger.warning("Earnings calendar fetch partially failed")
+
+        today = datetime.now(timezone.utc).date()
+        blackout = earnings_cal.blackout_symbols(all_symbols, today)
+        active_candidates = [s for s in all_symbols if s not in blackout][:max_candidates]
+        logger.info(
+            "%d candidates after blackout filter (%d in blackout)",
+            len(active_candidates), len(blackout),
+        )
+
+        # Step 3: Fetch historical bars
+        if not hasattr(self._broker, "get_historical_bars"):
+            logger.warning("Broker does not support historical bars; skipping rotation")
+            return
+
+        days = self._settings.scheduler.universe_history_days
+        bars_by_symbol = await self._broker.get_historical_bars(
+            active_candidates, days=days,
+        )
+        logger.info("Fetched history for %d symbols", len(bars_by_symbol))
+
+        if not bars_by_symbol:
+            logger.warning("No historical bars received; skipping rotation")
+            return
+
+        # Step 4: Run universe selection
+        account = await self._broker.get_account()
+        positions = await self._broker.get_positions()
+        current_pool = list(self._rotation_manager.active_symbols) if self._rotation_manager else []
+        open_syms = [p.symbol for p in positions]
+
+        selector = UniverseSelector(
+            initial_balance=account.equity,
+            target_size=self._settings.risk.max_open_positions * 3,
+        )
+        result = selector.select(
+            infos, bars_by_symbol,
+            current_pool=current_pool,
+            open_positions=open_syms,
+        )
+        logger.info(
+            "Universe selection complete: %d symbols (in: %s, out: %s)",
+            len(result.symbols),
+            result.rotation_in or "none",
+            result.rotation_out or "none",
+        )
+
+        # Step 5: Apply rotation
+        await self.apply_rotation(result)
+
     async def _execute_event_rotation(self, reason: str) -> None:
         """Execute an event-driven mid-week rotation."""
         try:
             logger.info("Executing event-driven rotation: %s", reason)
-            # Universe selection would be called here when fully wired
+            await self._run_universe_selection()
         except Exception:
             logger.exception("Event-driven rotation execution failed")
 
@@ -425,7 +496,7 @@ class AutoTrader:
             if now.weekday() == rotation_day and last_rotation_date != now.date():
                 try:
                     logger.info("Rotation scheduler: triggering weekly rotation")
-                    # Universe selection would be called here when fully wired
+                    await self._run_universe_selection()
                     last_rotation_date = now.date()
                 except Exception:
                     logger.exception("Rotation scheduler failed")

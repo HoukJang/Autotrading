@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Union
 
 from alpaca.trading.client import TradingClient
@@ -12,8 +12,11 @@ from alpaca.trading.requests import (
     StopOrderRequest,
 )
 from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.live import StockDataStream
 from alpaca.data.enums import DataFeed
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
 
 from autotrader.broker.base import BrokerAdapter
 from autotrader.core.types import AccountInfo, Bar, Order, OrderResult, Position
@@ -124,6 +127,39 @@ class AlpacaAdapter(BrokerAdapter):
             close=float(alpaca_bar.close),
             volume=float(alpaca_bar.volume),
         )
+
+    async def get_historical_bars(
+        self, symbols: list[str], days: int = 120,
+    ) -> dict[str, list[Bar]]:
+        end_date = datetime.now(tz=timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+        start_date = end_date - timedelta(days=days)
+        client = StockHistoricalDataClient(self._api_key, self._secret_key)
+
+        result: dict[str, list[Bar]] = {}
+        batch_size = 50
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i : i + batch_size]
+            try:
+                request = StockBarsRequest(
+                    symbol_or_symbols=batch,
+                    timeframe=TimeFrame.Day,
+                    start=start_date,
+                    end=end_date,
+                )
+                raw = client.get_stock_bars(request)
+                for sym in batch:
+                    try:
+                        alpaca_bars = raw[sym]
+                    except (KeyError, IndexError):
+                        continue
+                    if not alpaca_bars:
+                        continue
+                    result[sym] = [self._convert_bar(ab) for ab in alpaca_bars]
+            except Exception:
+                logger.exception("Historical bars batch fetch failed")
+        return result
 
     async def subscribe_bars(self, symbols: list[str], callback: Callable) -> None:
         feed_enum = DataFeed.IEX if self._feed == "iex" else DataFeed.SIP

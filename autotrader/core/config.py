@@ -137,6 +137,8 @@ class SchedulerConfig(BaseModel):
     enable_rotation_scheduler: bool = True
     rotation_check_interval_seconds: int = 300
     regime_proxy_symbol: str = "SPY"
+    universe_history_days: int = 120
+    universe_max_candidates: int = 50
 
 
 class PerformanceConfig(BaseModel):
