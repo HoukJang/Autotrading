@@ -24,6 +24,7 @@ from autotrader.portfolio.regime_detector import MarketRegime, RegimeDetector
 from autotrader.portfolio.regime_tracker import RegimeTracker
 from autotrader.portfolio.tracker import PortfolioTracker
 from autotrader.portfolio.position_tracker import OpenPositionTracker
+from autotrader.portfolio.regime_position_reviewer import RegimePositionReviewer
 from autotrader.portfolio.trade_logger import TradeLogger, LiveTradeRecord, EquitySnapshot
 from autotrader.risk.manager import RiskManager
 from autotrader.risk.position_sizer import PositionSizer
@@ -95,6 +96,7 @@ class AutoTrader:
 
         # Position lifecycle tracking (MFE/MAE)
         self._open_position_tracker = OpenPositionTracker()
+        self._regime_reviewer = RegimePositionReviewer()
 
         # Scheduler and logging
         self._scheduler_task: asyncio.Task | None = None
@@ -406,11 +408,15 @@ class AutoTrader:
             if qty <= 0:
                 return None
             side = "buy" if signal.direction == "long" else "sell"
+            order_type = "market"
+            if signal.limit_price is not None:
+                order_type = "limit"
             return Order(
                 symbol=signal.symbol,
                 side=side,
                 quantity=qty,
-                order_type="market",
+                order_type=order_type,
+                limit_price=signal.limit_price,
             )
 
         return None
@@ -450,6 +456,29 @@ class AutoTrader:
             )
             self._current_regime = transition.current
 
+            # Review existing positions for regime compatibility
+            if self._position_strategy_map:
+                reviews = self._regime_reviewer.review(
+                    transition.current, self._position_strategy_map,
+                )
+                close_reviews = [r for r in reviews if r.action == "close"]
+                if close_reviews:
+                    logger.info(
+                        "Regime review: closing %d incompatible positions",
+                        len(close_reviews),
+                    )
+                    for review in close_reviews:
+                        close_sig = Signal(
+                            strategy=review.strategy,
+                            symbol=review.symbol,
+                            direction="close",
+                            strength=1.0,
+                            metadata={"exit_reason": f"regime_{review.reason}"},
+                        )
+                        asyncio.ensure_future(
+                            self._process_regime_close(close_sig),
+                        )
+
             # Check event-driven rotation trigger
             vix_value = None
             if self._vix_fetcher is not None:
@@ -467,6 +496,15 @@ class AutoTrader:
                 self._event_rotation.mark_triggered()
                 if self._rotation_manager is not None:
                     asyncio.ensure_future(self._execute_event_rotation(reason))
+
+    async def _process_regime_close(self, signal: Signal) -> None:
+        """Process a regime-triggered close signal."""
+        try:
+            account = await self._broker.get_account()
+            positions = await self._broker.get_positions()
+            await self._process_signal(signal, account, positions)
+        except Exception:
+            logger.exception("Regime close failed for %s", signal.symbol)
 
     async def _run_universe_selection(self) -> None:
         """Run the full universe selection pipeline and apply rotation."""

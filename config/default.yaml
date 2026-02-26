@@ -20,7 +20,7 @@ risk:
   max_position_pct: 0.10
   daily_loss_limit_pct: 0.02
   max_drawdown_pct: 0.05
-  max_open_positions: 5
+  max_open_positions: 8
 
 scheduler:
   enable_rotation_scheduler: false

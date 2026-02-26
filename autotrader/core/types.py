@@ -58,6 +58,7 @@ class Signal:
     direction: Literal["long", "short", "close"]
     strength: float
     metadata: dict = field(default_factory=dict)
+    limit_price: float | None = None
 
     def __post_init__(self):
         """Validate and clamp signal strength to valid range."""

@@ -46,7 +46,7 @@ def test_settings_defaults():
     settings = Settings()
     assert settings.system.log_level == "INFO"
     assert settings.broker.type == "paper"
-    assert settings.risk.max_open_positions == 5
+    assert settings.risk.max_open_positions == 8
 
 
 def test_system_config_defaults():
@@ -120,7 +120,7 @@ def test_risk_config_defaults():
     assert risk_cfg.max_position_pct == 0.10
     assert risk_cfg.daily_loss_limit_pct == 0.02
     assert risk_cfg.max_drawdown_pct == 0.15
-    assert risk_cfg.max_open_positions == 5
+    assert risk_cfg.max_open_positions == 8
 
 
 def test_risk_config_custom():
@@ -194,7 +194,7 @@ system:
     assert settings.system.name == "Minimal"
     # Other sections use defaults
     assert settings.broker.type == "paper"
-    assert settings.risk.max_open_positions == 5
+    assert settings.risk.max_open_positions == 8
 
 
 def test_load_settings_file_not_found():
