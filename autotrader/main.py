@@ -106,7 +106,7 @@ class AutoTrader:
             return PaperBroker(self._settings.broker.paper_balance)
         elif self._settings.broker.type == "alpaca":
             from autotrader.broker.alpaca_adapter import AlpacaAdapter
-            load_dotenv()
+            load_dotenv(Path("config/.env"))
             return AlpacaAdapter(
                 api_key=os.environ["ALPACA_API_KEY"],
                 secret_key=os.environ["ALPACA_SECRET_KEY"],

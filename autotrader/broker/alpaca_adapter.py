@@ -13,6 +13,7 @@ from alpaca.trading.requests import (
 )
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.live import StockDataStream
+from alpaca.data.enums import DataFeed
 
 from autotrader.broker.base import BrokerAdapter
 from autotrader.core.types import AccountInfo, Bar, Order, OrderResult, Position
@@ -125,7 +126,8 @@ class AlpacaAdapter(BrokerAdapter):
         )
 
     async def subscribe_bars(self, symbols: list[str], callback: Callable) -> None:
-        self._stream = StockDataStream(self._api_key, self._secret_key, feed=self._feed)
+        feed_enum = DataFeed.IEX if self._feed == "iex" else DataFeed.SIP
+        self._stream = StockDataStream(self._api_key, self._secret_key, feed=feed_enum)
         self._loop = asyncio.get_running_loop()
 
         async def _bridge(alpaca_bar: Any) -> None:

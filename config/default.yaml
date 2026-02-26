@@ -4,25 +4,58 @@ system:
   log_dir: "logs"
 
 broker:
-  type: "paper"  # paper | alpaca
+  type: "alpaca"
   paper_balance: 100000.0
 
 alpaca:
-  feed: "iex"  # iex (free) | sip (paid)
+  feed: "iex"
   paper: true
 
 data:
   bar_history_size: 500
-  store_type: "sqlite"  # sqlite | postgres
+  store_type: "sqlite"
   sqlite_path: "data/autotrader.db"
 
 risk:
-  max_position_pct: 0.10       # 10% of account per symbol
-  daily_loss_limit_pct: 0.02   # 2% of account
-  max_drawdown_pct: 0.05       # 5% of account
+  max_position_pct: 0.10
+  daily_loss_limit_pct: 0.02
+  max_drawdown_pct: 0.05
   max_open_positions: 5
+
+scheduler:
+  enable_rotation_scheduler: false
+  rotation_check_interval_seconds: 300
+  regime_proxy_symbol: "SPY"
+
+performance:
+  enable_trade_log: true
+  trade_log_path: "data/live_trades.jsonl"
+  equity_snapshot_path: "data/equity_snapshots.jsonl"
+  equity_snapshot_interval: 10
+
+sentiment:
+  enable_vix: true
+  vix_symbol: "^VIX"
+  cache_ttl_seconds: 3600
+  vix_spike_threshold: 30.0
+
+event_rotation:
+  enable_event_driven: true
+  cooldown_hours: 48
+  vix_spike_trigger: 30.0
+  regime_triggers:
+    - "TREND->HIGH_VOLATILITY"
+    - "RANGING->HIGH_VOLATILITY"
+    - "*->UNCERTAIN"
 
 symbols:
   - "AAPL"
   - "MSFT"
   - "GOOGL"
+  - "AMZN"
+  - "TSLA"
+  - "NVDA"
+  - "META"
+  - "AMD"
+  - "NFLX"
+  - "JPM"
