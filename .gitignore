@@ -59,6 +59,9 @@ nul
 *~.nib
 .DS_Store
 
+# Worktrees
+.worktrees/
+
 # Project specific
 data/*.db
 *.sqlite
