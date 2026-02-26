@@ -7,6 +7,7 @@ from autotrader.core.config import RotationConfig
 from autotrader.core.types import Signal
 from autotrader.rotation.manager import RotationManager
 from autotrader.rotation.types import WatchlistEntry
+from autotrader.universe import UniverseResult
 
 
 def _signal(symbol: str, direction: str, strategy: str = "test") -> Signal:
@@ -85,3 +86,117 @@ class TestFilterSignals:
     def test_properties(self):
         assert set(self.mgr.active_symbols) == {"AAPL", "MSFT"}
         assert set(self.mgr.watchlist_symbols) == {"GOOG"}
+
+
+class TestApplyRotation:
+    def test_moves_held_symbols_to_watchlist(self):
+        mgr = RotationManager(RotationConfig())
+        mgr._state.active_symbols = ["AAPL", "MSFT", "GOOG"]
+        universe = UniverseResult(
+            symbols=["AAPL", "MSFT", "AMZN"],
+            scored=[],
+            timestamp=datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc),
+            rotation_in=["AMZN"],
+            rotation_out=["GOOG"],
+        )
+        event = mgr.apply_rotation(universe, open_position_symbols=["GOOG"])
+        assert "GOOG" in mgr.watchlist_symbols
+        assert "GOOG" in event.watchlist_added
+        assert set(mgr.active_symbols) == {"AAPL", "MSFT", "AMZN"}
+
+    def test_drops_unheld_symbols(self):
+        mgr = RotationManager(RotationConfig())
+        mgr._state.active_symbols = ["AAPL", "GOOG"]
+        universe = UniverseResult(
+            symbols=["AAPL", "MSFT"],
+            scored=[],
+            timestamp=datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc),
+            rotation_in=["MSFT"],
+            rotation_out=["GOOG"],
+        )
+        event = mgr.apply_rotation(universe, open_position_symbols=[])
+        assert "GOOG" not in mgr.watchlist_symbols
+        assert len(event.watchlist_added) == 0
+
+    def test_computes_deadline_next_friday(self):
+        mgr = RotationManager(RotationConfig())
+        # Saturday March 7, 2026 rotation
+        sat = datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc)
+        universe = UniverseResult(
+            symbols=["AAPL"],
+            scored=[],
+            timestamp=sat,
+            rotation_in=[],
+            rotation_out=["MSFT"],
+        )
+        mgr._state.active_symbols = ["MSFT"]
+        mgr.apply_rotation(universe, open_position_symbols=["MSFT"])
+        entry = mgr._state.watchlist["MSFT"]
+        # Deadline should be Friday March 13, 14:00 UTC
+        assert entry.deadline.weekday() == 4  # Friday
+        assert entry.deadline.hour == 14
+
+    def test_clears_previous_watchlist_if_symbol_returns(self):
+        mgr = RotationManager(RotationConfig())
+        mgr._state.active_symbols = ["AAPL"]
+        mgr._state.watchlist = {
+            "GOOG": WatchlistEntry(
+                symbol="GOOG",
+                added_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+                deadline=datetime(2026, 3, 6, 14, 0, tzinfo=timezone.utc),
+            ),
+        }
+        universe = UniverseResult(
+            symbols=["AAPL", "GOOG"],
+            scored=[],
+            timestamp=datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc),
+            rotation_in=["GOOG"],
+            rotation_out=[],
+        )
+        event = mgr.apply_rotation(universe, open_position_symbols=["GOOG"])
+        # GOOG should no longer be on watchlist since it's back in active
+        assert "GOOG" not in mgr.watchlist_symbols
+        assert "GOOG" in event.watchlist_removed
+        assert "GOOG" in mgr.active_symbols
+
+    def test_records_event_in_history(self):
+        mgr = RotationManager(RotationConfig())
+        mgr._state.active_symbols = ["AAPL"]
+        universe = UniverseResult(
+            symbols=["AAPL", "MSFT"],
+            scored=[],
+            timestamp=datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc),
+            rotation_in=["MSFT"],
+            rotation_out=[],
+        )
+        event = mgr.apply_rotation(universe, open_position_symbols=[])
+        assert len(mgr._state.rotation_history) == 1
+        assert mgr._state.rotation_history[0] is event
+
+    def test_updates_last_rotation(self):
+        mgr = RotationManager(RotationConfig())
+        ts = datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc)
+        universe = UniverseResult(
+            symbols=["AAPL"],
+            scored=[],
+            timestamp=ts,
+            rotation_in=[],
+            rotation_out=[],
+        )
+        mgr.apply_rotation(universe, open_position_symbols=[])
+        assert mgr._state.last_rotation == ts
+
+    def test_resets_halt_on_new_rotation(self):
+        mgr = RotationManager(RotationConfig())
+        mgr._state.is_halted = True
+        mgr._state.active_symbols = ["AAPL"]
+        universe = UniverseResult(
+            symbols=["AAPL"],
+            scored=[],
+            timestamp=datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc),
+            rotation_in=[],
+            rotation_out=[],
+        )
+        mgr.apply_rotation(universe, open_position_symbols=[], new_equity=3000.0)
+        assert mgr._state.is_halted is False
+        assert mgr._state.weekly_start_equity == 3000.0

@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from autotrader.core.config import RotationConfig
 from autotrader.core.types import Signal
-from autotrader.rotation.types import RotationState
+from autotrader.rotation.types import RotationEvent, RotationState, WatchlistEntry
+from autotrader.universe import UniverseResult
 
 logger = logging.getLogger(__name__)
 
@@ -59,3 +60,78 @@ class RotationManager:
             if sig.symbol in self._state.active_symbols:
                 filtered.append(sig)
         return filtered
+
+    def apply_rotation(
+        self,
+        universe: UniverseResult,
+        open_position_symbols: list[str],
+        new_equity: float | None = None,
+    ) -> RotationEvent:
+        """Apply a new universe rotation.
+
+        Symbols rotated out with open positions go to watchlist.
+        Symbols rotated out without positions are dropped immediately.
+        Symbols returning from watchlist are removed from watchlist.
+        """
+        watchlist_added: list[str] = []
+        watchlist_removed: list[str] = []
+
+        # Remove symbols from watchlist if they're back in the new universe
+        for sym in list(self._state.watchlist.keys()):
+            if sym in universe.symbols:
+                del self._state.watchlist[sym]
+                watchlist_removed.append(sym)
+
+        # Move rotated-out symbols with open positions to watchlist
+        for sym in universe.rotation_out:
+            if sym in open_position_symbols and sym not in self._state.watchlist:
+                deadline = self._compute_deadline(universe.timestamp)
+                self._state.watchlist[sym] = WatchlistEntry(
+                    symbol=sym,
+                    added_at=universe.timestamp,
+                    deadline=deadline,
+                )
+                watchlist_added.append(sym)
+
+        # Update active symbols
+        self._state.active_symbols = list(universe.symbols)
+        self._state.last_rotation = universe.timestamp
+
+        # Reset halt state and update weekly equity on new rotation
+        self._state.is_halted = False
+        if new_equity is not None:
+            self._state.weekly_start_equity = new_equity
+
+        event = RotationEvent(
+            timestamp=universe.timestamp,
+            symbols_in=list(universe.rotation_in),
+            symbols_out=list(universe.rotation_out),
+            watchlist_added=watchlist_added,
+            watchlist_removed=watchlist_removed,
+            active_count=len(self._state.active_symbols),
+            watchlist_count=len(self._state.watchlist),
+        )
+        self._state.rotation_history.append(event)
+
+        logger.info(
+            "Rotation applied: %d active, %d watchlist, +%d/-%d symbols",
+            event.active_count,
+            event.watchlist_count,
+            len(event.symbols_in),
+            len(event.symbols_out),
+        )
+        return event
+
+    def _compute_deadline(self, rotation_timestamp: datetime) -> datetime:
+        """Compute the force-close deadline (next configured day/hour)."""
+        target_day = self._config.force_close_day
+        target_hour = self._config.force_close_hour
+        dt = rotation_timestamp
+        # Find the next occurrence of target_day
+        days_ahead = (target_day - dt.weekday()) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        deadline = dt.replace(
+            hour=target_hour, minute=0, second=0, microsecond=0
+        ) + timedelta(days=days_ahead)
+        return deadline
