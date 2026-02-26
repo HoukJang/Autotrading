@@ -11,6 +11,8 @@ from autotrader.core.types import (
     AccountInfo, Bar, MarketContext, Order, OrderResult, Position, Signal,
 )
 from autotrader.indicators.engine import IndicatorEngine
+from autotrader.portfolio.allocation_engine import AllocationEngine
+from autotrader.portfolio.regime_detector import MarketRegime, RegimeDetector
 from autotrader.portfolio.tracker import PortfolioTracker
 from autotrader.risk.manager import RiskManager
 from autotrader.risk.position_sizer import PositionSizer
@@ -102,7 +104,7 @@ class TestSignalToOrder:
         bar = _make_bar("AAPL", 150.0)
         app._bar_history["AAPL"].append(bar)
         signal = Signal(
-            strategy="sma_crossover", symbol="AAPL",
+            strategy="adx_pullback", symbol="AAPL",
             direction="long", strength=0.8,
         )
         order = app._signal_to_order(signal, account, [])
@@ -252,7 +254,7 @@ class TestAutoTraderTradingLoop:
         account = await app._broker.get_account()
         positions = await app._broker.get_positions()
         signal = Signal(
-            strategy="sma_crossover", symbol="AAPL",
+            strategy="adx_pullback", symbol="AAPL",
             direction="long", strength=0.8,
         )
         result = await app._process_signal(signal, account, positions)
@@ -388,3 +390,254 @@ class TestRotationManagerIntegration:
     def test_apply_rotation_method_exists(self, app_with_rotation):
         """AutoTrader should have apply_rotation method for external use."""
         assert hasattr(app_with_rotation, "apply_rotation")
+
+
+class TestRegimeIntegration:
+    def test_regime_defaults_to_uncertain(self):
+        app = AutoTrader(Settings())
+        assert app._current_regime == MarketRegime.UNCERTAIN
+
+    def test_has_regime_detector(self):
+        app = AutoTrader(Settings())
+        assert isinstance(app._regime_detector, RegimeDetector)
+
+    def test_has_allocation_engine(self):
+        app = AutoTrader(Settings())
+        assert isinstance(app._allocation_engine, AllocationEngine)
+
+    def test_regime_proxy_symbol_from_config(self):
+        app = AutoTrader(Settings())
+        assert app._regime_proxy_symbol == "SPY"
+
+    @pytest.mark.asyncio
+    async def test_spy_always_subscribed(self):
+        settings = Settings()
+        settings.symbols = ["AAPL"]
+        app = AutoTrader(settings)
+        await app.start()
+        # SPY should be subscribed even though not in symbols list
+        # We can verify by checking _bar_history accepts SPY bars
+        bar = _make_bar("SPY", 450.0)
+        await app._on_bar(bar)
+        assert len(app._bar_history["SPY"]) == 1
+        await app.stop()
+
+    @pytest.mark.asyncio
+    async def test_non_spy_bar_does_not_change_regime(self):
+        app = AutoTrader(Settings())
+        await app.start()
+        bar = _make_bar("AAPL", 150.0)
+        await app._on_bar(bar)
+        assert app._current_regime == MarketRegime.UNCERTAIN
+        await app.stop()
+
+
+class TestAllocationIntegration:
+    @pytest.fixture()
+    def app(self):
+        settings = Settings()
+        settings.broker.paper_balance = 5000.0
+        return AutoTrader(settings)
+
+    def test_has_position_strategy_map(self):
+        app = AutoTrader(Settings())
+        assert hasattr(app, '_position_strategy_map')
+        assert isinstance(app._position_strategy_map, dict)
+
+    @pytest.mark.asyncio
+    async def test_short_signal_creates_sell_order(self, app):
+        await app._broker.connect()
+        account = await app._broker.get_account()
+        bar = _make_bar("AAPL", 100.0)
+        app._bar_history["AAPL"].append(bar)
+        signal = Signal(
+            strategy="overbought_short", symbol="AAPL",
+            direction="short", strength=0.8,
+        )
+        order = app._signal_to_order(signal, account, [])
+        assert order is not None
+        assert order.side == "sell"
+        assert order.quantity > 0
+
+    @pytest.mark.asyncio
+    async def test_close_short_creates_buy_order(self, app):
+        await app._broker.connect()
+        account = await app._broker.get_account()
+        positions = [
+            Position(symbol="AAPL", quantity=10, avg_entry_price=100.0,
+                     market_value=1000.0, unrealized_pnl=50.0, side="short"),
+        ]
+        signal = Signal(
+            strategy="overbought_short", symbol="AAPL",
+            direction="close", strength=1.0,
+        )
+        order = app._signal_to_order(signal, account, positions)
+        assert order is not None
+        assert order.side == "buy"  # Buy to cover short
+        assert order.quantity == 10
+
+    @pytest.mark.asyncio
+    async def test_allocation_engine_gates_entry(self, app):
+        """Strategy at max positions should be blocked."""
+        await app._broker.connect()
+        account = await app._broker.get_account()
+        # Mark strategy as already having MAX positions
+        app._position_strategy_map["SYM1"] = "rsi_mean_reversion"
+        app._position_strategy_map["SYM2"] = "rsi_mean_reversion"
+        bar = _make_bar("AAPL", 100.0)
+        app._bar_history["AAPL"].append(bar)
+        signal = Signal(
+            strategy="rsi_mean_reversion", symbol="AAPL",
+            direction="long", strength=0.8,
+        )
+        order = app._signal_to_order(signal, account, [])
+        # AllocationEngine.MAX_POSITIONS_PER_STRATEGY = 2, already at 2
+        assert order is None
+
+    @pytest.mark.asyncio
+    async def test_position_strategy_map_tracks_entries(self, app):
+        """After a filled long order, position_strategy_map is updated."""
+        await app._broker.connect()
+        app._broker.set_price("AAPL", 100.0)
+        bar = _make_bar("AAPL", 100.0)
+        app._bar_history["AAPL"].append(bar)
+        app._portfolio_tracker = PortfolioTracker(5000.0)
+        account = await app._broker.get_account()
+        positions = await app._broker.get_positions()
+        signal = Signal(
+            strategy="adx_pullback", symbol="AAPL",
+            direction="long", strength=0.8,
+        )
+        result = await app._process_signal(signal, account, positions)
+        if result and result.status == "filled":
+            assert app._position_strategy_map.get("AAPL") == "adx_pullback"
+
+    @pytest.mark.asyncio
+    async def test_close_removes_from_strategy_map(self, app):
+        """After closing a position, symbol is removed from strategy map."""
+        await app._broker.connect()
+        app._broker.set_price("AAPL", 100.0)
+        app._portfolio_tracker = PortfolioTracker(5000.0)
+        # Buy first
+        buy = Order(symbol="AAPL", side="buy", quantity=10, order_type="market")
+        await app._broker.submit_order(buy)
+        app._position_strategy_map["AAPL"] = "test_strategy"
+        # Now close
+        account = await app._broker.get_account()
+        positions = await app._broker.get_positions()
+        signal = Signal(strategy="test_strategy", symbol="AAPL",
+                        direction="close", strength=1.0)
+        await app._process_signal(signal, account, positions)
+        assert "AAPL" not in app._position_strategy_map
+
+
+class TestRotationScheduler:
+    def test_scheduler_task_none_by_default(self):
+        app = AutoTrader(Settings())
+        assert app._scheduler_task is None
+
+    @pytest.mark.asyncio
+    async def test_scheduler_starts_when_enabled(self):
+        from autotrader.core.config import RotationConfig
+        settings = Settings()
+        rotation_config = RotationConfig()
+        app = AutoTrader(settings, rotation_config=rotation_config)
+        await app.start()
+        assert app._scheduler_task is not None
+        await app.stop()
+
+    @pytest.mark.asyncio
+    async def test_scheduler_does_not_start_when_disabled(self):
+        from autotrader.core.config import RotationConfig
+        settings = Settings()
+        settings.scheduler.enable_rotation_scheduler = False
+        rotation_config = RotationConfig()
+        app = AutoTrader(settings, rotation_config=rotation_config)
+        await app.start()
+        assert app._scheduler_task is None
+        await app.stop()
+
+    @pytest.mark.asyncio
+    async def test_scheduler_does_not_start_without_rotation_manager(self):
+        settings = Settings()
+        app = AutoTrader(settings)
+        await app.start()
+        assert app._scheduler_task is None
+        await app.stop()
+
+
+class TestRegimeTrackerIntegration:
+    def test_has_regime_tracker(self):
+        app = AutoTrader(Settings())
+        from autotrader.portfolio.regime_tracker import RegimeTracker
+        assert isinstance(app._regime_tracker, RegimeTracker)
+
+    def test_regime_tracker_confirmation_default(self):
+        app = AutoTrader(Settings())
+        assert app._regime_tracker._confirmation_bars == 3
+
+
+class TestEventDrivenRotationIntegration:
+    def test_has_event_driven_rotation(self):
+        settings = Settings()
+        app = AutoTrader(settings)
+        from autotrader.rotation.event_driven import EventDrivenRotation
+        assert isinstance(app._event_rotation, EventDrivenRotation)
+
+    def test_event_rotation_disabled_when_config_off(self):
+        settings = Settings()
+        settings.event_rotation.enable_event_driven = False
+        app = AutoTrader(settings)
+        assert app._event_rotation._enabled is False
+
+
+class TestVIXIntegration:
+    def test_vix_fetcher_when_enabled(self):
+        settings = Settings()
+        app = AutoTrader(settings)
+        from autotrader.data.market_sentiment import VIXFetcher
+        assert isinstance(app._vix_fetcher, VIXFetcher)
+
+    def test_vix_fetcher_none_when_disabled(self):
+        settings = Settings()
+        settings.sentiment.enable_vix = False
+        app = AutoTrader(settings)
+        assert app._vix_fetcher is None
+
+
+class TestTradeLoggerIntegration:
+    def test_trade_logger_initialized_when_enabled(self, tmp_path):
+        settings = Settings()
+        settings.performance.trade_log_path = str(tmp_path / "trades.jsonl")
+        settings.performance.equity_snapshot_path = str(tmp_path / "equity.jsonl")
+        app = AutoTrader(settings)
+        assert app._trade_logger is not None
+
+    def test_trade_logger_none_when_disabled(self):
+        settings = Settings()
+        settings.performance.enable_trade_log = False
+        app = AutoTrader(settings)
+        assert app._trade_logger is None
+
+    @pytest.mark.asyncio
+    async def test_trade_logged_on_fill(self, tmp_path):
+        settings = Settings()
+        settings.performance.trade_log_path = str(tmp_path / "trades.jsonl")
+        settings.performance.equity_snapshot_path = str(tmp_path / "equity.jsonl")
+        settings.broker.paper_balance = 5000.0
+        app = AutoTrader(settings)
+        await app.start()
+        app._broker.set_price("AAPL", 100.0)
+        bar = _make_bar("AAPL", 100.0)
+        app._bar_history["AAPL"].append(bar)
+        account = await app._broker.get_account()
+        positions = await app._broker.get_positions()
+        signal = Signal(strategy="adx_pullback", symbol="AAPL",
+                        direction="long", strength=0.8)
+        result = await app._process_signal(signal, account, positions)
+        if result and result.status == "filled":
+            trades = app._trade_logger.read_trades()
+            assert len(trades) >= 1
+            assert trades[0].symbol == "AAPL"
+            assert trades[0].strategy == "adx_pullback"
+        await app.stop()

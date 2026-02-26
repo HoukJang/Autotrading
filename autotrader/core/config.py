@@ -110,6 +110,57 @@ class RotationConfig(BaseModel):
         return v
 
 
+class EventDrivenRotationConfig(BaseModel):
+    """Event-driven rotation trigger configuration.
+
+    Supplements weekly rotation with mid-week triggers based on
+    regime transitions or VIX spikes.
+    """
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    enable_event_driven: bool = True
+    cooldown_hours: int = 48
+    vix_spike_trigger: float = 30.0
+    regime_triggers: list[str] = [
+        "TREND->HIGH_VOLATILITY",
+        "RANGING->HIGH_VOLATILITY",
+        "*->UNCERTAIN",
+    ]
+
+
+class SchedulerConfig(BaseModel):
+    """Scheduler configuration for automated rotation."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    enable_rotation_scheduler: bool = True
+    rotation_check_interval_seconds: int = 300
+    regime_proxy_symbol: str = "SPY"
+
+
+class PerformanceConfig(BaseModel):
+    """Performance tracking and logging configuration."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    enable_trade_log: bool = True
+    trade_log_path: str = "data/live_trades.jsonl"
+    equity_snapshot_path: str = "data/equity_snapshots.jsonl"
+    equity_snapshot_interval: int = 10
+
+
+class MarketSentimentConfig(BaseModel):
+    """VIX-based market sentiment configuration."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    enable_vix: bool = True
+    vix_symbol: str = "^VIX"
+    cache_ttl_seconds: int = 3600  # 1 hour
+    vix_spike_threshold: float = 30.0
+
+
 class Settings(BaseModel):
     """Root settings configuration."""
 
@@ -120,6 +171,10 @@ class Settings(BaseModel):
     alpaca: AlpacaConfig = AlpacaConfig()
     data: DataConfig = DataConfig()
     risk: RiskConfig = RiskConfig()
+    event_rotation: EventDrivenRotationConfig = EventDrivenRotationConfig()
+    scheduler: SchedulerConfig = SchedulerConfig()
+    performance: PerformanceConfig = PerformanceConfig()
+    sentiment: MarketSentimentConfig = MarketSentimentConfig()
     symbols: list[str] = ["AAPL", "MSFT", "GOOGL"]
 
     @field_validator("symbols")

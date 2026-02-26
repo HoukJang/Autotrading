@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -17,12 +18,17 @@ from autotrader.core.types import (
 from autotrader.broker.base import BrokerAdapter
 from autotrader.broker.paper import PaperBroker
 from autotrader.indicators.engine import IndicatorEngine
+from autotrader.data.market_sentiment import VIXFetcher
+from autotrader.portfolio.allocation_engine import AllocationEngine
+from autotrader.portfolio.regime_detector import MarketRegime, RegimeDetector
+from autotrader.portfolio.regime_tracker import RegimeTracker
 from autotrader.portfolio.tracker import PortfolioTracker
+from autotrader.portfolio.trade_logger import TradeLogger, LiveTradeRecord, EquitySnapshot
 from autotrader.risk.manager import RiskManager
 from autotrader.risk.position_sizer import PositionSizer
+from autotrader.rotation.event_driven import EventDrivenRotation
 from autotrader.rotation.manager import RotationManager
 from autotrader.strategy.engine import StrategyEngine
-from autotrader.strategy.sma_crossover import SmaCrossover
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
 from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
 from autotrader.strategy.adx_pullback import AdxPullback
@@ -55,6 +61,45 @@ class AutoTrader:
         self._rotation_manager: RotationManager | None = None
         if rotation_config is not None:
             self._rotation_manager = RotationManager(rotation_config, earnings_cal)
+
+        # Regime detection and allocation
+        self._regime_detector = RegimeDetector()
+        self._allocation_engine = AllocationEngine(self._regime_detector)
+        self._current_regime: MarketRegime = MarketRegime.UNCERTAIN
+        self._spy_bb_width_history: deque[float] = deque(maxlen=20)
+        self._regime_proxy_symbol: str = self._settings.scheduler.regime_proxy_symbol
+        self._position_strategy_map: dict[str, str] = {}
+
+        # Debounced regime tracking
+        self._regime_tracker = RegimeTracker(confirmation_bars=3)
+
+        # Event-driven rotation
+        self._event_rotation = EventDrivenRotation(
+            cooldown_hours=self._settings.event_rotation.cooldown_hours,
+            vix_spike_trigger=self._settings.event_rotation.vix_spike_trigger,
+            regime_triggers=self._settings.event_rotation.regime_triggers,
+            enabled=self._settings.event_rotation.enable_event_driven,
+        )
+
+        # VIX fetcher
+        self._vix_fetcher: VIXFetcher | None = None
+        if self._settings.sentiment.enable_vix:
+            self._vix_fetcher = VIXFetcher(
+                symbol=self._settings.sentiment.vix_symbol,
+                cache_ttl_seconds=self._settings.sentiment.cache_ttl_seconds,
+            )
+
+        # Scheduler and logging
+        self._scheduler_task: asyncio.Task | None = None
+        self._bar_count: int = 0
+
+        # Trade logger
+        self._trade_logger: TradeLogger | None = None
+        if settings.performance.enable_trade_log:
+            self._trade_logger = TradeLogger(
+                settings.performance.trade_log_path,
+                settings.performance.equity_snapshot_path,
+            )
 
     def _create_broker(self) -> BrokerAdapter:
         if self._settings.broker.type == "paper":
@@ -96,16 +141,27 @@ class AutoTrader:
         self._register_strategies()
         self._running = True
 
-        await self._broker.subscribe_bars(self._settings.symbols, self._on_bar)
+        symbols = list(set(self._settings.symbols + [self._regime_proxy_symbol]))
+        await self._broker.subscribe_bars(symbols, self._on_bar)
 
         if hasattr(self._broker, "run_stream"):
             self._stream_task = asyncio.create_task(
                 asyncio.to_thread(self._broker.run_stream),
             )
 
+        if self._rotation_manager and self._settings.scheduler.enable_rotation_scheduler:
+            self._scheduler_task = asyncio.create_task(self._rotation_scheduler())
+
     async def stop(self) -> None:
         logger.info("Stopping %s", self._settings.system.name)
         self._running = False
+        if self._scheduler_task is not None and not self._scheduler_task.done():
+            self._scheduler_task.cancel()
+            try:
+                await self._scheduler_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._scheduler_task = None
         if self._stream_task is not None and not self._stream_task.done():
             self._stream_task.cancel()
             try:
@@ -120,6 +176,10 @@ class AutoTrader:
         history.append(bar)
 
         indicators = self._indicator_engine.compute(history)
+
+        # Update regime from proxy symbol (SPY)
+        if bar.symbol == self._regime_proxy_symbol:
+            self._update_regime(indicators)
 
         ctx = MarketContext(
             symbol=bar.symbol,
@@ -152,6 +212,22 @@ class AutoTrader:
 
             self._rotation_manager.check_weekly_loss_limit(account.equity)
 
+        # Equity snapshot logging
+        self._bar_count += 1
+        if (
+            self._trade_logger is not None
+            and self._bar_count % self._settings.performance.equity_snapshot_interval == 0
+        ):
+            snap = EquitySnapshot(
+                timestamp=bar.timestamp.isoformat(),
+                equity=account.equity,
+                cash=account.cash,
+                regime=self._current_regime.value,
+                position_count=len(positions),
+                open_positions=[p.symbol for p in positions],
+            )
+            self._trade_logger.log_equity(snap)
+
         signals = await self._strategy_engine.process(ctx)
         if not signals:
             return
@@ -183,20 +259,50 @@ class AutoTrader:
             result.filled_qty, result.filled_price,
         )
 
-        if result.status == "filled" and self._portfolio_tracker is not None:
+        if result.status == "filled":
+            # Track position->strategy mapping
+            if signal.direction in ("long", "short"):
+                self._position_strategy_map[signal.symbol] = signal.strategy
+            elif signal.direction == "close":
+                self._position_strategy_map.pop(signal.symbol, None)
+
+            # Compute PnL for closes
             pnl = 0.0
-            if order.side == "sell":
+            if signal.direction == "close":
                 pos = next((p for p in positions if p.symbol == order.symbol), None)
                 if pos is not None:
-                    pnl = (result.filled_price - pos.avg_entry_price) * result.filled_qty
-            self._portfolio_tracker.record_trade(
-                symbol=order.symbol,
-                side=order.side,
-                qty=result.filled_qty,
-                price=result.filled_price,
-                pnl=pnl,
-            )
+                    if pos.side == "long":
+                        pnl = (result.filled_price - pos.avg_entry_price) * result.filled_qty
+                    else:  # short
+                        pnl = (pos.avg_entry_price - result.filled_price) * result.filled_qty
+
+            if self._portfolio_tracker is not None:
+                self._portfolio_tracker.record_trade(
+                    symbol=order.symbol,
+                    side=order.side,
+                    qty=result.filled_qty,
+                    price=result.filled_price,
+                    pnl=pnl,
+                )
             self._risk_manager.record_pnl(pnl)
+
+            # Log trade
+            if self._trade_logger is not None:
+                account_after = await self._broker.get_account()
+                record = LiveTradeRecord(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    symbol=signal.symbol,
+                    strategy=signal.strategy,
+                    direction=signal.direction,
+                    side=order.side,
+                    quantity=result.filled_qty,
+                    price=result.filled_price,
+                    pnl=pnl,
+                    regime=self._current_regime.value,
+                    equity_after=account_after.equity,
+                    metadata=signal.metadata,
+                )
+                self._trade_logger.log_trade(record)
 
         return result
 
@@ -207,30 +313,122 @@ class AutoTrader:
             pos = next((p for p in positions if p.symbol == signal.symbol), None)
             if pos is None:
                 return None
+            side = "sell" if pos.side == "long" else "buy"
             return Order(
                 symbol=signal.symbol,
-                side="sell",
+                side=side,
                 quantity=pos.quantity,
                 order_type="market",
             )
 
-        if signal.direction == "long":
-            price = account.equity  # fallback
-            # Use last bar close if available
+        if signal.direction in ("long", "short"):
+            strategy_count = sum(
+                1 for s in self._position_strategy_map.values()
+                if s == signal.strategy
+            )
+            if not self._allocation_engine.should_enter(
+                signal.strategy, self._current_regime, strategy_count,
+            ):
+                return None
             history = self._bar_history.get(signal.symbol)
-            if history:
-                price = history[-1].close
-            qty = self._position_sizer.calculate(price, account)
+            if not history:
+                return None
+            price = history[-1].close
+            qty = self._allocation_engine.get_position_size(
+                signal.strategy, price, account.equity, self._current_regime,
+            )
             if qty <= 0:
                 return None
+            side = "buy" if signal.direction == "long" else "sell"
             return Order(
                 symbol=signal.symbol,
-                side="buy",
+                side=side,
                 quantity=qty,
                 order_type="market",
             )
 
         return None
+
+    def _update_regime(self, indicators: dict) -> None:
+        """Update market regime from proxy symbol indicators."""
+        adx = indicators.get("ADX_14")
+        bbands = indicators.get("BBANDS_20")
+        atr = indicators.get("ATR_14")
+        if any(v is None for v in [adx, bbands, atr]):
+            return
+        bb_width = bbands["width"]
+        self._spy_bb_width_history.append(bb_width)
+        bb_width_avg = sum(self._spy_bb_width_history) / len(self._spy_bb_width_history)
+        history = self._bar_history.get(self._regime_proxy_symbol)
+        if not history:
+            return
+        close = history[-1].close
+        atr_ratio = atr / close if close > 0 else 0.0
+
+        raw_regime = self._regime_detector.classify(
+            adx=adx,
+            bb_width=bb_width,
+            bb_width_avg=bb_width_avg,
+            atr_ratio=atr_ratio,
+        )
+
+        # Use RegimeTracker for debounced transitions
+        timestamp = history[-1].timestamp
+        transition = self._regime_tracker.update(raw_regime, timestamp)
+        if transition is not None:
+            logger.info(
+                "Regime confirmed: %s -> %s (after %d bars)",
+                transition.previous.value,
+                transition.current.value,
+                transition.bars_in_new_regime,
+            )
+            self._current_regime = transition.current
+
+            # Check event-driven rotation trigger
+            vix_value = None
+            if self._vix_fetcher is not None:
+                try:
+                    sentiment = self._vix_fetcher.get_sentiment()
+                    vix_value = sentiment.vix_value
+                except Exception:
+                    logger.warning("VIX fetch failed during regime transition check")
+
+            should_trigger, reason = self._event_rotation.should_trigger_rotation(
+                transition=transition, vix_value=vix_value,
+            )
+            if should_trigger:
+                logger.info("Event-driven rotation triggered: %s", reason)
+                self._event_rotation.mark_triggered()
+                if self._rotation_manager is not None:
+                    asyncio.ensure_future(self._execute_event_rotation(reason))
+
+    async def _execute_event_rotation(self, reason: str) -> None:
+        """Execute an event-driven mid-week rotation."""
+        try:
+            logger.info("Executing event-driven rotation: %s", reason)
+            # Universe selection would be called here when fully wired
+        except Exception:
+            logger.exception("Event-driven rotation execution failed")
+
+    async def _rotation_scheduler(self) -> None:
+        """Background task that checks for weekly rotation day."""
+        last_rotation_date = None
+        interval = self._settings.scheduler.rotation_check_interval_seconds
+        while self._running:
+            await asyncio.sleep(interval)
+            now = datetime.now(timezone.utc)
+            rotation_day = 5  # Saturday by default
+            if self._rotation_manager is not None:
+                rotation_day = getattr(
+                    self._rotation_manager._config, "rotation_day", 5,
+                )
+            if now.weekday() == rotation_day and last_rotation_date != now.date():
+                try:
+                    logger.info("Rotation scheduler: triggering weekly rotation")
+                    # Universe selection would be called here when fully wired
+                    last_rotation_date = now.date()
+                except Exception:
+                    logger.exception("Rotation scheduler failed")
 
     async def apply_rotation(self, universe_result) -> None:
         """Apply a new universe rotation (called by external scheduler)."""

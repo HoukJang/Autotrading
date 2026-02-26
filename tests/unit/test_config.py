@@ -296,3 +296,79 @@ class TestRotationConfig:
         )
         assert cfg.max_universe_size == 20
         assert cfg.weekly_loss_limit_pct == 0.10
+
+
+class TestSchedulerConfig:
+    def test_defaults(self):
+        from autotrader.core.config import SchedulerConfig
+        cfg = SchedulerConfig()
+        assert cfg.enable_rotation_scheduler is True
+        assert cfg.rotation_check_interval_seconds == 300
+        assert cfg.regime_proxy_symbol == "SPY"
+
+    def test_custom_values(self):
+        from autotrader.core.config import SchedulerConfig
+        cfg = SchedulerConfig(
+            enable_rotation_scheduler=False,
+            rotation_check_interval_seconds=600,
+            regime_proxy_symbol="QQQ",
+        )
+        assert cfg.enable_rotation_scheduler is False
+        assert cfg.rotation_check_interval_seconds == 600
+        assert cfg.regime_proxy_symbol == "QQQ"
+
+
+class TestPerformanceConfig:
+    def test_defaults(self):
+        from autotrader.core.config import PerformanceConfig
+        cfg = PerformanceConfig()
+        assert cfg.enable_trade_log is True
+        assert cfg.trade_log_path == "data/live_trades.jsonl"
+        assert cfg.equity_snapshot_path == "data/equity_snapshots.jsonl"
+        assert cfg.equity_snapshot_interval == 10
+
+    def test_custom_values(self):
+        from autotrader.core.config import PerformanceConfig
+        cfg = PerformanceConfig(
+            enable_trade_log=False,
+            trade_log_path="/tmp/trades.jsonl",
+            equity_snapshot_interval=5,
+        )
+        assert cfg.enable_trade_log is False
+        assert cfg.trade_log_path == "/tmp/trades.jsonl"
+        assert cfg.equity_snapshot_interval == 5
+
+
+class TestSettingsWithNewConfigs:
+    def test_settings_has_scheduler(self):
+        settings = Settings()
+        assert hasattr(settings, 'scheduler')
+        from autotrader.core.config import SchedulerConfig
+        assert isinstance(settings.scheduler, SchedulerConfig)
+
+    def test_settings_has_performance(self):
+        settings = Settings()
+        assert hasattr(settings, 'performance')
+        from autotrader.core.config import PerformanceConfig
+        assert isinstance(settings.performance, PerformanceConfig)
+
+
+class TestMarketSentimentConfig:
+    def test_defaults(self):
+        from autotrader.core.config import MarketSentimentConfig
+        cfg = MarketSentimentConfig()
+        assert cfg.enable_vix is True
+        assert cfg.vix_symbol == "^VIX"
+        assert cfg.cache_ttl_seconds == 3600
+        assert cfg.vix_spike_threshold == 30.0
+
+    def test_custom_values(self):
+        from autotrader.core.config import MarketSentimentConfig
+        cfg = MarketSentimentConfig(enable_vix=False, vix_spike_threshold=25.0)
+        assert cfg.enable_vix is False
+        assert cfg.vix_spike_threshold == 25.0
+
+    def test_settings_has_sentiment(self):
+        from autotrader.core.config import Settings
+        s = Settings()
+        assert hasattr(s, 'sentiment')

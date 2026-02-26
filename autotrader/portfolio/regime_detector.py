@@ -78,6 +78,50 @@ class RegimeDetector:
         """
         return dict(_REGIME_WEIGHTS[regime])
 
+    def get_vix_adjusted_weights(
+        self,
+        regime: MarketRegime,
+        sentiment_level: "SentimentLevel",
+    ) -> dict[str, float]:
+        """Get strategy weights adjusted for VIX/sentiment level.
+
+        Applies defensive tilts when VIX is elevated or extreme, and a
+        slight complacency-risk adjustment when VIX is unusually low.
+        NORMAL sentiment returns base weights unchanged.
+
+        Args:
+            regime: Current market regime.
+            sentiment_level: Current VIX-based sentiment level.
+
+        Returns:
+            Dict of strategy name -> adjusted weight (all >= 0.0).
+        """
+        from autotrader.data.market_sentiment import SentimentLevel
+
+        weights = self.get_weights(regime)
+
+        if sentiment_level == SentimentLevel.NORMAL:
+            return weights
+
+        # Adjustments per sentiment: (rsi_mr_delta, overbought_short_delta, momentum_delta)
+        adjustments: dict[SentimentLevel, tuple[float, float, float]] = {
+            SentimentLevel.LOW: (0.0, 0.03, -0.03),
+            SentimentLevel.ELEVATED: (0.03, 0.03, -0.03),
+            SentimentLevel.HIGH: (0.05, 0.05, -0.07),
+            SentimentLevel.EXTREME: (0.10, 0.10, -0.10),
+        }
+
+        deltas = adjustments.get(sentiment_level)
+        if deltas is None:
+            return weights
+
+        rsi_d, short_d, mom_d = deltas
+        weights["rsi_mean_reversion"] = max(0.0, weights["rsi_mean_reversion"] + rsi_d)
+        weights["overbought_short"] = max(0.0, weights["overbought_short"] + short_d)
+        weights["regime_momentum"] = max(0.0, weights["regime_momentum"] + mom_d)
+
+        return weights
+
 
 # Regime -> strategy weight mappings
 _REGIME_WEIGHTS: dict[MarketRegime, dict[str, float]] = {

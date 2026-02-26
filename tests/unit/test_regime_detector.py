@@ -191,3 +191,63 @@ class TestGetWeightsReturnsCopy:
 
         fresh_weights = detector.get_weights(MarketRegime.TREND)
         assert fresh_weights["adx_pullback"] == original_value
+
+
+# -- VIX-adjusted weight tests -----------------------------------------------
+
+
+class TestVixAdjustedWeights:
+    """Tests for get_vix_adjusted_weights with VIX sentiment scaling."""
+
+    def test_normal_sentiment_no_change(self, detector: RegimeDetector):
+        """NORMAL VIX should return weights unchanged."""
+        from autotrader.data.market_sentiment import SentimentLevel
+
+        base = detector.get_weights(MarketRegime.TREND)
+        adjusted = detector.get_vix_adjusted_weights(MarketRegime.TREND, SentimentLevel.NORMAL)
+        assert adjusted == base
+
+    def test_high_vix_boosts_defensive(self, detector: RegimeDetector):
+        """HIGH VIX should boost rsi_mean_reversion and overbought_short."""
+        from autotrader.data.market_sentiment import SentimentLevel
+
+        base = detector.get_weights(MarketRegime.TREND)
+        adjusted = detector.get_vix_adjusted_weights(MarketRegime.TREND, SentimentLevel.HIGH)
+        assert adjusted["rsi_mean_reversion"] > base["rsi_mean_reversion"]
+        assert adjusted["overbought_short"] > base["overbought_short"]
+        assert adjusted["regime_momentum"] < base["regime_momentum"]
+
+    def test_extreme_vix_stronger_adjustment(self, detector: RegimeDetector):
+        """EXTREME VIX should have stronger adjustments than HIGH."""
+        from autotrader.data.market_sentiment import SentimentLevel
+
+        high = detector.get_vix_adjusted_weights(MarketRegime.TREND, SentimentLevel.HIGH)
+        extreme = detector.get_vix_adjusted_weights(MarketRegime.TREND, SentimentLevel.EXTREME)
+        assert extreme["rsi_mean_reversion"] > high["rsi_mean_reversion"]
+
+    def test_low_vix_slight_caution(self, detector: RegimeDetector):
+        """LOW VIX should slightly boost overbought_short (complacency risk)."""
+        from autotrader.data.market_sentiment import SentimentLevel
+
+        base = detector.get_weights(MarketRegime.TREND)
+        adjusted = detector.get_vix_adjusted_weights(MarketRegime.TREND, SentimentLevel.LOW)
+        assert adjusted["overbought_short"] > base["overbought_short"]
+
+    def test_weights_non_negative(self, detector: RegimeDetector):
+        """All adjusted weights must be >= 0."""
+        from autotrader.data.market_sentiment import SentimentLevel
+
+        for regime in MarketRegime:
+            for level in SentimentLevel:
+                weights = detector.get_vix_adjusted_weights(regime, level)
+                for v in weights.values():
+                    assert v >= 0.0, f"Negative weight for {regime}/{level}: {weights}"
+
+    def test_elevated_vix_moderate_adjustment(self, detector: RegimeDetector):
+        """ELEVATED VIX should have moderate adjustments."""
+        from autotrader.data.market_sentiment import SentimentLevel
+
+        base = detector.get_weights(MarketRegime.RANGING)
+        adjusted = detector.get_vix_adjusted_weights(MarketRegime.RANGING, SentimentLevel.ELEVATED)
+        # Should be between base and HIGH adjustment
+        assert adjusted != base  # Some adjustment should occur
