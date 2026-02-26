@@ -135,3 +135,52 @@ class RotationManager:
             hour=target_hour, minute=0, second=0, microsecond=0
         ) + timedelta(days=days_ahead)
         return deadline
+
+    def get_force_close_symbols(
+        self,
+        current_time: datetime,
+        open_position_symbols: list[str],
+    ) -> list[str]:
+        """Get symbols that should be force-closed now.
+
+        Returns symbols from the watchlist that are past their deadline
+        and still have open positions. When halted, returns all open positions.
+        """
+        if self._state.is_halted:
+            return list(open_position_symbols)
+
+        force_close: list[str] = []
+        for sym, entry in self._state.watchlist.items():
+            if sym in open_position_symbols and entry.is_past_deadline(current_time):
+                force_close.append(sym)
+        return force_close
+
+    def check_weekly_loss_limit(self, current_equity: float) -> bool:
+        """Check if weekly loss limit has been breached.
+
+        Returns True if breached (and sets halted state).
+        """
+        if self._state.weekly_start_equity <= 0:
+            return False
+        loss_pct = (
+            (self._state.weekly_start_equity - current_equity)
+            / self._state.weekly_start_equity
+        )
+        if loss_pct >= self._config.weekly_loss_limit_pct:
+            self._state.is_halted = True
+            logger.warning(
+                "Weekly loss limit breached: %.2f%% (limit: %.2f%%)",
+                loss_pct * 100,
+                self._config.weekly_loss_limit_pct * 100,
+            )
+            return True
+        return False
+
+    def on_position_closed(self, symbol: str) -> None:
+        """Notify that a position has been closed (natural exit or force close).
+
+        Removes the symbol from watchlist if present.
+        """
+        if symbol in self._state.watchlist:
+            del self._state.watchlist[symbol]
+            logger.info("Watchlist symbol %s position closed, removed from watchlist", symbol)

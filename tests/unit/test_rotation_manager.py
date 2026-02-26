@@ -200,3 +200,96 @@ class TestApplyRotation:
         mgr.apply_rotation(universe, open_position_symbols=[], new_equity=3000.0)
         assert mgr._state.is_halted is False
         assert mgr._state.weekly_start_equity == 3000.0
+
+
+class TestForceClose:
+    def test_returns_watchlist_past_deadline(self):
+        mgr = RotationManager(RotationConfig())
+        past = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        mgr._state.watchlist["GOOG"] = WatchlistEntry(
+            symbol="GOOG",
+            added_at=past,
+            deadline=datetime(2026, 3, 6, 14, 0, tzinfo=timezone.utc),
+        )
+        now = datetime(2026, 3, 6, 15, 0, tzinfo=timezone.utc)
+        result = mgr.get_force_close_symbols(now, ["GOOG"])
+        assert "GOOG" in result
+
+    def test_no_force_close_before_deadline(self):
+        mgr = RotationManager(RotationConfig())
+        mgr._state.watchlist["GOOG"] = WatchlistEntry(
+            symbol="GOOG",
+            added_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            deadline=datetime(2026, 3, 6, 14, 0, tzinfo=timezone.utc),
+        )
+        now = datetime(2026, 3, 5, 12, 0, tzinfo=timezone.utc)
+        result = mgr.get_force_close_symbols(now, ["GOOG"])
+        assert result == []
+
+    def test_only_returns_symbols_with_positions(self):
+        mgr = RotationManager(RotationConfig())
+        mgr._state.watchlist["GOOG"] = WatchlistEntry(
+            symbol="GOOG",
+            added_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            deadline=datetime(2026, 3, 6, 14, 0, tzinfo=timezone.utc),
+        )
+        now = datetime(2026, 3, 6, 15, 0, tzinfo=timezone.utc)
+        # GOOG is past deadline but not in open_positions
+        result = mgr.get_force_close_symbols(now, ["AAPL"])
+        assert result == []
+
+    def test_halted_returns_all_positions(self):
+        mgr = RotationManager(RotationConfig())
+        mgr._state.is_halted = True
+        result = mgr.get_force_close_symbols(
+            datetime.now(timezone.utc),
+            ["AAPL", "MSFT"],
+        )
+        assert set(result) == {"AAPL", "MSFT"}
+
+
+class TestWeeklyLossLimit:
+    def test_not_breached(self):
+        mgr = RotationManager(RotationConfig(weekly_loss_limit_pct=0.05))
+        mgr._state.weekly_start_equity = 3000.0
+        assert not mgr.check_weekly_loss_limit(2900.0)  # -3.3%
+        assert not mgr._state.is_halted
+
+    def test_breached_sets_halted(self):
+        mgr = RotationManager(RotationConfig(weekly_loss_limit_pct=0.05))
+        mgr._state.weekly_start_equity = 3000.0
+        assert mgr.check_weekly_loss_limit(2840.0)  # -5.3%
+        assert mgr._state.is_halted
+
+    def test_exact_boundary(self):
+        mgr = RotationManager(RotationConfig(weekly_loss_limit_pct=0.05))
+        mgr._state.weekly_start_equity = 3000.0
+        # Exactly 5% loss = $2850
+        assert mgr.check_weekly_loss_limit(2850.0)
+        assert mgr._state.is_halted
+
+    def test_zero_equity_start(self):
+        mgr = RotationManager(RotationConfig(weekly_loss_limit_pct=0.05))
+        mgr._state.weekly_start_equity = 0.0
+        assert not mgr.check_weekly_loss_limit(1000.0)
+
+
+class TestOnPositionClosed:
+    def test_removes_from_watchlist(self):
+        mgr = RotationManager(RotationConfig())
+        mgr._state.watchlist["GOOG"] = WatchlistEntry(
+            symbol="GOOG",
+            added_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            deadline=datetime(2026, 3, 6, 14, 0, tzinfo=timezone.utc),
+        )
+        mgr.on_position_closed("GOOG")
+        assert "GOOG" not in mgr._state.watchlist
+
+    def test_noop_for_active(self):
+        mgr = RotationManager(RotationConfig())
+        mgr._state.active_symbols = ["AAPL"]
+        mgr.on_position_closed("AAPL")  # no error
+
+    def test_noop_for_unknown(self):
+        mgr = RotationManager(RotationConfig())
+        mgr.on_position_closed("TSLA")  # no error
