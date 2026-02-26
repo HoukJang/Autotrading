@@ -642,7 +642,7 @@ def main() -> None:
         settings = Settings()
 
     setup_logging("autotrader", level=settings.system.log_level, log_dir=settings.system.log_dir)
-    app = AutoTrader(settings)
+    app = AutoTrader(settings, rotation_config=settings.rotation)
 
     async def run():
         await app.start()

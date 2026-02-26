@@ -19,13 +19,23 @@ data:
 risk:
   max_position_pct: 0.10
   daily_loss_limit_pct: 0.02
-  max_drawdown_pct: 0.05
+  max_drawdown_pct: 0.15
   max_open_positions: 8
 
+rotation:
+  max_universe_size: 15
+  max_concurrent_positions: 3
+  weekly_loss_limit_pct: 0.05
+  force_close_day: 4
+  force_close_hour: 14
+  rotation_day: 5
+
 scheduler:
-  enable_rotation_scheduler: false
+  enable_rotation_scheduler: true
   rotation_check_interval_seconds: 300
   regime_proxy_symbol: "SPY"
+  universe_history_days: 120
+  universe_max_candidates: 50
 
 performance:
   enable_trade_log: true

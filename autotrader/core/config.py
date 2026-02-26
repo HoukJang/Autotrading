@@ -173,6 +173,7 @@ class Settings(BaseModel):
     alpaca: AlpacaConfig = AlpacaConfig()
     data: DataConfig = DataConfig()
     risk: RiskConfig = RiskConfig()
+    rotation: RotationConfig = RotationConfig()
     event_rotation: EventDrivenRotationConfig = EventDrivenRotationConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
     performance: PerformanceConfig = PerformanceConfig()
