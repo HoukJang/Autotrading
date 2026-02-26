@@ -30,7 +30,7 @@ class RegimeDetector:
 
     ADX_TREND: float = 25.0
     ADX_NO_TREND: float = 20.0
-    BB_EXPAND: float = 1.3
+    BB_EXPAND: float = 1.0
     BB_CONTRACT: float = 0.8
     VOL_HIGH: float = 0.03
 

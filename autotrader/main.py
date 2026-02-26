@@ -40,7 +40,7 @@ from autotrader.universe.provider import SP500Provider
 from autotrader.universe.selector import UniverseSelector
 from autotrader.universe.earnings import EarningsCalendar
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("autotrader.main")
 
 
 class AutoTrader:
