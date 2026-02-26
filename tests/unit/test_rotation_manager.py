@@ -293,3 +293,44 @@ class TestOnPositionClosed:
     def test_noop_for_unknown(self):
         mgr = RotationManager(RotationConfig())
         mgr.on_position_closed("TSLA")  # no error
+
+
+class TestEarningsForceClose:
+    def test_earnings_e3_force_close(self):
+        from datetime import date
+        from autotrader.universe.earnings import EarningsCalendar
+
+        cal = EarningsCalendar()
+        cal._cache = {"AAPL": date(2026, 3, 10)}  # earnings on Mar 10 (Tuesday)
+        mgr = RotationManager(RotationConfig(), earnings_cal=cal)
+        mgr._state.active_symbols = ["AAPL"]
+        # Mar 5 is Thursday, E-3 business days before Mar 10
+        result = mgr.get_force_close_symbols(
+            datetime(2026, 3, 5, 12, 0, tzinfo=timezone.utc),
+            ["AAPL"],
+        )
+        assert "AAPL" in result
+
+    def test_no_earnings_force_close_outside_window(self):
+        from datetime import date
+        from autotrader.universe.earnings import EarningsCalendar
+
+        cal = EarningsCalendar()
+        cal._cache = {"AAPL": date(2026, 3, 10)}
+        mgr = RotationManager(RotationConfig(), earnings_cal=cal)
+        mgr._state.active_symbols = ["AAPL"]
+        # Mar 2 is Monday, well before E-3
+        result = mgr.get_force_close_symbols(
+            datetime(2026, 3, 2, 12, 0, tzinfo=timezone.utc),
+            ["AAPL"],
+        )
+        assert "AAPL" not in result
+
+    def test_no_earnings_cal_no_crash(self):
+        mgr = RotationManager(RotationConfig(), earnings_cal=None)
+        mgr._state.active_symbols = ["AAPL"]
+        result = mgr.get_force_close_symbols(
+            datetime(2026, 3, 5, 12, 0, tzinfo=timezone.utc),
+            ["AAPL"],
+        )
+        assert result == []

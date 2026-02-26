@@ -145,14 +145,25 @@ class RotationManager:
 
         Returns symbols from the watchlist that are past their deadline
         and still have open positions. When halted, returns all open positions.
+        Also checks earnings calendar for E-3 force close.
         """
         if self._state.is_halted:
             return list(open_position_symbols)
 
         force_close: list[str] = []
+
+        # Watchlist deadline force close
         for sym, entry in self._state.watchlist.items():
             if sym in open_position_symbols and entry.is_past_deadline(current_time):
                 force_close.append(sym)
+
+        # Earnings E-3 force close
+        if self._earnings_cal is not None:
+            check_date = current_time.date() if hasattr(current_time, "date") else current_time
+            for sym in open_position_symbols:
+                if sym not in force_close and self._earnings_cal.should_force_close(sym, check_date):
+                    force_close.append(sym)
+
         return force_close
 
     def check_weekly_loss_limit(self, current_equity: float) -> bool:
