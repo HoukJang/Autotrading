@@ -64,6 +64,8 @@ nul
 
 # Project specific
 data/*.db
+data/*.jsonl
+data/archive/
 *.sqlite
 *.sqlite3
 config/.env
