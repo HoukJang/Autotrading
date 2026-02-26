@@ -3,39 +3,40 @@ from __future__ import annotations
 
 import logging
 import sys
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 
 
-def setup_logging(name: str, level: str = "INFO") -> logging.Logger:
-    """Set up a logger with standard formatting.
+_LOG_FORMAT = "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
 
-    Creates or retrieves a logger with the given name and configures it
-    with a stream handler that writes to stdout. If the logger already
-    has handlers, no new handler is added.
 
-    Args:
-        name: Name for the logger (typically __name__ or module name).
-        level: Log level as string (DEBUG, INFO, WARNING, ERROR).
-               Defaults to "INFO".
-
-    Returns:
-        Configured Logger instance.
-
-    Example:
-        >>> log = setup_logging("myapp.module", level="DEBUG")
-        >>> log.info("Application started")
-    """
+def setup_logging(
+    name: str,
+    level: str = "INFO",
+    log_dir: str | None = None,
+) -> logging.Logger:
     logger = logging.getLogger(name)
-
-    # Convert level string to logging level
     log_level = getattr(logging, level.upper(), logging.INFO)
     logger.setLevel(log_level)
 
-    # Only add handler if logger doesn't already have one
     if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s | %(name)s | %(levelname)s | %(message)s")
-        )
-        logger.addHandler(handler)
+        # Console handler
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(logging.Formatter(_LOG_FORMAT))
+        logger.addHandler(console)
+
+        # File handler with daily rolling
+        if log_dir:
+            log_path = Path(log_dir)
+            log_path.mkdir(parents=True, exist_ok=True)
+            file_handler = TimedRotatingFileHandler(
+                filename=log_path / f"{name}.log",
+                when="midnight",
+                backupCount=30,
+                encoding="utf-8",
+            )
+            file_handler.suffix = "%Y-%m-%d"
+            file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+            logger.addHandler(file_handler)
 
     return logger

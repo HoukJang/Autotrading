@@ -463,7 +463,7 @@ def main() -> None:
     else:
         settings = Settings()
 
-    setup_logging("autotrader", level=settings.system.log_level)
+    setup_logging("autotrader", level=settings.system.log_level, log_dir=settings.system.log_dir)
     app = AutoTrader(settings)
 
     async def run():
