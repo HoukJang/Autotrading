@@ -89,6 +89,27 @@ class RiskConfig(BaseModel):
         return v
 
 
+class RotationConfig(BaseModel):
+    """Weekly rotation and watchlist configuration."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    max_universe_size: int = 15
+    max_concurrent_positions: int = 3
+    weekly_loss_limit_pct: float = 0.05
+    force_close_day: int = 4  # 0=Mon, 4=Fri
+    force_close_hour: int = 14  # 14:00 UTC
+    rotation_day: int = 5  # 5=Saturday
+
+    @field_validator("weekly_loss_limit_pct")
+    @classmethod
+    def validate_loss_limit(cls, v: float) -> float:
+        """Validate that weekly_loss_limit_pct is between 0 and 1."""
+        if not 0 < v < 1:
+            raise ValueError("weekly_loss_limit_pct must be between 0 and 1")
+        return v
+
+
 class Settings(BaseModel):
     """Root settings configuration."""
 

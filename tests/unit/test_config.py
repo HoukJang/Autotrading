@@ -261,3 +261,38 @@ def test_settings_custom_symbols():
     symbols = ["BTC/USD", "ETH/USD", "SPY"]
     settings = Settings(symbols=symbols)
     assert settings.symbols == symbols
+
+
+class TestRotationConfig:
+    def test_defaults(self):
+        from autotrader.core.config import RotationConfig
+        cfg = RotationConfig()
+        assert cfg.max_universe_size == 15
+        assert cfg.max_concurrent_positions == 3
+        assert cfg.weekly_loss_limit_pct == 0.05
+        assert cfg.force_close_day == 4  # Friday
+        assert cfg.force_close_hour == 14
+        assert cfg.rotation_day == 5  # Saturday
+
+    def test_validates_loss_limit_too_high(self):
+        from autotrader.core.config import RotationConfig
+        with pytest.raises(ValueError):
+            RotationConfig(weekly_loss_limit_pct=1.5)
+
+    def test_validates_loss_limit_negative(self):
+        from autotrader.core.config import RotationConfig
+        with pytest.raises(ValueError):
+            RotationConfig(weekly_loss_limit_pct=-0.1)
+
+    def test_custom_values(self):
+        from autotrader.core.config import RotationConfig
+        cfg = RotationConfig(
+            max_universe_size=20,
+            max_concurrent_positions=5,
+            weekly_loss_limit_pct=0.10,
+            force_close_day=3,
+            force_close_hour=15,
+            rotation_day=6,
+        )
+        assert cfg.max_universe_size == 20
+        assert cfg.weekly_loss_limit_pct == 0.10
