@@ -9,6 +9,7 @@ from autotrader.indicators.engine import IndicatorEngine
 from autotrader.strategy.base import Strategy
 from autotrader.risk.manager import RiskManager
 from autotrader.backtest.simulator import BacktestSimulator
+from autotrader.backtest.trade_collector import TradeCollector, TradeDetail
 from autotrader.portfolio.performance import calculate_metrics
 
 
@@ -18,6 +19,8 @@ class BacktestResult:
     final_equity: float
     metrics: dict
     equity_curve: list[float] = field(default_factory=list)
+    trades: list[TradeDetail] = field(default_factory=list)
+    timestamped_equity: list[tuple] = field(default_factory=list)
 
 
 class BacktestEngine:
@@ -35,9 +38,11 @@ class BacktestEngine:
     def run(self, bars: list[Bar]) -> BacktestResult:
         simulator = BacktestSimulator(self._initial_balance, self._risk_config)
         risk_mgr = RiskManager(self._risk_config)
+        collector = TradeCollector()
         history: deque[Bar] = deque(maxlen=500)
         trade_pnls: list[float] = []
         equity_curve: list[float] = [self._initial_balance]
+        timestamped_equity: list[tuple] = []
         total_filled = 0
 
         for bar in bars:
@@ -67,9 +72,13 @@ class BacktestEngine:
                     total_filled += 1
                     if signal.direction == "close":
                         trade_pnls.append(pnl)
+                        collector.on_exit(signal, bar, pnl)
+                    else:
+                        collector.on_entry(signal, bar, result.filled_qty)
 
             equity = simulator.get_equity_with_prices({bar.symbol: bar.close})
             equity_curve.append(equity)
+            timestamped_equity.append((bar.timestamp, equity))
 
         metrics = calculate_metrics(trade_pnls, self._initial_balance)
         return BacktestResult(
@@ -77,4 +86,6 @@ class BacktestEngine:
             final_equity=equity_curve[-1],
             metrics=metrics,
             equity_curve=equity_curve,
+            trades=collector.trades,
+            timestamped_equity=timestamped_equity,
         )

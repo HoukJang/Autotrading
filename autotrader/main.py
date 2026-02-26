@@ -22,6 +22,11 @@ from autotrader.risk.manager import RiskManager
 from autotrader.risk.position_sizer import PositionSizer
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.sma_crossover import SmaCrossover
+from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
+from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
+from autotrader.strategy.adx_pullback import AdxPullback
+from autotrader.strategy.overbought_short import OverboughtShort
+from autotrader.strategy.regime_momentum import RegimeMomentum
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +62,20 @@ class AutoTrader:
         raise ValueError(f"Unknown broker type: {self._settings.broker.type}")
 
     def _register_strategies(self) -> None:
-        strategy = SmaCrossover()
-        self._strategy_engine.add_strategy(strategy)
+        strategies = [
+            RsiMeanReversion(),
+            BbSqueezeBreakout(),
+            AdxPullback(),
+            OverboughtShort(),
+            RegimeMomentum(),
+        ]
         registered_keys: set[str] = set(self._indicator_engine._indicators.keys())
-        for spec in strategy.required_indicators:
-            if spec.key not in registered_keys:
-                self._indicator_engine.register(spec)
-                registered_keys.add(spec.key)
+        for strategy in strategies:
+            self._strategy_engine.add_strategy(strategy)
+            for spec in strategy.required_indicators:
+                if spec.key not in registered_keys:
+                    self._indicator_engine.register(spec)
+                    registered_keys.add(spec.key)
 
     async def start(self) -> None:
         logger.info("Starting %s", self._settings.system.name)

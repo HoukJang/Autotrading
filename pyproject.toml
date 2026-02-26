@@ -20,6 +20,10 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
 ]
+dashboard = [
+    "streamlit>=1.30.0",
+    "plotly>=5.18.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["autotrader*"]

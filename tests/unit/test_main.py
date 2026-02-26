@@ -15,7 +15,11 @@ from autotrader.portfolio.tracker import PortfolioTracker
 from autotrader.risk.manager import RiskManager
 from autotrader.risk.position_sizer import PositionSizer
 from autotrader.strategy.engine import StrategyEngine
-from autotrader.strategy.sma_crossover import SmaCrossover
+from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
+from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
+from autotrader.strategy.adx_pullback import AdxPullback
+from autotrader.strategy.overbought_short import OverboughtShort
+from autotrader.strategy.regime_momentum import RegimeMomentum
 
 
 def _make_bar(symbol: str = "AAPL", close: float = 150.0, idx: int = 0) -> Bar:
@@ -57,27 +61,31 @@ class TestAutoTrader:
 
 
 class TestRegisterStrategies:
-    def test_register_adds_sma_crossover(self):
+    def test_register_adds_five_swing_strategies(self):
         app = AutoTrader(Settings())
         app._register_strategies()
-        assert len(app._strategy_engine._strategies) == 1
-        assert isinstance(app._strategy_engine._strategies[0], SmaCrossover)
+        assert len(app._strategy_engine._strategies) == 5
+        types = [type(s) for s in app._strategy_engine._strategies]
+        assert RsiMeanReversion in types
+        assert BbSqueezeBreakout in types
+        assert AdxPullback in types
+        assert OverboughtShort in types
+        assert RegimeMomentum in types
 
     def test_register_registers_indicators(self):
         app = AutoTrader(Settings())
         app._register_strategies()
-        # SmaCrossover requires SMA_10 and SMA_30
-        assert "SMA_10" in app._indicator_engine._indicators
-        assert "SMA_30" in app._indicator_engine._indicators
+        keys = set(app._indicator_engine._indicators.keys())
+        assert "RSI_14" in keys
+        assert "ADX_14" in keys
+        assert "ATR_14" in keys
+        assert "BBANDS_20" in keys
 
     def test_register_deduplicates_indicators(self):
         app = AutoTrader(Settings())
         app._register_strategies()
-        # Calling again should not duplicate
         count_before = len(app._indicator_engine._indicators)
         app._register_strategies()
-        # Strategy count increases but indicator count should stay same
-        # (indicators dedup by key)
         assert len(app._indicator_engine._indicators) == count_before
 
 
