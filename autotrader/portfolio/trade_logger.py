@@ -28,6 +28,10 @@ class LiveTradeRecord:
     regime: str
     equity_after: float
     metadata: dict
+    exit_reason: str = ""
+    mfe: float = 0.0
+    mae: float = 0.0
+    bars_held: int = 0
 
 
 @dataclass(frozen=True)
@@ -62,7 +66,11 @@ class TradeLogger:
             f.write(json.dumps(asdict(snapshot)) + "\n")
 
     def read_trades(self) -> list[LiveTradeRecord]:
-        """Read all trade records, skipping corrupt lines."""
+        """Read all trade records, skipping corrupt lines.
+
+        Handles old records that lack the newer fields (exit_reason,
+        mfe, mae, bars_held) by supplying defaults.
+        """
         if not self._trade_path.exists():
             return []
         records: list[LiveTradeRecord] = []
@@ -73,7 +81,23 @@ class TradeLogger:
                     continue
                 try:
                     data = json.loads(line)
-                    records.append(LiveTradeRecord(**data))
+                    records.append(LiveTradeRecord(
+                        timestamp=data["timestamp"],
+                        symbol=data["symbol"],
+                        strategy=data["strategy"],
+                        direction=data["direction"],
+                        side=data["side"],
+                        quantity=data["quantity"],
+                        price=data["price"],
+                        pnl=data["pnl"],
+                        regime=data["regime"],
+                        equity_after=data["equity_after"],
+                        metadata=data["metadata"],
+                        exit_reason=data.get("exit_reason", ""),
+                        mfe=data.get("mfe", 0.0),
+                        mae=data.get("mae", 0.0),
+                        bars_held=data.get("bars_held", 0),
+                    ))
                 except (json.JSONDecodeError, TypeError, KeyError):
                     logger.warning("Skipping corrupt trade log line: %s", line[:80])
         return records

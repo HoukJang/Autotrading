@@ -23,6 +23,7 @@ from autotrader.portfolio.allocation_engine import AllocationEngine
 from autotrader.portfolio.regime_detector import MarketRegime, RegimeDetector
 from autotrader.portfolio.regime_tracker import RegimeTracker
 from autotrader.portfolio.tracker import PortfolioTracker
+from autotrader.portfolio.position_tracker import OpenPositionTracker
 from autotrader.portfolio.trade_logger import TradeLogger, LiveTradeRecord, EquitySnapshot
 from autotrader.risk.manager import RiskManager
 from autotrader.risk.position_sizer import PositionSizer
@@ -91,6 +92,9 @@ class AutoTrader:
                 symbol=self._settings.sentiment.vix_symbol,
                 cache_ttl_seconds=self._settings.sentiment.cache_ttl_seconds,
             )
+
+        # Position lifecycle tracking (MFE/MAE)
+        self._open_position_tracker = OpenPositionTracker()
 
         # Scheduler and logging
         self._scheduler_task: asyncio.Task | None = None
@@ -177,6 +181,11 @@ class AutoTrader:
     async def _on_bar(self, bar: Bar) -> None:
         history = self._bar_history[bar.symbol]
         history.append(bar)
+
+        # Update MFE/MAE tracking for open positions
+        self._open_position_tracker.update_prices(
+            bar.symbol, bar.high, bar.low, bar.close,
+        )
 
         indicators = self._indicator_engine.compute(history)
 
@@ -266,11 +275,24 @@ class AutoTrader:
             # Track position->strategy mapping
             if signal.direction in ("long", "short"):
                 self._position_strategy_map[signal.symbol] = signal.strategy
+                # Register with position tracker for MFE/MAE
+                self._open_position_tracker.open_position(
+                    symbol=signal.symbol,
+                    strategy=signal.strategy,
+                    direction=signal.direction,
+                    entry_price=result.filled_price,
+                    entry_time=datetime.now(timezone.utc),
+                    quantity=result.filled_qty,
+                )
             elif signal.direction == "close":
                 self._position_strategy_map.pop(signal.symbol, None)
 
-            # Compute PnL for closes
+            # Compute PnL for closes and extract MFE/MAE
             pnl = 0.0
+            exit_reason = signal.metadata.get("exit_reason", "") if signal.metadata else ""
+            mfe = 0.0
+            mae = 0.0
+            bars_held = 0
             if signal.direction == "close":
                 pos = next((p for p in positions if p.symbol == order.symbol), None)
                 if pos is not None:
@@ -278,6 +300,13 @@ class AutoTrader:
                         pnl = (result.filled_price - pos.avg_entry_price) * result.filled_qty
                     else:  # short
                         pnl = (pos.avg_entry_price - result.filled_price) * result.filled_qty
+
+                # Retrieve MFE/MAE from position tracker
+                tracked = self._open_position_tracker.close_position(signal.symbol)
+                if tracked is not None:
+                    mfe = tracked.mfe
+                    mae = tracked.mae
+                    bars_held = tracked.bar_count
 
             if self._portfolio_tracker is not None:
                 self._portfolio_tracker.record_trade(
@@ -289,7 +318,7 @@ class AutoTrader:
                 )
             self._risk_manager.record_pnl(pnl)
 
-            # Log trade
+            # Log trade with MFE/MAE data
             if self._trade_logger is not None:
                 account_after = await self._broker.get_account()
                 record = LiveTradeRecord(
@@ -304,6 +333,10 @@ class AutoTrader:
                     regime=self._current_regime.value,
                     equity_after=account_after.equity,
                     metadata=signal.metadata,
+                    exit_reason=exit_reason,
+                    mfe=mfe,
+                    mae=mae,
+                    bars_held=bars_held,
                 )
                 self._trade_logger.log_trade(record)
 
@@ -325,6 +358,23 @@ class AutoTrader:
             )
 
         if signal.direction in ("long", "short"):
+            # Prevent duplicate positions on same symbol
+            if signal.symbol in self._position_strategy_map:
+                existing_strategy = self._position_strategy_map[signal.symbol]
+                if existing_strategy != signal.strategy:
+                    logger.debug(
+                        "Skipping %s signal for %s: already has position from %s",
+                        signal.strategy, signal.symbol, existing_strategy,
+                    )
+                    return None
+
+            # Also check broker positions
+            existing_pos = next(
+                (p for p in positions if p.symbol == signal.symbol), None,
+            )
+            if existing_pos is not None:
+                return None
+
             strategy_count = sum(
                 1 for s in self._position_strategy_map.values()
                 if s == signal.strategy
