@@ -119,7 +119,7 @@ def test_risk_config_defaults():
     risk_cfg = RiskConfig()
     assert risk_cfg.max_position_pct == 0.10
     assert risk_cfg.daily_loss_limit_pct == 0.02
-    assert risk_cfg.max_drawdown_pct == 0.05
+    assert risk_cfg.max_drawdown_pct == 0.15
     assert risk_cfg.max_open_positions == 5
 
 

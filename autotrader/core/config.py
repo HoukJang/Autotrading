@@ -69,7 +69,7 @@ class RiskConfig(BaseModel):
 
     max_position_pct: float = 0.10
     daily_loss_limit_pct: float = 0.02
-    max_drawdown_pct: float = 0.05
+    max_drawdown_pct: float = 0.15
     max_open_positions: int = 5
 
     @field_validator("max_position_pct", "daily_loss_limit_pct", "max_drawdown_pct")

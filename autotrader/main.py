@@ -337,8 +337,21 @@ class AutoTrader:
             if not history:
                 return None
             price = history[-1].close
+
+            # Cash availability check
+            position_value = price  # minimum 1 share
+            if account.cash < position_value:
+                logger.info("Insufficient cash for %s (need %.2f, have %.2f)",
+                            signal.symbol, position_value, account.cash)
+                return None
+
+            # Get ATR for risk-based sizing
+            indicators = self._indicator_engine.compute(history)
+            atr = indicators.get("ATR_14")
+
             qty = self._allocation_engine.get_position_size(
                 signal.strategy, price, account.equity, self._current_regime,
+                atr=atr, direction=signal.direction,
             )
             if qty <= 0:
                 return None
@@ -514,6 +527,12 @@ class AutoTrader:
             open_position_symbols=open_syms,
             new_equity=account.equity,
         )
+        # Reset peak equity on rotation (breaks drawdown death spiral)
+        self._risk_manager.reset_peak_equity(account.equity)
+        logger.info(
+            "Peak equity reset to %.2f on rotation", account.equity,
+        )
+
         # Update subscribed symbols
         new_symbols = list(
             set(self._rotation_manager.active_symbols)
