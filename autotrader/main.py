@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -74,6 +74,13 @@ class AutoTrader:
         self._spy_bb_width_history: deque[float] = deque(maxlen=20)
         self._regime_proxy_symbol: str = self._settings.scheduler.regime_proxy_symbol
         self._position_strategy_map: dict[str, str] = {}
+
+        # Daily bar history for regime detection (separate from live minute bars)
+        self._daily_bar_history: dict[str, deque[Bar]] = defaultdict(
+            lambda: deque(maxlen=settings.data.bar_history_size),
+        )
+        self._daily_regime_task: asyncio.Task | None = None
+        self._last_regime_update_date: date | None = None
 
         # Debounced regime tracking
         self._regime_tracker = RegimeTracker(confirmation_bars=3)
@@ -150,6 +157,12 @@ class AutoTrader:
         self._register_strategies()
         self._running = True
 
+        # Load historical daily bars and initialize regime
+        await self._warm_up_from_history()
+
+        # Start daily regime refresh scheduler
+        self._daily_regime_task = asyncio.create_task(self._daily_regime_scheduler())
+
         symbols = list(set(self._settings.symbols + [self._regime_proxy_symbol]))
         await self._broker.subscribe_bars(symbols, self._on_bar)
 
@@ -164,6 +177,13 @@ class AutoTrader:
     async def stop(self) -> None:
         logger.info("Stopping %s", self._settings.system.name)
         self._running = False
+        if self._daily_regime_task is not None and not self._daily_regime_task.done():
+            self._daily_regime_task.cancel()
+            try:
+                await self._daily_regime_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._daily_regime_task = None
         if self._scheduler_task is not None and not self._scheduler_task.done():
             self._scheduler_task.cancel()
             try:
@@ -191,9 +211,8 @@ class AutoTrader:
 
         indicators = self._indicator_engine.compute(history)
 
-        # Update regime from proxy symbol (SPY)
-        if bar.symbol == self._regime_proxy_symbol:
-            self._update_regime(indicators)
+        # Regime is updated from daily bars only (see _daily_regime_scheduler)
+        # Live minute bars do NOT update regime classification
 
         ctx = MarketContext(
             symbol=bar.symbol,
@@ -421,6 +440,80 @@ class AutoTrader:
 
         return None
 
+    async def _warm_up_from_history(self) -> None:
+        """Load historical daily bars and initialize regime from SPY data."""
+        if not hasattr(self._broker, "get_historical_bars"):
+            logger.info("Broker does not support historical bars, skipping warmup")
+            return
+
+        proxy = self._regime_proxy_symbol
+        symbols = list(set(self._settings.symbols + [proxy]))
+        logger.info("Loading historical daily bars for %d symbols...", len(symbols))
+
+        try:
+            hist = await self._broker.get_historical_bars(
+                symbols, days=self._settings.scheduler.universe_history_days,
+            )
+        except Exception:
+            logger.exception("Failed to load historical bars")
+            return
+
+        for sym, bars in hist.items():
+            for bar in bars:
+                self._daily_bar_history[sym].append(bar)
+
+        loaded_count = {s: len(b) for s, b in hist.items() if b}
+        logger.info("Loaded daily bars: %s", loaded_count)
+
+        self._initialize_regime_from_daily()
+
+    def _initialize_regime_from_daily(self) -> None:
+        """Walk through SPY daily bars to build bb_width_history and classify regime."""
+        proxy = self._regime_proxy_symbol
+        spy_history = self._daily_bar_history.get(proxy)
+        if not spy_history or len(spy_history) < 30:
+            logger.warning(
+                "Insufficient %s daily bars for regime init (%d bars)",
+                proxy, len(spy_history) if spy_history else 0,
+            )
+            return
+
+        # Walk through bars incrementally to build _spy_bb_width_history
+        self._spy_bb_width_history.clear()
+        temp: deque[Bar] = deque(maxlen=self._settings.data.bar_history_size)
+        for bar in spy_history:
+            temp.append(bar)
+            indicators = self._indicator_engine.compute(temp)
+            bbands = indicators.get("BBANDS_20")
+            if bbands is not None:
+                self._spy_bb_width_history.append(bbands["width"])
+
+        # Final classification from full history
+        indicators = self._indicator_engine.compute(spy_history)
+        adx = indicators.get("ADX_14")
+        bbands = indicators.get("BBANDS_20")
+        atr = indicators.get("ATR_14")
+        if any(v is None for v in [adx, bbands, atr]):
+            logger.warning("Indicators still None after warmup")
+            return
+
+        bb_width_avg = sum(self._spy_bb_width_history) / len(self._spy_bb_width_history)
+        close = list(spy_history)[-1].close
+        atr_ratio = atr / close if close > 0 else 0.0
+
+        regime = self._regime_detector.classify(
+            adx=adx, bb_width=bbands["width"],
+            bb_width_avg=bb_width_avg, atr_ratio=atr_ratio,
+        )
+
+        # Set directly (bypass debounce for initialization)
+        self._current_regime = regime
+        self._regime_tracker._confirmed_regime = regime
+        logger.info(
+            "Regime initialized: %s (ADX=%.1f, BB_ratio=%.2f, ATR_ratio=%.3f, %d daily bars)",
+            regime.value, adx, bbands["width"] / bb_width_avg, atr_ratio, len(spy_history),
+        )
+
     def _update_regime(self, indicators: dict) -> None:
         """Update market regime from proxy symbol indicators."""
         adx = indicators.get("ADX_14")
@@ -581,6 +674,48 @@ class AutoTrader:
             await self._run_universe_selection()
         except Exception:
             logger.exception("Event-driven rotation execution failed")
+
+    async def _daily_regime_scheduler(self) -> None:
+        """Refresh regime from latest SPY daily bar once per day after market close."""
+        while self._running:
+            await asyncio.sleep(300)  # Check every 5 minutes
+            now = datetime.now(timezone.utc)
+            today = now.date()
+
+            # Skip if already updated today
+            if self._last_regime_update_date == today:
+                continue
+
+            # Update after 21:00 UTC (market close 20:00 + 1hr buffer)
+            if now.hour < 21:
+                continue
+
+            if not hasattr(self._broker, "get_historical_bars"):
+                continue
+
+            try:
+                proxy = self._regime_proxy_symbol
+                hist = await self._broker.get_historical_bars([proxy], days=30)
+                spy_bars = hist.get(proxy, [])
+                if not spy_bars:
+                    continue
+
+                # Append new daily bars to _daily_bar_history
+                existing_timestamps = {
+                    b.timestamp for b in self._daily_bar_history[proxy]
+                }
+                new_count = 0
+                for bar in spy_bars:
+                    if bar.timestamp not in existing_timestamps:
+                        self._daily_bar_history[proxy].append(bar)
+                        new_count += 1
+
+                if new_count > 0:
+                    self._initialize_regime_from_daily()
+                    self._last_regime_update_date = today
+                    logger.info("Daily regime refresh: added %d bars", new_count)
+            except Exception:
+                logger.exception("Daily regime refresh failed")
 
     async def _rotation_scheduler(self) -> None:
         """Background task that checks for weekly rotation day."""
