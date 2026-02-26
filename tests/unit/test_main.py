@@ -304,3 +304,87 @@ class TestAutoTraderStartStop:
         await app.stop()
         assert app._running is False
         assert app._broker.connected is False
+
+
+class TestRotationManagerIntegration:
+    @pytest.fixture()
+    def app_with_rotation(self):
+        from autotrader.core.config import RotationConfig
+        settings = Settings()
+        settings.broker.paper_balance = 5000.0
+        rotation_config = RotationConfig()
+        return AutoTrader(settings, rotation_config=rotation_config)
+
+    def test_init_with_rotation_manager(self, app_with_rotation):
+        assert app_with_rotation._rotation_manager is not None
+
+    def test_init_without_rotation_manager(self):
+        app = AutoTrader(Settings())
+        assert app._rotation_manager is None
+
+    @pytest.mark.asyncio
+    async def test_on_bar_filters_signals_via_rotation(self, app_with_rotation):
+        """When rotation is active, signals for non-active symbols are blocked."""
+        app = app_with_rotation
+        await app.start()
+        # Set active symbols to only AAPL
+        app._rotation_manager._state.active_symbols = ["AAPL"]
+        # Feed bar for MSFT (not in active universe) - should not create orders
+        bar = _make_bar("MSFT", 150.0)
+        app._broker.set_price("MSFT", 150.0)
+        await app._on_bar(bar)
+        positions = await app._broker.get_positions()
+        msft_positions = [p for p in positions if p.symbol == "MSFT"]
+        assert len(msft_positions) == 0
+        await app.stop()
+
+    @pytest.mark.asyncio
+    async def test_on_bar_force_close_check(self, app_with_rotation):
+        """Force close signals are generated for watchlist symbols past deadline."""
+        from autotrader.rotation.types import WatchlistEntry
+        app = app_with_rotation
+        await app.start()
+        app._rotation_manager._state.active_symbols = ["AAPL"]
+        # Create a position for MSFT via paper broker
+        app._broker.set_price("MSFT", 100.0)
+        order = Order(symbol="MSFT", side="buy", quantity=10, order_type="market")
+        await app._broker.submit_order(order)
+        # Add MSFT to watchlist with deadline in the past
+        app._rotation_manager._state.watchlist["MSFT"] = WatchlistEntry(
+            symbol="MSFT",
+            added_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            deadline=datetime(2024, 1, 1, 0, 30, tzinfo=timezone.utc),
+        )
+        # Feed a bar for MSFT (after deadline: idx=100 = 100 min past base)
+        bar = _make_bar("MSFT", 105.0, idx=100)
+        app._broker.set_price("MSFT", 105.0)
+        await app._on_bar(bar)
+        # MSFT should be force-closed
+        positions = await app._broker.get_positions()
+        msft_positions = [p for p in positions if p.symbol == "MSFT"]
+        assert len(msft_positions) == 0
+        # Should be removed from watchlist
+        assert "MSFT" not in app._rotation_manager._state.watchlist
+        await app.stop()
+
+    @pytest.mark.asyncio
+    async def test_weekly_loss_check_halts_trading(self, app_with_rotation):
+        """Weekly loss limit triggers halt, blocking new entries."""
+        from autotrader.core.config import RotationConfig
+        settings = Settings()
+        settings.broker.paper_balance = 3000.0
+        cfg = RotationConfig(weekly_loss_limit_pct=0.01)  # 1% to trigger easily
+        app = AutoTrader(settings, rotation_config=cfg)
+        await app.start()
+        app._rotation_manager._state.active_symbols = ["AAPL"]
+        app._rotation_manager._state.weekly_start_equity = 3000.0
+        # Drain cash to simulate loss
+        app._broker._cash = 2900.0  # ~3.3% loss
+        bar = _make_bar("AAPL", 150.0)
+        await app._on_bar(bar)
+        assert app._rotation_manager._state.is_halted is True
+        await app.stop()
+
+    def test_apply_rotation_method_exists(self, app_with_rotation):
+        """AutoTrader should have apply_rotation method for external use."""
+        assert hasattr(app_with_rotation, "apply_rotation")

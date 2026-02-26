@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from autotrader.core.config import Settings, load_settings
+from autotrader.core.config import RotationConfig, Settings, load_settings
 from autotrader.core.event_bus import EventBus
 from autotrader.core.logger import setup_logging
 from autotrader.core.types import (
@@ -20,6 +20,7 @@ from autotrader.indicators.engine import IndicatorEngine
 from autotrader.portfolio.tracker import PortfolioTracker
 from autotrader.risk.manager import RiskManager
 from autotrader.risk.position_sizer import PositionSizer
+from autotrader.rotation.manager import RotationManager
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.sma_crossover import SmaCrossover
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
@@ -32,7 +33,12 @@ logger = logging.getLogger(__name__)
 
 
 class AutoTrader:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        rotation_config: RotationConfig | None = None,
+        earnings_cal: object | None = None,
+    ) -> None:
         self._settings = settings
         self._bus = EventBus()
         self._broker = self._create_broker()
@@ -46,6 +52,9 @@ class AutoTrader:
         )
         self._running = False
         self._stream_task: asyncio.Task | None = None
+        self._rotation_manager: RotationManager | None = None
+        if rotation_config is not None:
+            self._rotation_manager = RotationManager(rotation_config, earnings_cal)
 
     def _create_broker(self) -> BrokerAdapter:
         if self._settings.broker.type == "paper":
@@ -119,12 +128,39 @@ class AutoTrader:
             history=history,
         )
 
+        account = await self._broker.get_account()
+        positions = await self._broker.get_positions()
+
+        # Rotation manager: force close, weekly loss, signal filtering
+        if self._rotation_manager:
+            open_syms = [p.symbol for p in positions]
+            force_close = self._rotation_manager.get_force_close_symbols(
+                bar.timestamp, open_syms,
+            )
+            for sym in force_close:
+                close_sig = Signal(
+                    strategy="rotation_manager",
+                    symbol=sym,
+                    direction="close",
+                    strength=1.0,
+                    metadata={"exit_reason": "force_close"},
+                )
+                await self._process_signal(close_sig, account, positions)
+                self._rotation_manager.on_position_closed(sym)
+                # Refresh positions after close
+                positions = await self._broker.get_positions()
+
+            self._rotation_manager.check_weekly_loss_limit(account.equity)
+
         signals = await self._strategy_engine.process(ctx)
         if not signals:
             return
 
-        account = await self._broker.get_account()
-        positions = await self._broker.get_positions()
+        # Filter signals through rotation manager
+        if self._rotation_manager:
+            signals = self._rotation_manager.filter_signals(signals)
+            if not signals:
+                return
 
         for signal in signals:
             await self._process_signal(signal, account, positions)
@@ -195,6 +231,31 @@ class AutoTrader:
             )
 
         return None
+
+    async def apply_rotation(self, universe_result) -> None:
+        """Apply a new universe rotation (called by external scheduler)."""
+        if self._rotation_manager is None:
+            logger.warning("apply_rotation called but no rotation manager configured")
+            return
+        account = await self._broker.get_account()
+        positions = await self._broker.get_positions()
+        open_syms = [p.symbol for p in positions]
+        self._rotation_manager.apply_rotation(
+            universe_result,
+            open_position_symbols=open_syms,
+            new_equity=account.equity,
+        )
+        # Update subscribed symbols
+        new_symbols = list(
+            set(self._rotation_manager.active_symbols)
+            | set(self._rotation_manager.watchlist_symbols)
+        )
+        self._settings.symbols = new_symbols
+        logger.info(
+            "Rotation applied: %d active, %d watchlist",
+            len(self._rotation_manager.active_symbols),
+            len(self._rotation_manager.watchlist_symbols),
+        )
 
 
 def main() -> None:
