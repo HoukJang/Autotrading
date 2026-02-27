@@ -168,6 +168,20 @@ class AutoTrader:
         # Load historical daily bars and initialize regime
         await self._warm_up_from_history()
 
+        # Write an initial equity snapshot so the dashboard shows current regime
+        if self._trade_logger is not None:
+            positions = await self._broker.get_positions()
+            snap = EquitySnapshot(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                equity=account.equity,
+                cash=account.cash,
+                regime=self._current_regime.value,
+                position_count=len(positions),
+                open_positions=[p.symbol for p in positions],
+            )
+            self._trade_logger.log_equity(snap)
+            logger.info("Initial equity snapshot written (regime=%s)", self._current_regime.value)
+
         # Start daily regime refresh scheduler
         self._daily_regime_task = asyncio.create_task(self._daily_regime_scheduler())
 
