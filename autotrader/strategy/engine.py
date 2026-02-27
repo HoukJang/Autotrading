@@ -18,6 +18,8 @@ class StrategyEngine:
     async def process(self, ctx: MarketContext) -> list[Signal]:
         signals = []
         for strat in self._strategies:
+            if ctx.bar.timeframe != strat.timeframe:
+                continue
             try:
                 sig = strat.on_context(ctx)
                 if sig is not None:

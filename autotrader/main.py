@@ -9,11 +9,14 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from zoneinfo import ZoneInfo
+
+from autotrader.core.aggregator import DailyBarAggregator
 from autotrader.core.config import RotationConfig, Settings, load_settings
 from autotrader.core.event_bus import EventBus
 from autotrader.core.logger import setup_logging
 from autotrader.core.types import (
-    AccountInfo, Bar, MarketContext, Order, OrderResult, Position, Signal,
+    AccountInfo, Bar, MarketContext, Order, OrderResult, Position, Signal, Timeframe,
 )
 from autotrader.broker.base import BrokerAdapter
 from autotrader.broker.paper import PaperBroker
@@ -41,6 +44,8 @@ from autotrader.universe.selector import UniverseSelector
 from autotrader.universe.earnings import EarningsCalendar
 
 logger = logging.getLogger("autotrader.main")
+
+_US_EASTERN = ZoneInfo("America/New_York")
 
 
 class AutoTrader:
@@ -104,6 +109,9 @@ class AutoTrader:
         # Position lifecycle tracking (MFE/MAE)
         self._open_position_tracker = OpenPositionTracker()
         self._regime_reviewer = RegimePositionReviewer()
+
+        # Daily bar aggregation (minute -> daily)
+        self._aggregator = DailyBarAggregator()
 
         # Scheduler and logging
         self._scheduler_task: asyncio.Task | None = None
@@ -201,30 +209,15 @@ class AutoTrader:
         await self._broker.disconnect()
 
     async def _on_bar(self, bar: Bar) -> None:
-        history = self._bar_history[bar.symbol]
-        history.append(bar)
-
-        # Update MFE/MAE tracking for open positions
+        # MFE/MAE tracking for open positions (every bar, including minute)
         self._open_position_tracker.update_prices(
             bar.symbol, bar.high, bar.low, bar.close,
-        )
-
-        indicators = self._indicator_engine.compute(history)
-
-        # Regime is updated from daily bars only (see _daily_regime_scheduler)
-        # Live minute bars do NOT update regime classification
-
-        ctx = MarketContext(
-            symbol=bar.symbol,
-            bar=bar,
-            indicators=indicators,
-            history=history,
         )
 
         account = await self._broker.get_account()
         positions = await self._broker.get_positions()
 
-        # Rotation manager: force close, weekly loss, signal filtering
+        # Rotation manager: force close, weekly loss (every bar)
         if self._rotation_manager:
             open_syms = [p.symbol for p in positions]
             force_close = self._rotation_manager.get_force_close_symbols(
@@ -240,12 +233,11 @@ class AutoTrader:
                 )
                 await self._process_signal(close_sig, account, positions)
                 self._rotation_manager.on_position_closed(sym)
-                # Refresh positions after close
                 positions = await self._broker.get_positions()
 
             self._rotation_manager.check_weekly_loss_limit(account.equity)
 
-        # Equity snapshot logging
+        # Equity snapshot logging (every N bars)
         self._bar_count += 1
         if (
             self._trade_logger is not None
@@ -261,6 +253,29 @@ class AutoTrader:
             )
             self._trade_logger.log_equity(snap)
 
+        # Route based on bar timeframe
+        if bar.timeframe == Timeframe.MINUTE:
+            daily_bar = self._aggregator.add(bar)
+            if daily_bar is not None:
+                await self._on_daily_bar(daily_bar)
+        else:
+            # Direct daily bar (from tests, historical, or PaperBroker)
+            await self._on_daily_bar(bar)
+
+    async def _on_daily_bar(self, bar: Bar) -> None:
+        """Process a confirmed daily bar through indicators and strategies."""
+        history = self._bar_history[bar.symbol]
+        history.append(bar)
+
+        indicators = self._indicator_engine.compute(history)
+
+        ctx = MarketContext(
+            symbol=bar.symbol,
+            bar=bar,
+            indicators=indicators,
+            history=history,
+        )
+
         signals = await self._strategy_engine.process(ctx)
         if not signals:
             return
@@ -271,6 +286,8 @@ class AutoTrader:
             if not signals:
                 return
 
+        account = await self._broker.get_account()
+        positions = await self._broker.get_positions()
         for signal in signals:
             await self._process_signal(signal, account, positions)
 
@@ -370,6 +387,19 @@ class AutoTrader:
             pos = next((p for p in positions if p.symbol == signal.symbol), None)
             if pos is None:
                 return None
+
+            # PDT guard: block same-day close to avoid day trading violation
+            tracked = self._open_position_tracker.get_position(signal.symbol)
+            if tracked is not None:
+                entry_date = tracked.entry_time.astimezone(_US_EASTERN).date()
+                now_date = datetime.now(timezone.utc).astimezone(_US_EASTERN).date()
+                if entry_date == now_date:
+                    logger.warning(
+                        "PDT guard: blocking same-day close for %s (entered %s)",
+                        signal.symbol, tracked.entry_time.isoformat(),
+                    )
+                    return None
+
             side = "sell" if pos.side == "long" else "buy"
             return Order(
                 symbol=signal.symbol,
@@ -461,6 +491,7 @@ class AutoTrader:
         for sym, bars in hist.items():
             for bar in bars:
                 self._daily_bar_history[sym].append(bar)
+                self._bar_history[sym].append(bar)
 
         loaded_count = {s: len(b) for s, b in hist.items() if b}
         logger.info("Loaded daily bars: %s", loaded_count)

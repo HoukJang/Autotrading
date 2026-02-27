@@ -19,7 +19,7 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 from autotrader.broker.base import BrokerAdapter
-from autotrader.core.types import AccountInfo, Bar, Order, OrderResult, Position
+from autotrader.core.types import AccountInfo, Bar, Order, OrderResult, Position, Timeframe
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +71,45 @@ class AlpacaAdapter(BrokerAdapter):
             raise ValueError(f"Unsupported order type: {order.order_type}")
 
         result: Any = self._client.submit_order(req)
+        result = await self._wait_for_fill(result, order.order_type)
         return OrderResult(
             order_id=str(result.id),
             symbol=str(result.symbol),
-            status=str(result.status),  # type: ignore[arg-type]
+            status=result.status.value,  # type: ignore[arg-type]
             filled_qty=float(result.filled_qty or 0),
             filled_price=float(result.filled_avg_price or 0),
         )
+
+    async def _wait_for_fill(
+        self, order_response: Any, order_type: str,
+        max_wait: float = 30.0, poll_interval: float = 0.5,
+    ) -> Any:
+        """Poll Alpaca until the order reaches a terminal state."""
+        assert self._client is not None
+        terminal = {"filled", "cancelled", "canceled", "expired", "rejected"}
+        status = str(order_response.status).lower().replace("orderstatus.", "")
+        if status in terminal:
+            return order_response
+
+        # Market orders fill fast; limit/stop may take longer
+        deadline = max_wait if order_type != "market" else 10.0
+        elapsed = 0.0
+        order_id = str(order_response.id)
+        while elapsed < deadline:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+            try:
+                updated = self._client.get_order_by_id(order_id)
+            except Exception:
+                logger.warning("Failed to poll order %s", order_id)
+                continue
+            status = str(updated.status).lower().replace("orderstatus.", "")
+            if status in terminal:
+                logger.info("Order %s reached terminal status: %s (%.1fs)", order_id, status, elapsed)
+                return updated
+
+        logger.warning("Order %s still pending after %.1fs (status=%s)", order_id, elapsed, status)
+        return self._client.get_order_by_id(order_id)
 
     async def cancel_order(self, order_id: str) -> bool:
         assert self._client is not None
@@ -114,7 +146,7 @@ class AlpacaAdapter(BrokerAdapter):
             equity=float(a.equity),
         )
 
-    def _convert_bar(self, alpaca_bar: Any) -> Bar:
+    def _convert_bar(self, alpaca_bar: Any, timeframe: Timeframe = Timeframe.DAILY) -> Bar:
         ts = alpaca_bar.timestamp
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
@@ -126,6 +158,7 @@ class AlpacaAdapter(BrokerAdapter):
             low=float(alpaca_bar.low),
             close=float(alpaca_bar.close),
             volume=float(alpaca_bar.volume),
+            timeframe=timeframe,
         )
 
     async def get_historical_bars(
@@ -156,7 +189,7 @@ class AlpacaAdapter(BrokerAdapter):
                         continue
                     if not alpaca_bars:
                         continue
-                    result[sym] = [self._convert_bar(ab) for ab in alpaca_bars]
+                    result[sym] = [self._convert_bar(ab, timeframe=Timeframe.DAILY) for ab in alpaca_bars]
             except Exception:
                 logger.exception("Historical bars batch fetch failed")
         return result
@@ -167,7 +200,7 @@ class AlpacaAdapter(BrokerAdapter):
         self._loop = asyncio.get_running_loop()
 
         async def _bridge(alpaca_bar: Any) -> None:
-            bar = self._convert_bar(alpaca_bar)
+            bar = self._convert_bar(alpaca_bar, timeframe=Timeframe.MINUTE)
             asyncio.run_coroutine_threadsafe(callback(bar), self._loop)
 
         self._stream.subscribe_bars(_bridge, *symbols)

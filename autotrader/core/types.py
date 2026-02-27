@@ -8,7 +8,14 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Literal
+
+
+class Timeframe(str, Enum):
+    """Bar timeframe classification."""
+    MINUTE = "MINUTE"
+    DAILY = "DAILY"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +38,7 @@ class Bar:
     low: float
     close: float
     volume: float
+    timeframe: Timeframe = Timeframe.DAILY
 
     @property
     def midpoint(self) -> float:

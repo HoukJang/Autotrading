@@ -8,7 +8,7 @@ from autotrader.main import AutoTrader
 from autotrader.broker.paper import PaperBroker
 from autotrader.core.config import Settings, RiskConfig
 from autotrader.core.types import (
-    AccountInfo, Bar, MarketContext, Order, OrderResult, Position, Signal,
+    AccountInfo, Bar, MarketContext, Order, OrderResult, Position, Signal, Timeframe,
 )
 from autotrader.indicators.engine import IndicatorEngine
 from autotrader.portfolio.allocation_engine import AllocationEngine
@@ -641,3 +641,183 @@ class TestTradeLoggerIntegration:
             assert trades[0].symbol == "AAPL"
             assert trades[0].strategy == "adx_pullback"
         await app.stop()
+
+
+class TestDailyBarAggregation:
+    """Test that minute bars are aggregated and only daily bars reach strategies."""
+
+    @pytest.fixture()
+    def app(self):
+        settings = Settings()
+        settings.broker.paper_balance = 100_000.0
+        return AutoTrader(settings)
+
+    def test_has_aggregator(self, app):
+        from autotrader.core.aggregator import DailyBarAggregator
+        assert isinstance(app._aggregator, DailyBarAggregator)
+
+    @pytest.mark.asyncio
+    async def test_minute_bar_not_in_bar_history(self, app):
+        """Minute bars should be aggregated, not directly added to bar_history."""
+        await app.start()
+        minute_bar = Bar(
+            symbol="AAPL",
+            timestamp=datetime(2025, 1, 6, 14, 30, tzinfo=timezone.utc),
+            open=100, high=101, low=99, close=100.5, volume=1000,
+            timeframe=Timeframe.MINUTE,
+        )
+        await app._on_bar(minute_bar)
+        # Minute bar goes to aggregator, not bar_history
+        assert len(app._bar_history["AAPL"]) == 0
+        await app.stop()
+
+    @pytest.mark.asyncio
+    async def test_daily_bar_goes_to_history(self, app):
+        """Daily bars (default) should go directly to bar_history."""
+        await app.start()
+        daily_bar = _make_bar("AAPL", 150.0)
+        await app._on_bar(daily_bar)
+        assert len(app._bar_history["AAPL"]) == 1
+        await app.stop()
+
+    @pytest.mark.asyncio
+    async def test_date_change_produces_daily_bar(self, app):
+        """When minute bars cross a date boundary, a daily bar is produced."""
+        await app.start()
+        # Day 1 minute bars
+        for i in range(3):
+            bar = Bar(
+                symbol="AAPL",
+                timestamp=datetime(2025, 1, 6, 14, 30 + i, tzinfo=timezone.utc),
+                open=100, high=102, low=99, close=101, volume=1000,
+                timeframe=Timeframe.MINUTE,
+            )
+            await app._on_bar(bar)
+        assert len(app._bar_history["AAPL"]) == 0
+
+        # Day 2 first minute bar triggers day 1 daily bar
+        bar = Bar(
+            symbol="AAPL",
+            timestamp=datetime(2025, 1, 7, 14, 30, tzinfo=timezone.utc),
+            open=102, high=103, low=101, close=102, volume=2000,
+            timeframe=Timeframe.MINUTE,
+        )
+        await app._on_bar(bar)
+        assert len(app._bar_history["AAPL"]) == 1
+        daily = app._bar_history["AAPL"][0]
+        assert daily.timeframe == Timeframe.DAILY
+        await app.stop()
+
+    @pytest.mark.asyncio
+    async def test_mfe_mae_updates_on_minute_bars(self, app):
+        """MFE/MAE tracking should update on every bar, including minute."""
+        await app.start()
+        # Register a tracked position
+        app._open_position_tracker.open_position(
+            symbol="AAPL", strategy="test", direction="long",
+            entry_price=100.0,
+            entry_time=datetime(2025, 1, 5, 14, 0, tzinfo=timezone.utc),
+            quantity=10,
+        )
+        minute_bar = Bar(
+            symbol="AAPL",
+            timestamp=datetime(2025, 1, 6, 14, 30, tzinfo=timezone.utc),
+            open=100, high=110, low=95, close=105, volume=1000,
+            timeframe=Timeframe.MINUTE,
+        )
+        await app._on_bar(minute_bar)
+        tracked = app._open_position_tracker.get_position("AAPL")
+        assert tracked is not None
+        assert tracked.highest_price == 110.0
+        assert tracked.lowest_price == 95.0
+        await app.stop()
+
+
+class TestPDTGuard:
+    """Test Pattern Day Trading guard prevents same-day round trips."""
+
+    @pytest.fixture()
+    def app(self):
+        settings = Settings()
+        settings.broker.paper_balance = 100_000.0
+        return AutoTrader(settings)
+
+    @pytest.mark.asyncio
+    async def test_same_day_close_blocked(self, app):
+        """Close signal on same day as entry should be blocked."""
+        await app._broker.connect()
+        account = await app._broker.get_account()
+        # Simulate existing position
+        positions = [
+            Position(symbol="AAPL", quantity=10, avg_entry_price=100.0,
+                     market_value=1000.0, unrealized_pnl=0.0, side="long"),
+        ]
+        # Register position as opened today
+        app._open_position_tracker.open_position(
+            symbol="AAPL", strategy="test", direction="long",
+            entry_price=100.0,
+            entry_time=datetime.now(timezone.utc),
+            quantity=10,
+        )
+        signal = Signal(
+            strategy="test", symbol="AAPL",
+            direction="close", strength=1.0,
+        )
+        order = app._signal_to_order(signal, account, positions)
+        assert order is None  # Blocked by PDT guard
+
+    @pytest.mark.asyncio
+    async def test_next_day_close_allowed(self, app):
+        """Close signal on next day should be allowed."""
+        await app._broker.connect()
+        account = await app._broker.get_account()
+        positions = [
+            Position(symbol="AAPL", quantity=10, avg_entry_price=100.0,
+                     market_value=1000.0, unrealized_pnl=0.0, side="long"),
+        ]
+        # Position opened yesterday
+        from datetime import timedelta
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+        app._open_position_tracker.open_position(
+            symbol="AAPL", strategy="test", direction="long",
+            entry_price=100.0,
+            entry_time=yesterday,
+            quantity=10,
+        )
+        signal = Signal(
+            strategy="test", symbol="AAPL",
+            direction="close", strength=1.0,
+        )
+        order = app._signal_to_order(signal, account, positions)
+        assert order is not None  # Allowed
+
+    @pytest.mark.asyncio
+    async def test_pdt_guard_does_not_block_untracked(self, app):
+        """If position is not tracked (e.g. pre-existing), close is allowed."""
+        await app._broker.connect()
+        account = await app._broker.get_account()
+        positions = [
+            Position(symbol="AAPL", quantity=10, avg_entry_price=100.0,
+                     market_value=1000.0, unrealized_pnl=0.0, side="long"),
+        ]
+        # No tracked position for AAPL
+        signal = Signal(
+            strategy="test", symbol="AAPL",
+            direction="close", strength=1.0,
+        )
+        order = app._signal_to_order(signal, account, positions)
+        assert order is not None  # Not blocked (no tracking info)
+
+    @pytest.mark.asyncio
+    async def test_pdt_guard_long_entry_same_day(self, app):
+        """Entry signals should not be affected by PDT guard."""
+        await app._broker.connect()
+        account = await app._broker.get_account()
+        bar = _make_bar("AAPL", 100.0)
+        app._bar_history["AAPL"].append(bar)
+        signal = Signal(
+            strategy="adx_pullback", symbol="AAPL",
+            direction="long", strength=0.8,
+        )
+        order = app._signal_to_order(signal, account, [])
+        assert order is not None  # Entry not blocked

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from autotrader.core.types import Bar
+from autotrader.core.types import Bar, Timeframe
 from autotrader.data.store import DataStore
 
 
@@ -24,10 +24,19 @@ class SQLiteStore(DataStore):
                 low REAL NOT NULL,
                 close REAL NOT NULL,
                 volume REAL NOT NULL,
+                timeframe TEXT NOT NULL DEFAULT 'DAILY',
                 PRIMARY KEY (symbol, timestamp)
             )
         """)
         await self._db.commit()
+        # Migration: add timeframe column if missing
+        try:
+            await self._db.execute(
+                "ALTER TABLE bars ADD COLUMN timeframe TEXT NOT NULL DEFAULT 'DAILY'"
+            )
+            await self._db.commit()
+        except Exception:
+            pass  # Column already exists
 
     async def close(self) -> None:
         if self._db:
@@ -36,15 +45,15 @@ class SQLiteStore(DataStore):
     async def save_bars(self, bars: list[Bar]) -> None:
         assert self._db is not None
         await self._db.executemany(
-            "INSERT OR IGNORE INTO bars (symbol, timestamp, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [(b.symbol, b.timestamp.isoformat(), b.open, b.high, b.low, b.close, b.volume) for b in bars],
+            "INSERT OR IGNORE INTO bars (symbol, timestamp, open, high, low, close, volume, timeframe) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [(b.symbol, b.timestamp.isoformat(), b.open, b.high, b.low, b.close, b.volume, b.timeframe.value) for b in bars],
         )
         await self._db.commit()
 
     async def load_bars(self, symbol: str, start: datetime, end: datetime) -> list[Bar]:
         assert self._db is not None
         cursor = await self._db.execute(
-            "SELECT symbol, timestamp, open, high, low, close, volume FROM bars WHERE symbol = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+            "SELECT symbol, timestamp, open, high, low, close, volume, timeframe FROM bars WHERE symbol = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp",
             (symbol, start.isoformat(), end.isoformat()),
         )
         rows = await cursor.fetchall()
@@ -53,6 +62,7 @@ class SQLiteStore(DataStore):
                 symbol=r[0],
                 timestamp=datetime.fromisoformat(r[1]),
                 open=r[2], high=r[3], low=r[4], close=r[5], volume=r[6],
+                timeframe=Timeframe(r[7]) if len(r) > 7 and r[7] else Timeframe.DAILY,
             )
             for r in rows
         ]
