@@ -37,19 +37,33 @@ class TestAlpacaAdapter:
         assert account.buying_power == 100_000.0
 
     @patch("autotrader.broker.alpaca_adapter.TradingClient")
-    async def test_submit_market_order(self, mock_client_cls, adapter):
+    async def test_submit_market_order_filled(self, mock_client_cls, adapter):
+        from alpaca.trading.enums import OrderStatus
+
         mock_client = MagicMock()
-        mock_order = MagicMock()
-        mock_order.id = "order-123"
-        mock_order.symbol = "AAPL"
-        mock_order.status = "accepted"
-        mock_order.filled_qty = "0"
-        mock_order.filled_avg_price = None
-        mock_client.submit_order.return_value = mock_order
+        # submit_order returns "accepted" initially
+        mock_submit = MagicMock()
+        mock_submit.id = "order-123"
+        mock_submit.symbol = "AAPL"
+        mock_submit.status = OrderStatus.ACCEPTED
+        mock_submit.filled_qty = "0"
+        mock_submit.filled_avg_price = None
+        mock_client.submit_order.return_value = mock_submit
+
+        # get_order_by_id returns "filled" after polling
+        mock_filled = MagicMock()
+        mock_filled.id = "order-123"
+        mock_filled.symbol = "AAPL"
+        mock_filled.status = OrderStatus.FILLED
+        mock_filled.filled_qty = "10"
+        mock_filled.filled_avg_price = "150.50"
+        mock_client.get_order_by_id.return_value = mock_filled
         mock_client_cls.return_value = mock_client
 
         await adapter.connect()
         order = Order(symbol="AAPL", side="buy", quantity=10, order_type="market")
         result = await adapter.submit_order(order)
         assert result.order_id == "order-123"
-        assert result.status == "accepted"
+        assert result.status == "filled"
+        assert result.filled_qty == 10.0
+        assert result.filled_price == 150.50

@@ -256,10 +256,9 @@ def _render_regime_heatmap(close_df: pd.DataFrame) -> None:
             zmin=0,
             zmax=1,
             colorbar={
-                "title": "Win Rate",
+                "title": {"text": "Win Rate", "font": {"color": COLORS["text_secondary"]}},
                 "tickformat": ".0%",
                 "tickfont": {"color": COLORS["text_secondary"]},
-                "titlefont": {"color": COLORS["text_secondary"]},
             },
             hovertemplate=(
                 "Strategy: %{y}<br>"

@@ -35,7 +35,7 @@ def render_status_bar(data, settings: dict) -> None:
     # -- 1. Connection status ------------------------------------------------
     with col_conn:
         last_update = getattr(data, "last_update", None)
-        if last_update is not None:
+        if last_update is not None and last_update != "":
             if isinstance(last_update, str):
                 last_update = datetime.fromisoformat(last_update)
             if last_update.tzinfo is None:

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import io
+
 import pandas as pd
+import requests
 
 from autotrader.universe import StockInfo
 
 _WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+_USER_AGENT = "AutoTrader/2.0 (stock-screener; Python/pandas)"
 
 
 class SP500Provider:
@@ -15,7 +19,9 @@ class SP500Provider:
         if self._cache is not None and not force_refresh:
             return self._cache
 
-        tables = pd.read_html(_WIKI_URL)
+        resp = requests.get(_WIKI_URL, headers={"User-Agent": _USER_AGENT}, timeout=30)
+        resp.raise_for_status()
+        tables = pd.read_html(io.StringIO(resp.text))
         df = tables[0]
 
         result: list[StockInfo] = []
