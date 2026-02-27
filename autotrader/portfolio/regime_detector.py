@@ -33,6 +33,21 @@ class RegimeDetector:
     BB_EXPAND: float = 1.0
     BB_CONTRACT: float = 0.8
     VOL_HIGH: float = 0.03
+    BB_ADX_SCALE: float = 0.005
+
+    def _bb_trend_threshold(self, adx: float) -> float:
+        """Return the BB width-ratio threshold for TREND, scaled by ADX.
+
+        Higher ADX lowers the BB requirement linearly:
+          threshold = max(BB_CONTRACT, BB_EXPAND - (adx - ADX_TREND) * BB_ADX_SCALE)
+
+        At ADX 25 the threshold equals BB_EXPAND (1.0), at ADX 65 it drops
+        to 0.8.  The floor is BB_CONTRACT so it never falls below 0.8.
+        """
+        return max(
+            self.BB_CONTRACT,
+            self.BB_EXPAND - (adx - self.ADX_TREND) * self.BB_ADX_SCALE,
+        )
 
     def classify(
         self,
@@ -57,7 +72,7 @@ class RegimeDetector:
 
         width_ratio = bb_width / bb_width_avg
 
-        if adx >= self.ADX_TREND and width_ratio >= self.BB_EXPAND:
+        if adx >= self.ADX_TREND and width_ratio >= self._bb_trend_threshold(adx):
             return MarketRegime.TREND
         if adx < self.ADX_NO_TREND and width_ratio <= self.BB_CONTRACT:
             return MarketRegime.RANGING

@@ -707,18 +707,22 @@ class AutoTrader:
             logger.exception("Event-driven rotation execution failed")
 
     async def _daily_regime_scheduler(self) -> None:
-        """Refresh regime from latest SPY daily bar once per day after market close."""
+        """Refresh regime from latest SPY daily bar once per day at 7 AM ET.
+
+        By 7 AM ET, the previous day's daily bar is fully settled
+        (post-market closes at 8 PM ET), so indicator values are stable.
+        """
         while self._running:
             await asyncio.sleep(300)  # Check every 5 minutes
-            now = datetime.now(timezone.utc)
-            today = now.date()
+            now_et = datetime.now(_US_EASTERN)
+            today = now_et.date()
 
             # Skip if already updated today
             if self._last_regime_update_date == today:
                 continue
 
-            # Update after 21:00 UTC (market close 20:00 + 1hr buffer)
-            if now.hour < 21:
+            # Only update at or after 7 AM ET (pre-market, bars settled)
+            if now_et.hour < 7:
                 continue
 
             if not hasattr(self._broker, "get_historical_bars"):

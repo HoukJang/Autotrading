@@ -72,6 +72,37 @@ class TestClassifyHighVolatility:
         assert result != MarketRegime.HIGH_VOLATILITY
 
 
+class TestClassifyTrendScaledThreshold:
+    """TREND with ADX-scaled BB threshold: higher ADX relaxes BB requirement."""
+
+    def test_high_adx_with_borderline_bb_is_trend(self, detector: RegimeDetector):
+        # ADX=67, bb_ratio=0.99 -- the original bug case
+        # bb_threshold = max(0.8, 1.0 - (67-25)*0.005) = max(0.8, 0.79) = 0.8
+        result = detector.classify(adx=67.0, bb_width=0.0495, bb_width_avg=0.05, atr_ratio=0.03)
+        assert result == MarketRegime.TREND
+
+    def test_moderate_adx_with_slightly_low_bb_is_trend(self, detector: RegimeDetector):
+        # ADX=40, bb_ratio=0.95
+        # bb_threshold = max(0.8, 1.0 - (40-25)*0.005) = max(0.8, 0.925) = 0.925
+        result = detector.classify(adx=40.0, bb_width=0.0475, bb_width_avg=0.05, atr_ratio=0.02)
+        assert result == MarketRegime.TREND
+
+    def test_adx_25_still_requires_full_bb_expand(self, detector: RegimeDetector):
+        # ADX=25, bb_ratio=0.95 -- threshold stays at 1.0 for ADX exactly 25
+        result = detector.classify(adx=25.0, bb_width=0.0475, bb_width_avg=0.05, atr_ratio=0.02)
+        assert result == MarketRegime.UNCERTAIN
+
+    def test_threshold_floor_at_bb_contract(self, detector: RegimeDetector):
+        # ADX=100 (extreme), bb_ratio=0.81 -- floor is 0.8
+        result = detector.classify(adx=100.0, bb_width=0.0405, bb_width_avg=0.05, atr_ratio=0.02)
+        assert result == MarketRegime.TREND
+
+    def test_threshold_floor_blocks_below_contract(self, detector: RegimeDetector):
+        # ADX=100, bb_ratio=0.79 -- below floor of 0.8
+        result = detector.classify(adx=100.0, bb_width=0.0395, bb_width_avg=0.05, atr_ratio=0.02)
+        assert result != MarketRegime.TREND
+
+
 class TestClassifyUncertain:
     """UNCERTAIN: everything else (ADX between 20-25, normal width, etc.)"""
 
