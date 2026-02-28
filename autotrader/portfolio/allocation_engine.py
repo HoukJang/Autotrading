@@ -36,6 +36,7 @@ class AllocationEngine:
         regime: MarketRegime,
         atr: float | None = None,
         direction: str = "long",
+        stop_distance: float | None = None,
     ) -> int:
         """Calculate position size considering allocation weight and risk.
 
@@ -49,10 +50,14 @@ class AllocationEngine:
             price: Current price of the asset.
             equity: Current account equity.
             regime: Current market regime.
-            atr: Current Average True Range for the asset.  When provided,
-                 enables risk-based position sizing.  None preserves
-                 backward-compatible weight-only sizing.
+            atr: Current Average True Range for the asset.  When provided
+                 and ``stop_distance`` is None, the stop is estimated as
+                 ``2.0 * atr`` (backward-compatible default).
             direction: Trade direction, either ``"long"`` or ``"short"``.
+            stop_distance: Actual distance from entry to stop-loss in price
+                units.  When provided, overrides the ``2.0 * atr`` default,
+                enabling strategy-specific SL multipliers from entry_rules.
+                Pass ``abs(entry_price - sl_price)`` from the execution engine.
 
         Returns:
             Number of shares to trade (0 if below minimum or invalid price).
@@ -71,12 +76,19 @@ class AllocationEngine:
 
         qty = weight_qty
 
-        if atr is not None:
+        # Determine effective stop distance for risk-based sizing
+        effective_stop: float | None = None
+        if stop_distance is not None and stop_distance > 0:
+            # Prefer explicitly provided stop distance (strategy-specific SL)
+            effective_stop = stop_distance
+        elif atr is not None and atr > 0:
+            # Fallback: use 2x ATR as a conservative default
+            effective_stop = 2.0 * atr
+
+        if effective_stop is not None and effective_stop > 0:
             risk_per_trade = equity * RISK_PER_TRADE_PCT
-            stop_distance = 2.0 * atr
-            if stop_distance > 0:
-                risk_qty = int(risk_per_trade / stop_distance)
-                qty = min(weight_qty, risk_qty)
+            risk_qty = int(risk_per_trade / effective_stop)
+            qty = min(weight_qty, risk_qty)
 
         if direction == "short":
             qty = int(qty * SHORT_SIZE_RATIO)
