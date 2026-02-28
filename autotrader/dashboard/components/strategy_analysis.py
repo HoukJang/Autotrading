@@ -1,4 +1,8 @@
-"""Strategy analysis component -- per-strategy metrics, cumulative PnL, and regime heatmap."""
+"""Strategy analysis component for the trading dashboard (Tab 4).
+
+Renders per-strategy performance table, per-regime performance,
+strategy-regime heatmap, SL/TP hit analysis, and PnL by symbol chart.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -26,7 +30,6 @@ def _max_consecutive_losses(pnl_series: pd.Series) -> int:
     if pnl_series.empty:
         return 0
     is_loss = (pnl_series < 0).astype(int)
-    # Group consecutive identical values, then find max group length where loss
     groups = is_loss.ne(is_loss.shift()).cumsum()
     streaks = is_loss.groupby(groups).agg(["sum", "count"])
     loss_streaks = streaks.loc[streaks["sum"] == streaks["count"], "count"]
@@ -56,7 +59,7 @@ def _compute_strategy_metrics(close_df: pd.DataFrame) -> pd.DataFrame:
         profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float("inf")
         total_pnl = sdf["pnl"].sum()
         avg_pnl = sdf["pnl"].mean()
-        avg_bars = sdf["bars_held"].mean() if "bars_held" in sdf.columns else 0.0
+        avg_bars = float(sdf["bars_held"].mean()) if "bars_held" in sdf.columns else 0.0
         max_cl = _max_consecutive_losses(sdf["pnl"].reset_index(drop=True))
 
         rows.append(
@@ -92,8 +95,6 @@ def _render_performance_table(metrics_df: pd.DataFrame) -> None:
         return
 
     display = metrics_df.copy()
-
-    # Format for display
     display["Win Rate"] = display["Win Rate"].map(lambda v: f"{v * 100:.1f}%")
     display["Profit Factor"] = display["Profit Factor"].map(
         lambda v: "Inf" if v == float("inf") else f"{v:.2f}"
@@ -107,7 +108,43 @@ def _render_performance_table(metrics_df: pd.DataFrame) -> None:
 
 
 # ------------------------------------------------------------------
-# Section 2: Cumulative PnL + PnL by Strategy bar
+# Section 2: Per-Regime Performance Table
+# ------------------------------------------------------------------
+
+
+def _render_regime_performance(close_df: pd.DataFrame) -> None:
+    """Display per-regime trade performance."""
+    st.subheader("Performance by Regime")
+
+    if close_df.empty or "regime" not in close_df.columns:
+        st.caption("No regime data available.")
+        return
+
+    rows = []
+    for regime, group in close_df.groupby("regime"):
+        pnls = group["pnl"]
+        wins = int((pnls > 0).sum())
+        count = len(group)
+        rows.append(
+            {
+                "Regime": str(regime),
+                "Trades": count,
+                "Win Rate": f"{wins / count * 100:.1f}%" if count > 0 else "--",
+                "Total PnL": fmt_pnl(float(pnls.sum())),
+                "Avg PnL": fmt_pnl(float(pnls.mean())),
+            }
+        )
+
+    if not rows:
+        st.caption("No regime data available.")
+        return
+
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+# ------------------------------------------------------------------
+# Section 3: Cumulative PnL + PnL by Strategy bar
 # ------------------------------------------------------------------
 
 
@@ -120,13 +157,10 @@ def _render_cumulative_pnl(close_df: pd.DataFrame) -> None:
         return
 
     col_left, col_right = st.columns([0.6, 0.4])
-
     strategies = sorted(close_df["strategy"].unique())
 
-    # --- Left: Cumulative PnL lines ---
     with col_left:
         fig_cum = go.Figure()
-
         for strat in strategies:
             sdf = close_df.loc[close_df["strategy"] == strat].sort_values("timestamp")
             if sdf.empty:
@@ -141,9 +175,7 @@ def _render_cumulative_pnl(close_df: pd.DataFrame) -> None:
                     mode="lines",
                     name=name,
                     line={"color": color, "width": 2},
-                    hovertemplate=f"{name}<br>"
-                    "Date: %{x}<br>"
-                    "Cumulative PnL: %{y:$,.2f}<extra></extra>",
+                    hovertemplate=f"{name}<br>Date: %{{x}}<br>Cumulative PnL: %{{y:$,.2f}}<extra></extra>",
                 )
             )
 
@@ -155,9 +187,8 @@ def _render_cumulative_pnl(close_df: pd.DataFrame) -> None:
                 xaxis={"title": ""},
             )
         )
-        st.plotly_chart(fig_cum, use_container_width=True)
+        st.plotly_chart(fig_cum, use_container_width=True, key="cumulative_pnl")
 
-    # --- Right: Total PnL horizontal bar ---
     with col_right:
         totals = (
             close_df.groupby("strategy")["pnl"]
@@ -165,12 +196,10 @@ def _render_cumulative_pnl(close_df: pd.DataFrame) -> None:
             .reindex(strategies)
             .fillna(0.0)
         )
-
         display_names = [STRATEGY_NAMES.get(s, s) for s in totals.index]
         bar_colors = [
             COLORS["profit"] if v >= 0 else COLORS["loss"] for v in totals.values
         ]
-
         fig_bar = go.Figure(
             go.Bar(
                 y=display_names,
@@ -192,11 +221,11 @@ def _render_cumulative_pnl(close_df: pd.DataFrame) -> None:
                 showlegend=False,
             )
         )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, use_container_width=True, key="total_pnl_bar")
 
 
 # ------------------------------------------------------------------
-# Section 3: Regime-Strategy Heatmap
+# Section 4: Regime-Strategy Heatmap
 # ------------------------------------------------------------------
 
 _REGIME_ORDER = ["TREND", "RANGING", "HIGH_VOLATILITY", "UNCERTAIN"]
@@ -217,7 +246,6 @@ def _render_regime_heatmap(close_df: pd.DataFrame) -> None:
         st.caption("No regime data available.")
         return
 
-    # Build matrix: rows = strategies, cols = regimes, values = win rate
     z_values: list[list[float]] = []
     text_values: list[list[str]] = []
 
@@ -234,7 +262,7 @@ def _render_regime_heatmap(close_df: pd.DataFrame) -> None:
             else:
                 wr = (subset["pnl"] > 0).sum() / len(subset)
                 row_z.append(wr)
-                row_t.append(f"{wr * 100:.0f}%")
+                row_t.append(f"{wr * 100:.0f}%\n({len(subset)})")
         z_values.append(row_z)
         text_values.append(row_t)
 
@@ -247,7 +275,7 @@ def _render_regime_heatmap(close_df: pd.DataFrame) -> None:
             y=y_labels,
             text=text_values,
             texttemplate="%{text}",
-            textfont={"size": 13, "color": COLORS["text_primary"]},
+            textfont={"size": 12, "color": COLORS["text_primary"]},
             colorscale=[
                 [0.0, COLORS["loss"]],
                 [0.5, COLORS["warning"]],
@@ -275,12 +303,77 @@ def _render_regime_heatmap(close_df: pd.DataFrame) -> None:
             showlegend=False,
         )
     )
-
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="regime_heatmap")
 
 
 # ------------------------------------------------------------------
-# Section 4: PnL by Symbol
+# Section 5: SL/TP Hit Analysis
+# ------------------------------------------------------------------
+
+
+def _render_exit_analysis(close_df: pd.DataFrame) -> None:
+    """Render a stacked bar chart showing exit reason distribution per strategy."""
+    st.subheader("Exit Reason Analysis")
+
+    if close_df.empty or "exit_reason" not in close_df.columns:
+        st.caption("No exit reason data available.")
+        return
+
+    # Count exit reasons per strategy
+    strategies = sorted(close_df["strategy"].unique())
+    exit_reasons = close_df["exit_reason"].dropna().unique().tolist()
+
+    if not exit_reasons:
+        st.caption("No exit reason data found.")
+        return
+
+    # Color map for exit reasons
+    exit_colors = {
+        "stop_loss": COLORS["loss"],
+        "sl": COLORS["loss"],
+        "take_profit": COLORS["profit"],
+        "tp": COLORS["profit"],
+        "target": COLORS["profit"],
+        "timeout": COLORS["warning"],
+        "time": COLORS["warning"],
+        "emergency": "#FF0000",
+        "manual": COLORS["neutral"],
+    }
+
+    fig = go.Figure()
+
+    for reason in exit_reasons:
+        counts = []
+        for strat in strategies:
+            strat_df = close_df[close_df["strategy"] == strat]
+            count = int((strat_df["exit_reason"] == reason).sum())
+            counts.append(count)
+
+        color = exit_colors.get(str(reason).lower(), COLORS["info"])
+        fig.add_trace(
+            go.Bar(
+                name=str(reason),
+                x=[STRATEGY_NAMES.get(s, s) for s in strategies],
+                y=counts,
+                marker_color=color,
+                hovertemplate=f"Exit: {reason}<br>Strategy: %{{x}}<br>Count: %{{y}}<extra></extra>",
+            )
+        )
+
+    fig.update_layout(
+        **get_chart_layout(
+            title={"text": "Exit Reasons by Strategy"},
+            height=320,
+            barmode="stack",
+            xaxis={"title": ""},
+            yaxis={"title": "Trade Count"},
+        )
+    )
+    st.plotly_chart(fig, use_container_width=True, key="exit_analysis")
+
+
+# ------------------------------------------------------------------
+# Section 6: PnL by Symbol
 # ------------------------------------------------------------------
 
 
@@ -293,7 +386,6 @@ def _render_pnl_by_symbol(close_df: pd.DataFrame) -> None:
         return
 
     symbol_pnl = close_df.groupby("symbol")["pnl"].sum()
-    # Top 15 by absolute PnL
     top15 = symbol_pnl.reindex(
         symbol_pnl.abs().nlargest(15).index
     ).sort_values()
@@ -327,8 +419,7 @@ def _render_pnl_by_symbol(close_df: pd.DataFrame) -> None:
             showlegend=False,
         )
     )
-
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="pnl_by_symbol")
 
 
 # ------------------------------------------------------------------
@@ -340,7 +431,6 @@ def render_strategy_analysis(
     trades_df: pd.DataFrame, equity_df: pd.DataFrame
 ) -> None:
     """Render the strategy analysis tab with metrics, charts, and heatmap."""
-
     if trades_df is None or trades_df.empty:
         st.info(
             "No trades recorded yet. Start live trading to see strategy analysis."
@@ -349,12 +439,16 @@ def render_strategy_analysis(
 
     df = trades_df.copy()
 
-    # Ensure timestamp is datetime
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     # Only close trades carry realized PnL
-    close_df = df.loc[df["direction"] == "close"].copy() if "direction" in df.columns else df.copy()
+    if "direction" in df.columns:
+        close_df = df.loc[df["direction"] == "close"].copy()
+    elif "side" in df.columns:
+        close_df = df.loc[df["side"] == "exit"].copy()
+    else:
+        close_df = df.copy()
 
     # Section 1: Performance table
     metrics = _compute_strategy_metrics(close_df)
@@ -362,15 +456,25 @@ def render_strategy_analysis(
 
     st.divider()
 
-    # Section 2: Cumulative PnL + bar chart
+    # Section 2: Per-regime performance
+    _render_regime_performance(close_df)
+
+    st.divider()
+
+    # Section 3: Cumulative PnL + bar chart
     _render_cumulative_pnl(close_df)
 
     st.divider()
 
-    # Section 3: Regime-Strategy heatmap
+    # Section 4: Regime-Strategy heatmap
     _render_regime_heatmap(close_df)
 
     st.divider()
 
-    # Section 4: PnL by symbol
+    # Section 5: SL/TP hit analysis
+    _render_exit_analysis(close_df)
+
+    st.divider()
+
+    # Section 6: PnL by symbol
     _render_pnl_by_symbol(close_df)
