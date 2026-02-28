@@ -33,11 +33,10 @@ from autotrader.core.types import Bar, MarketContext, Timeframe
 from autotrader.data.batch_fetcher import BatchFetcher
 from autotrader.indicators.engine import IndicatorEngine
 from autotrader.indicators.base import IndicatorSpec
-from autotrader.strategy.adx_pullback import AdxPullback
-from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
-from autotrader.strategy.overbought_short import OverboughtShort
-from autotrader.strategy.regime_momentum import RegimeMomentum
+from autotrader.strategy.consecutive_down import ConsecutiveDown
+from autotrader.strategy.ema_pullback import EmaPullback
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
+from autotrader.strategy.volume_divergence import VolumeDivergence
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +54,10 @@ _MIN_SYMBOLS_THRESHOLD = 10
 
 # All strategies instantiated once and reused across symbols
 _STRATEGY_CLASSES = [
-    AdxPullback,
     RsiMeanReversion,
-    BbSqueezeBreakout,
-    OverboughtShort,
-    RegimeMomentum,
+    ConsecutiveDown,
+    EmaPullback,
+    VolumeDivergence,
 ]
 
 # Union of all required IndicatorSpecs across all strategies (deduped by key)

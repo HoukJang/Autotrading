@@ -118,22 +118,22 @@ class RegimeDetector:
         if sentiment_level == SentimentLevel.NORMAL:
             return weights
 
-        # Adjustments per sentiment: (rsi_mr_delta, overbought_short_delta, momentum_delta)
+        # Adjustments per sentiment: (consec_down_delta, ema_pullback_delta, vol_div_delta)
         adjustments: dict[SentimentLevel, tuple[float, float, float]] = {
-            SentimentLevel.LOW: (0.0, 0.03, -0.03),
-            SentimentLevel.ELEVATED: (0.03, 0.03, -0.03),
-            SentimentLevel.HIGH: (0.05, 0.05, -0.07),
-            SentimentLevel.EXTREME: (0.10, 0.10, -0.10),
+            SentimentLevel.LOW: (0.00, -0.03, 0.03),
+            SentimentLevel.ELEVATED: (0.03, -0.03, 0.03),
+            SentimentLevel.HIGH: (0.05, -0.05, 0.05),
+            SentimentLevel.EXTREME: (0.10, -0.10, 0.10),
         }
 
         deltas = adjustments.get(sentiment_level)
         if deltas is None:
             return weights
 
-        rsi_d, short_d, mom_d = deltas
-        weights["rsi_mean_reversion"] = max(0.0, weights["rsi_mean_reversion"] + rsi_d)
-        weights["overbought_short"] = max(0.0, weights["overbought_short"] + short_d)
-        weights["regime_momentum"] = max(0.0, weights["regime_momentum"] + mom_d)
+        consec_d, ema_d, vol_d = deltas
+        weights["consecutive_down"] = max(0.0, weights["consecutive_down"] + consec_d)
+        weights["ema_pullback"] = max(0.0, weights["ema_pullback"] + ema_d)
+        weights["volume_divergence"] = max(0.0, weights["volume_divergence"] + vol_d)
 
         return weights
 
@@ -142,30 +142,26 @@ class RegimeDetector:
 _REGIME_WEIGHTS: dict[MarketRegime, dict[str, float]] = {
     MarketRegime.TREND: {
         "rsi_mean_reversion": 0.15,
-        "adx_pullback": 0.30,
-        "bb_squeeze": 0.20,
-        "overbought_short": 0.10,
-        "regime_momentum": 0.25,
+        "consecutive_down": 0.20,
+        "ema_pullback": 0.40,
+        "volume_divergence": 0.25,
     },
     MarketRegime.RANGING: {
         "rsi_mean_reversion": 0.35,
-        "adx_pullback": 0.10,
-        "bb_squeeze": 0.25,
-        "overbought_short": 0.20,
-        "regime_momentum": 0.10,
+        "consecutive_down": 0.30,
+        "ema_pullback": 0.10,
+        "volume_divergence": 0.25,
     },
     MarketRegime.HIGH_VOLATILITY: {
-        "rsi_mean_reversion": 0.20,
-        "adx_pullback": 0.10,
-        "bb_squeeze": 0.30,
-        "overbought_short": 0.25,
-        "regime_momentum": 0.15,
+        "rsi_mean_reversion": 0.25,
+        "consecutive_down": 0.30,
+        "ema_pullback": 0.10,
+        "volume_divergence": 0.35,
     },
     MarketRegime.UNCERTAIN: {
-        "rsi_mean_reversion": 0.20,
-        "adx_pullback": 0.15,
-        "bb_squeeze": 0.20,
-        "overbought_short": 0.20,
-        "regime_momentum": 0.15,
+        "rsi_mean_reversion": 0.25,
+        "consecutive_down": 0.25,
+        "ema_pullback": 0.25,
+        "volume_divergence": 0.25,
     },
 }

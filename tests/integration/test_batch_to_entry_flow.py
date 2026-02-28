@@ -244,9 +244,9 @@ class TestEntryManagerFromBatch:
             ),
             EntryCandiate(
                 signal=Signal(
-                    strategy="overbought_short",
+                    strategy="consecutive_down",
                     symbol="MSFT",
-                    direction="short",
+                    direction="long",
                     strength=0.75,
                     metadata={"entry_atr": 3.0},
                 ),
@@ -271,14 +271,15 @@ class TestEntryManagerFromBatch:
         assert em._order_manager.submit_entry.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_group_b_candidates_pass_confirmation(self):
-        """Group B candidates that confirm should be entered."""
+    async def test_group_b_returns_empty_when_no_active_strategies(self):
+        """Group B is empty (no active confirmation strategies); execute_confirmation returns empty."""
         em = _make_entry_manager(fill_price=99.5)
 
+        # ema_pullback is no longer in _GROUP_B_STRATEGIES, so it gets routed nowhere
         entry_candidates = [
             EntryCandiate(
                 signal=Signal(
-                    strategy="adx_pullback",
+                    strategy="rsi_mean_reversion",
                     symbol="NVDA",
                     direction="long",
                     strength=0.80,
@@ -292,8 +293,7 @@ class TestEntryManagerFromBatch:
 
         em.load_candidates(entry_candidates)
 
-        # Confirm: price is at prev_close * 0.998 (within 0.3% tolerance)
-        current_prices = {"NVDA": 99.8}  # 99.8 >= 100 * 0.997 = 99.7
+        current_prices = {"NVDA": 99.8}
 
         result = await em.execute_confirmation(
             account=_make_account(),
@@ -303,8 +303,7 @@ class TestEntryManagerFromBatch:
             current_prices=current_prices,
         )
 
-        assert len(result) == 1
-        assert result[0].symbol == "NVDA"
+        assert len(result) == 0
 
     @pytest.mark.asyncio
     async def test_daily_limit_stops_execution_at_3(self):

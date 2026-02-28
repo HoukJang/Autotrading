@@ -81,14 +81,14 @@ class TestCompositeScoreCalculation:
         )
         assert abs(cand.composite_score - expected_composite) < 1e-6
 
-    def test_regime_compatibility_adx_pullback_long(self):
-        """ADX pullback long should have regime_compatibility = 0.95."""
+    def test_regime_compatibility_ema_pullback_long(self):
+        """ema_pullback long should have regime_compatibility = 0.90."""
         ranker = SignalRanker(top_n=12)
-        sr = _make_scan_result(strategy="adx_pullback", direction="long", signal_strength=0.70)
+        sr = _make_scan_result(strategy="ema_pullback", direction="long", signal_strength=0.70)
         candidates = ranker.rank([sr])
 
         assert len(candidates) == 1
-        assert abs(candidates[0].regime_compatibility - 0.95) < 1e-6
+        assert abs(candidates[0].regime_compatibility - 0.90) < 1e-6
 
     def test_regime_compatibility_unknown_strategy(self):
         """Unknown strategy/direction pair should default to 0.60."""
@@ -100,18 +100,18 @@ class TestCompositeScoreCalculation:
         assert abs(candidates[0].regime_compatibility - 0.60) < 1e-6
 
     def test_adx_boost_from_high_adx_indicator(self):
-        """ADX strategy with ADX_14 > 30 should receive a score boost."""
+        """ema_pullback with ADX_14 > 25 should receive a score boost."""
         ranker = SignalRanker(top_n=12)
-        # ADX = 40 => boost = min(0.05, (40-30)/200) = 0.05
+        # ADX = 40 => boost = min(0.05, (40-25)/200) = 0.05
         sr_high_adx = _make_scan_result(
-            strategy="adx_pullback",
+            strategy="ema_pullback",
             direction="long",
             signal_strength=0.70,
             indicators={"ADX_14": 40.0},
         )
         sr_no_adx = _make_scan_result(
             symbol="MSFT",
-            strategy="adx_pullback",
+            strategy="ema_pullback",
             direction="long",
             signal_strength=0.70,
             indicators={},
@@ -127,7 +127,7 @@ class TestCompositeScoreCalculation:
         ranker = SignalRanker(top_n=12)
         # ADX = 1000 => enormous boost, but clamped
         sr = _make_scan_result(
-            strategy="adx_pullback",
+            strategy="ema_pullback",
             direction="long",
             signal_strength=0.70,
             indicators={"ADX_14": 1000.0},
@@ -336,7 +336,7 @@ class TestEdgeCases:
         """Composite score should be <= 1.0 for any valid input."""
         ranker = SignalRanker(top_n=12)
         sr = _make_scan_result(
-            strategy="adx_pullback", direction="long", signal_strength=1.0
+            strategy="ema_pullback", direction="long", signal_strength=1.0
         )
         candidates = ranker.rank([sr])
         assert candidates[0].composite_score <= 1.0 + 1e-9

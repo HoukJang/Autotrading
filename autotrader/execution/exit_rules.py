@@ -3,7 +3,7 @@
 Exit hierarchy (evaluated in order, first match wins):
   1. Day 1 emergency stops only (no SL/TP checks on entry day)
   2. Day 2+ SL/TP from actual fill price using strategy ATR multipliers
-  3. Trailing stops for ADX Pullback and Regime Momentum
+  3. Trailing stops (no strategies currently use this)
   4. Time-based exit when max_hold_days reached
   5. (Re-entry blocking is a side effect, not an exit check)
 
@@ -28,36 +28,33 @@ _EMERGENCY_LOSS_CONFIRM_PCT: float = 0.07   # -7%: need 2 consecutive bars
 _EMERGENCY_LOSS_IMMEDIATE_PCT: float = 0.10  # -10%: immediate single-bar exit
 _EMERGENCY_BARS_NEEDED: int = 2             # bars at -7% before triggering
 
+# Breakeven stop: once price moves this many ATRs in our favour, move SL to entry
+_BREAKEVEN_ACTIVATION_ATR: float = 0.6
+
 # Strategy-specific max hold days
 _MAX_HOLD_DAYS: dict[str, int] = {
     "rsi_mean_reversion": 5,
-    "overbought_short": 5,
-    "bb_squeeze": 5,
-    "adx_pullback": 7,
-    "regime_momentum": 7,
+    "consecutive_down": 5,
 }
 
 # Strategy-specific SL ATR multipliers (by direction)
 _SL_ATR_MULT: dict[str, dict[str, float]] = {
-    "rsi_mean_reversion": {"long": 2.0, "short": 2.5},
-    "overbought_short": {"long": 2.5, "short": 2.5},
-    "adx_pullback": {"long": 1.5, "short": 1.5},
-    "bb_squeeze": {"long": 1.5, "short": 1.5},
-    "regime_momentum": {"long": 1.5, "short": 1.5},
+    "rsi_mean_reversion": {"long": 1.0, "short": 1.5},
+    "consecutive_down": {"long": 1.0},
 }
 
 # Strategy-specific TP ATR multipliers (None = use indicator-based TP)
 _TP_ATR_MULT: dict[str, float | None] = {
     "rsi_mean_reversion": None,
-    "overbought_short": None,
-    "adx_pullback": 2.5,
-    "bb_squeeze": None,
-    "regime_momentum": None,
+    "consecutive_down": None,
 }
 
 # Strategies that use trailing stops
-_TRAILING_STRATEGIES: frozenset[str] = frozenset({"adx_pullback", "regime_momentum"})
+_TRAILING_STRATEGIES: frozenset[str] = frozenset()
 _TRAILING_ATR_MULT: float = 2.0
+
+# Per-strategy trailing stop activation thresholds (ATR multiples of favourable move)
+_TRAILING_ACTIVATION_ATR: dict[str, float] = {}
 
 
 @dataclass
@@ -300,11 +297,19 @@ class ExitRuleEngine:
     def _evaluate_sl(
         self, position: HeldPosition, bar_close: float, atr: float,
     ) -> ExitDecision:
-        """Standard stop-loss check using strategy ATR multipliers."""
+        """Standard stop-loss check with breakeven upgrade.
+
+        Once price has moved _BREAKEVEN_ACTIVATION_ATR in our favour,
+        the stop loss is raised (long) or lowered (short) to the entry
+        price, so the trade can no longer result in a loss.
+        """
         mult = _SL_ATR_MULT.get(position.strategy, {}).get(position.direction, 2.0)
         sl_distance = mult * atr
         if position.direction == "long":
             sl_price = position.entry_price - sl_distance
+            # Breakeven upgrade: if price reached entry + activation ATR, floor SL at entry
+            if position.highest_price >= position.entry_price + _BREAKEVEN_ACTIVATION_ATR * atr:
+                sl_price = max(sl_price, position.entry_price)
             if bar_close <= sl_price:
                 logger.info(
                     "SL triggered for LONG %s: close=%.2f <= sl=%.2f",
@@ -315,6 +320,9 @@ class ExitRuleEngine:
                 )
         else:  # short
             sl_price = position.entry_price + sl_distance
+            # Breakeven upgrade for short
+            if position.lowest_price <= position.entry_price - _BREAKEVEN_ACTIVATION_ATR * atr:
+                sl_price = min(sl_price, position.entry_price)
             if bar_close >= sl_price:
                 logger.info(
                     "SL triggered for SHORT %s: close=%.2f >= sl=%.2f",
@@ -341,7 +349,7 @@ class ExitRuleEngine:
         strategy = position.strategy
 
         if tp_atr_mult is not None:
-            # Fixed ATR take-profit (adx_pullback)
+            # Fixed ATR take-profit (ema_pullback)
             if position.direction == "long":
                 tp_price = position.entry_price + tp_atr_mult * atr
                 if bar_close >= tp_price:
@@ -360,46 +368,74 @@ class ExitRuleEngine:
                     )
             return _HOLD
 
-        # Indicator-based TP (rsi_mean_reversion, overbought_short, bb_squeeze)
+        # Indicator-based TP
         rsi = indicators.get("RSI_14")
         bb = indicators.get("BBANDS_20")
         pct_b = bb.get("pct_b", 0.5) if isinstance(bb, dict) else None
 
-        if strategy in ("rsi_mean_reversion", "bb_squeeze"):
+        if strategy == "rsi_mean_reversion":
             if position.direction == "long":
-                rsi_target = 50.0 if strategy == "rsi_mean_reversion" else 75.0
-                if (rsi is not None and rsi > rsi_target) or (pct_b is not None and pct_b > 0.50):
+                if (rsi is not None and rsi > 50.0) or (pct_b is not None and pct_b > 0.50):
                     reason = f"tp_rsi_{rsi:.1f}" if rsi is not None else "tp_bb"
                     return ExitDecision(
                         action="exit", reason=reason, target_price=bar_close,
                     )
             else:  # short
-                rsi_target = 50.0 if strategy == "rsi_mean_reversion" else 25.0
-                if (rsi is not None and rsi < rsi_target) or (pct_b is not None and pct_b < 0.50):
+                if (rsi is not None and rsi < 50.0) or (pct_b is not None and pct_b < 0.50):
                     reason = f"tp_rsi_{rsi:.1f}" if rsi is not None else "tp_bb"
                     return ExitDecision(
                         action="exit", reason=reason, target_price=bar_close,
                     )
 
-        elif strategy == "overbought_short":
-            # Short-only: exit when RSI < 55 or pct_b < 0.50
-            if (rsi is not None and rsi < 55.0) or (pct_b is not None and pct_b < 0.50):
-                reason = f"tp_rsi_{rsi:.1f}" if rsi is not None else "tp_bb"
+        elif strategy == "consecutive_down":
+            # Long-only: exit when close > EMA(5) (bounce target)
+            ema_5 = indicators.get("EMA_5")
+            if ema_5 is not None and bar_close > ema_5:
                 return ExitDecision(
-                    action="exit", reason=reason, target_price=bar_close,
+                    action="exit", reason="tp_ema5", target_price=bar_close,
                 )
+
+        # Auxiliary ATR TP for rsi_mean_reversion: cap gains at 2.0 ATR
+        # even if indicator-based TP hasn't triggered yet
+        if strategy == "rsi_mean_reversion":
+            atr_tp_mult = 2.0
+            if position.direction == "long":
+                atr_tp_price = position.entry_price + atr_tp_mult * atr
+                if bar_close >= atr_tp_price:
+                    return ExitDecision(
+                        action="exit", reason="take_profit", target_price=atr_tp_price,
+                    )
+            else:
+                atr_tp_price = position.entry_price - atr_tp_mult * atr
+                if bar_close <= atr_tp_price:
+                    return ExitDecision(
+                        action="exit", reason="take_profit", target_price=atr_tp_price,
+                    )
 
         return _HOLD
 
     def _evaluate_trailing(
         self, position: HeldPosition, bar_close: float, atr: float,
     ) -> ExitDecision:
-        """Trailing stop for strategies that use them (adx_pullback, regime_momentum)."""
+        """Trailing stop for strategies that use them (currently none).
+
+        Activation conditions:
+        - Price must have moved at least activation ATR in our favour to start trailing.
+        - Trail stop is floored at entry price (trailing can never cause a loss).
+        """
         if position.strategy not in _TRAILING_STRATEGIES:
             return _HOLD
 
+        # Per-strategy activation threshold (default 1.5 ATR)
+        activation_atr = _TRAILING_ACTIVATION_ATR.get(position.strategy, 1.5)
+
         if position.direction == "long":
-            trail_stop = position.highest_price - _TRAILING_ATR_MULT * atr
+            if position.highest_price < position.entry_price + activation_atr * atr:
+                return _HOLD
+            trail_stop = max(
+                position.entry_price,
+                position.highest_price - _TRAILING_ATR_MULT * atr,
+            )
             if bar_close <= trail_stop:
                 logger.info(
                     "Trailing stop for LONG %s: close=%.2f <= trail=%.2f (high=%.2f)",
@@ -409,7 +445,12 @@ class ExitRuleEngine:
                     action="exit", reason="trailing_stop", target_price=trail_stop,
                 )
         else:  # short
-            trail_stop = position.lowest_price + _TRAILING_ATR_MULT * atr
+            if position.lowest_price > position.entry_price - activation_atr * atr:
+                return _HOLD
+            trail_stop = min(
+                position.entry_price,
+                position.lowest_price + _TRAILING_ATR_MULT * atr,
+            )
             if bar_close >= trail_stop:
                 logger.info(
                     "Trailing stop for SHORT %s: close=%.2f >= trail=%.2f (low=%.2f)",

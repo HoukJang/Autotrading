@@ -6,15 +6,12 @@ entry_groups:
   moo:
     strategies:
       - rsi_mean_reversion
-      - overbought_short
+      - consecutive_down
     order_type: market
 
   # Group B: Confirmation window, 9:45-10:00 AM ET
   confirmation:
-    strategies:
-      - adx_pullback
-      - bb_squeeze
-      - regime_momentum
+    strategies: []
     order_type: market
     # Long confirm: price >= prev_close * (1 - gap_tol)
     # Short confirm: price <= prev_close * (1 + gap_tol)
@@ -26,57 +23,84 @@ entry_groups:
 
 # Gap filter: skip signals where overnight gap exceeds threshold
 gap_filter:
-  max_gap_pct: 0.03   # 3% max gap up or down from prev_close
+  max_gap_pct: 0.05   # 5% max gap up or down from prev_close
 
 # Daily entry limits
 entry_limits:
-  max_daily_entries: 3    # max new positions per day
-  max_long_positions: 6   # hard cap on concurrent longs
+  max_daily_entries: 3    # portfolio-level total cap per day (per-strategy GDR may restrict further)
+  max_long_positions: 4   # hard cap on concurrent longs
   max_short_positions: 3  # hard cap on concurrent shorts
+  max_total_positions: 5  # overall position cap
+
+# Per-Strategy Graduated Drawdown Response (GDR)
+# Each strategy tracks its own cumulative PnL drawdown independently.
+# When drawdown exceeds thresholds, risk sizing and entry limits are reduced per strategy.
+per_strategy_gdr:
+  enabled: true            # toggle per-strategy GDR (false = legacy portfolio-level GDR)
+
+  # Per-strategy base risk (fraction of equity risked per trade)
+  base_risk:
+    rsi_mean_reversion: 0.01   # 1% (reduced from 2% due to higher loss rate)
+    consecutive_down: 0.02     # 2%
+    default: 0.02              # fallback for unknown strategies
+
+  # Per-strategy drawdown thresholds: [tier1_dd, tier2_dd]
+  # DD is calculated as (peak_cum_pnl - current_cum_pnl) / initial_capital
+  thresholds:
+    rsi_mean_reversion: [0.03, 0.06]   # Tier 1 at 3%, Tier 2 (HALT) at 6%
+    consecutive_down: [0.04, 0.08]     # Tier 1 at 4%, Tier 2 (HALT) at 8%
+
+  # Risk multipliers per GDR tier
+  risk_multipliers:
+    tier_0: 1.0   # normal
+    tier_1: 0.5   # reduced
+    tier_2: 0.0   # HALTED (no entries)
+
+  # Per-strategy max entries per day per tier
+  strategy_entries:
+    tier_0: 1   # 1 entry per strategy per day
+    tier_1: 1   # 1 entry per strategy per day
+    tier_2: 0   # 0 entries (halted)
+
+  # Portfolio safety net (overrides per-strategy GDR when total DD is extreme)
+  safety_net:
+    activation_dd: 0.20      # activate when total portfolio DD > 20%
+    recovery_dd: 0.15        # deactivate when DD recovers below 15%
+    max_entries: 1            # 1 entry total when active
+    risk_pct: 0.005           # 0.5% risk when active
 
 # Per-strategy SL/TP configuration
 strategies:
   rsi_mean_reversion:
-    sl_atr_mult_long: 2.0
-    sl_atr_mult_short: 2.5
+    sl_atr_mult_long: 1.0
+    sl_atr_mult_short: 1.5
     tp_rsi_long: 50.0       # exit long when RSI > 50
     tp_rsi_short: 50.0      # exit short when RSI < 50
     tp_bb_pct_b_long: 0.50  # exit long when pct_b > 0.50
     tp_bb_pct_b_short: 0.50 # exit short when pct_b < 0.50
+    tp_atr_mult: 2.0        # auxiliary ATR TP cap
     max_hold_days: 5
     trailing_stop: false
+    breakeven_activation_atr: 0.6  # move SL to entry after 0.6 ATR profit
 
-  overbought_short:
-    sl_atr_mult_long: 2.5   # only short direction used
-    sl_atr_mult_short: 2.5
-    tp_rsi_short: 55.0      # exit short when RSI < 55
-    tp_bb_pct_b_short: 0.50
+  consecutive_down:
+    sl_atr_mult_long: 1.0
+    tp_ema_short: 5              # exit when close > EMA(5)
     max_hold_days: 5
     trailing_stop: false
+    breakeven_activation_atr: 0.6
 
-  adx_pullback:
-    sl_atr_mult_long: 1.5
-    sl_atr_mult_short: 1.5  # not used (long-only strategy)
-    tp_atr_mult: 2.5         # take profit at entry + 2.5 * ATR
+  ema_pullback:
+    enabled: false
+    sl_atr_mult_long: 1.0
+    tp_atr_mult: 2.0
     max_hold_days: 7
-    trailing_stop: true
-    trailing_atr_mult: 2.0
-
-  bb_squeeze:
-    sl_atr_mult_long: 1.5
-    sl_atr_mult_short: 1.5
-    tp_rsi_long: 75.0
-    tp_rsi_short: 25.0
-    max_hold_days: 5
     trailing_stop: false
-
-  regime_momentum:
-    sl_atr_mult_long: 1.5
-    sl_atr_mult_short: 1.5  # not used (long-only strategy)
-    tp_atr_mult: null        # no fixed TP; trailing stop only
-    max_hold_days: 7
-    trailing_stop: true
     trailing_atr_mult: 2.0
+    trailing_activation_atr: 1.0
+    breakeven_activation_atr: 0.6
+
+  # volume_divergence: REMOVED (13th backtest P0 decision)
 
 # Emergency exits (override all other rules, Day 1 only)
 emergency_exit:

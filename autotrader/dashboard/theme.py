@@ -54,10 +54,9 @@ REGIME_TINTS = {
 # ---------------------------------------------------------------------------
 STRATEGY_COLORS = {
     "rsi_mean_reversion": "#8B5CF6",
-    "bb_squeeze_breakout": "#F59E0B",
-    "adx_pullback": "#10B981",
-    "overbought_short": "#EF4444",
-    "regime_momentum": "#06B6D4",
+    "consecutive_down": "#F59E0B",
+    "ema_pullback": "#10B981",
+    "volume_divergence": "#06B6D4",
 }
 
 # ---------------------------------------------------------------------------
@@ -65,9 +64,8 @@ STRATEGY_COLORS = {
 # ---------------------------------------------------------------------------
 STRATEGY_NAMES = {
     "rsi_mean_reversion": "RSI Mean Reversion",
-    "bb_squeeze_breakout": "BB Squeeze Breakout",
-    "adx_pullback": "ADX Pullback",
-    "overbought_short": "Overbought Short",
-    "regime_momentum": "Regime Momentum",
+    "consecutive_down": "Consecutive Down",
+    "ema_pullback": "EMA Pullback",
+    "volume_divergence": "Volume Divergence",
     "rotation_manager": "Rotation Manager",
 }

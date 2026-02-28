@@ -343,8 +343,8 @@ class TestTimeBasedExitEndToEnd:
     """Full pipeline for time-based forced exits."""
 
     @pytest.mark.asyncio
-    async def test_rsi_mr_time_exit_at_5_days(self):
-        """RSI MR position held for 5 bars should trigger time exit."""
+    async def test_rsi_mr_time_exit_at_7_days(self):
+        """RSI MR position held for 7 bars should trigger time exit."""
         monitor, engine = _make_monitor_with_real_exit_engine()
 
         pos = _make_held_position(
@@ -352,7 +352,7 @@ class TestTimeBasedExitEndToEnd:
             strategy="rsi_mean_reversion",
             entry_price=100.0,
             entry_atr=2.0,
-            bars_held=4,  # Will be incremented to 5 in _on_daily_bar
+            bars_held=6,  # Will be incremented to 7 in _on_daily_bar
             entry_date_et=ENTRY_DATE,
         )
         monitor.add_position(pos)
@@ -386,7 +386,7 @@ class TestTimeBasedExitEndToEnd:
         pos = _make_held_position(
             symbol="AAPL",
             strategy="rsi_mean_reversion",
-            bars_held=4,
+            bars_held=6,
             entry_date_et=ENTRY_DATE,
         )
         monitor.add_position(pos)

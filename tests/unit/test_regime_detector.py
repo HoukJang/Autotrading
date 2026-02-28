@@ -150,10 +150,9 @@ class TestTrendWeights:
     def test_trend_weights_values(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.TREND)
         assert weights["rsi_mean_reversion"] == 0.15
-        assert weights["adx_pullback"] == 0.30
-        assert weights["bb_squeeze"] == 0.20
-        assert weights["overbought_short"] == 0.10
-        assert weights["regime_momentum"] == 0.25
+        assert weights["consecutive_down"] == 0.20
+        assert weights["ema_pullback"] == 0.40
+        assert weights["volume_divergence"] == 0.25
 
     def test_trend_weights_sum_to_one(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.TREND)
@@ -164,10 +163,9 @@ class TestRangingWeights:
     def test_ranging_weights_values(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.RANGING)
         assert weights["rsi_mean_reversion"] == 0.35
-        assert weights["adx_pullback"] == 0.10
-        assert weights["bb_squeeze"] == 0.25
-        assert weights["overbought_short"] == 0.20
-        assert weights["regime_momentum"] == 0.10
+        assert weights["consecutive_down"] == 0.30
+        assert weights["ema_pullback"] == 0.10
+        assert weights["volume_divergence"] == 0.25
 
     def test_ranging_weights_sum_to_one(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.RANGING)
@@ -177,11 +175,10 @@ class TestRangingWeights:
 class TestHighVolatilityWeights:
     def test_high_volatility_weights_values(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.HIGH_VOLATILITY)
-        assert weights["rsi_mean_reversion"] == 0.20
-        assert weights["adx_pullback"] == 0.10
-        assert weights["bb_squeeze"] == 0.30
-        assert weights["overbought_short"] == 0.25
-        assert weights["regime_momentum"] == 0.15
+        assert weights["rsi_mean_reversion"] == 0.25
+        assert weights["consecutive_down"] == 0.30
+        assert weights["ema_pullback"] == 0.10
+        assert weights["volume_divergence"] == 0.35
 
     def test_high_volatility_weights_sum_to_one(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.HIGH_VOLATILITY)
@@ -191,16 +188,15 @@ class TestHighVolatilityWeights:
 class TestUncertainWeights:
     def test_uncertain_weights_values(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.UNCERTAIN)
-        assert weights["rsi_mean_reversion"] == 0.20
-        assert weights["adx_pullback"] == 0.15
-        assert weights["bb_squeeze"] == 0.20
-        assert weights["overbought_short"] == 0.20
-        assert weights["regime_momentum"] == 0.15
+        assert weights["rsi_mean_reversion"] == 0.25
+        assert weights["consecutive_down"] == 0.25
+        assert weights["ema_pullback"] == 0.25
+        assert weights["volume_divergence"] == 0.25
 
-    def test_uncertain_weights_sum_to_0_90(self, detector: RegimeDetector):
-        """UNCERTAIN keeps 10% cash buffer, so weights sum to 0.90."""
+    def test_uncertain_weights_sum_to_1_0(self, detector: RegimeDetector):
+        """UNCERTAIN weights sum to 1.0."""
         weights = detector.get_weights(MarketRegime.UNCERTAIN)
-        assert abs(sum(weights.values()) - 0.90) < 1e-9
+        assert abs(sum(weights.values()) - 1.0) < 1e-9
 
 
 class TestAllRegimeWeightSums:
@@ -217,11 +213,11 @@ class TestGetWeightsReturnsCopy:
 
     def test_modifying_returned_dict_does_not_affect_internal(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.TREND)
-        original_value = weights["adx_pullback"]
-        weights["adx_pullback"] = 999.0
+        original_value = weights["ema_pullback"]
+        weights["ema_pullback"] = 999.0
 
         fresh_weights = detector.get_weights(MarketRegime.TREND)
-        assert fresh_weights["adx_pullback"] == original_value
+        assert fresh_weights["ema_pullback"] == original_value
 
 
 # -- VIX-adjusted weight tests -----------------------------------------------
@@ -239,14 +235,14 @@ class TestVixAdjustedWeights:
         assert adjusted == base
 
     def test_high_vix_boosts_defensive(self, detector: RegimeDetector):
-        """HIGH VIX should boost rsi_mean_reversion and overbought_short."""
+        """HIGH VIX should boost consecutive_down and volume_divergence, reduce ema_pullback."""
         from autotrader.data.market_sentiment import SentimentLevel
 
         base = detector.get_weights(MarketRegime.TREND)
         adjusted = detector.get_vix_adjusted_weights(MarketRegime.TREND, SentimentLevel.HIGH)
-        assert adjusted["rsi_mean_reversion"] > base["rsi_mean_reversion"]
-        assert adjusted["overbought_short"] > base["overbought_short"]
-        assert adjusted["regime_momentum"] < base["regime_momentum"]
+        assert adjusted["consecutive_down"] > base["consecutive_down"]
+        assert adjusted["volume_divergence"] > base["volume_divergence"]
+        assert adjusted["ema_pullback"] < base["ema_pullback"]
 
     def test_extreme_vix_stronger_adjustment(self, detector: RegimeDetector):
         """EXTREME VIX should have stronger adjustments than HIGH."""
@@ -254,15 +250,15 @@ class TestVixAdjustedWeights:
 
         high = detector.get_vix_adjusted_weights(MarketRegime.TREND, SentimentLevel.HIGH)
         extreme = detector.get_vix_adjusted_weights(MarketRegime.TREND, SentimentLevel.EXTREME)
-        assert extreme["rsi_mean_reversion"] > high["rsi_mean_reversion"]
+        assert extreme["consecutive_down"] > high["consecutive_down"]
 
     def test_low_vix_slight_caution(self, detector: RegimeDetector):
-        """LOW VIX should slightly boost overbought_short (complacency risk)."""
+        """LOW VIX should slightly boost volume_divergence (complacency risk)."""
         from autotrader.data.market_sentiment import SentimentLevel
 
         base = detector.get_weights(MarketRegime.TREND)
         adjusted = detector.get_vix_adjusted_weights(MarketRegime.TREND, SentimentLevel.LOW)
-        assert adjusted["overbought_short"] > base["overbought_short"]
+        assert adjusted["volume_divergence"] > base["volume_divergence"]
 
     def test_weights_non_negative(self, detector: RegimeDetector):
         """All adjusted weights must be >= 0."""

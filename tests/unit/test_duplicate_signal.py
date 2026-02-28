@@ -42,7 +42,7 @@ class TestDuplicateSignalPrevention:
 
     @pytest.mark.asyncio
     async def test_blocks_different_strategy_same_symbol(self, app):
-        """AAPL has position from rsi_mean_reversion; adx_pullback signal for AAPL returns None."""
+        """AAPL has position from rsi_mean_reversion; consecutive_down signal for AAPL returns None."""
         await app._broker.connect()
         account = await app._broker.get_account()
 
@@ -53,7 +53,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="adx_pullback",
+            strategy="consecutive_down",
             symbol="AAPL",
             direction="long",
             strength=0.8,
@@ -63,7 +63,7 @@ class TestDuplicateSignalPrevention:
 
     @pytest.mark.asyncio
     async def test_blocks_short_from_different_strategy(self, app):
-        """AAPL has long from rsi_mean_reversion; overbought_short signal for AAPL returns None."""
+        """AAPL has long from rsi_mean_reversion; ema_pullback signal for AAPL returns None."""
         await app._broker.connect()
         account = await app._broker.get_account()
 
@@ -73,9 +73,9 @@ class TestDuplicateSignalPrevention:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="overbought_short",
+            strategy="ema_pullback",
             symbol="AAPL",
-            direction="short",
+            direction="long",
             strength=0.9,
         )
         order = app._signal_to_order(signal, account, [])
@@ -119,7 +119,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["MSFT"].append(bar)
 
         signal = Signal(
-            strategy="adx_pullback",
+            strategy="consecutive_down",
             symbol="MSFT",
             direction="long",
             strength=0.8,
@@ -147,7 +147,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["MSFT"].append(bar)
 
         signal = Signal(
-            strategy="adx_pullback",
+            strategy="consecutive_down",
             symbol="MSFT",
             direction="long",
             strength=0.8,
@@ -175,7 +175,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="adx_pullback",
+            strategy="consecutive_down",
             symbol="AAPL",
             direction="long",
             strength=0.8,
@@ -184,8 +184,8 @@ class TestDuplicateSignalPrevention:
         assert order is None
 
     @pytest.mark.asyncio
-    async def test_blocks_short_when_broker_has_long(self, app):
-        """Broker has long position; short signal from any strategy is blocked."""
+    async def test_blocks_long_when_broker_has_long(self, app):
+        """Broker has long position; long signal from different strategy is blocked."""
         await app._broker.connect()
         account = await app._broker.get_account()
 
@@ -200,9 +200,9 @@ class TestDuplicateSignalPrevention:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="overbought_short",
+            strategy="ema_pullback",
             symbol="AAPL",
-            direction="short",
+            direction="long",
             strength=0.9,
         )
         order = app._signal_to_order(signal, account, broker_positions)
@@ -241,7 +241,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="adx_pullback",
+            strategy="consecutive_down",
             symbol="AAPL",
             direction="long",
             strength=0.8,

@@ -6,8 +6,8 @@ Tests cover:
 - Day 1: Immediate emergency stop at -10%
 - Day 2+: SL triggered at correct ATR multiple per strategy
 - Day 2+: TP triggered at correct condition per strategy
-- Trailing stop for ADX Pullback and Regime Momentum (2.0x ATR)
-- Time-based exit: 5 days for RSI/BB/Short, 7 days for ADX/Momentum
+- Trailing stop (currently no strategies use trailing stops)
+- Time-based exit: 5 days for all strategies
 - Re-entry block: same symbol blocked after exit (both directions)
 - Re-entry block: cleared on new trading day
 - Long vs Short direction correctly handled
@@ -26,6 +26,7 @@ from autotrader.execution.exit_rules import (
     _SL_ATR_MULT,
     _TP_ATR_MULT,
     _TRAILING_ATR_MULT,
+    _TRAILING_ACTIVATION_ATR,
     _TRAILING_STRATEGIES,
     _EMERGENCY_LOSS_CONFIRM_PCT,
     _EMERGENCY_LOSS_IMMEDIATE_PCT,
@@ -297,36 +298,20 @@ class TestDay2StopLoss:
         if decision.action == "exit":
             assert decision.reason != "stop_loss"
 
-    def test_rsi_mr_long_sl_at_2x_atr(self):
-        """RSI MR long: SL should trigger at 2.0x ATR below entry (spec says 2.5, code uses 2.0)."""
-        # Note: exit_rules.py has rsi_mean_reversion long = 2.0, not 2.5 from spec
+    def test_rsi_mr_long_sl_at_1x_atr(self):
+        """RSI MR long: SL should trigger at 1.0x ATR below entry."""
         actual_mult = _SL_ATR_MULT.get("rsi_mean_reversion", {}).get("long", 2.0)
         self._test_sl_triggers("rsi_mean_reversion", "long", actual_mult)
 
-    def test_rsi_mr_short_sl_at_2_5x_atr(self):
-        """RSI MR short: SL should trigger at 2.5x ATR above entry."""
-        actual_mult = _SL_ATR_MULT.get("rsi_mean_reversion", {}).get("short", 2.5)
+    def test_rsi_mr_short_sl_at_1_5x_atr(self):
+        """RSI MR short: SL should trigger at 1.5x ATR above entry."""
+        actual_mult = _SL_ATR_MULT.get("rsi_mean_reversion", {}).get("short", 2.0)
         self._test_sl_triggers("rsi_mean_reversion", "short", actual_mult)
 
-    def test_bb_squeeze_long_sl_at_1_5x_atr(self):
-        """BB Squeeze long: SL should trigger at 1.5x ATR below entry."""
-        actual_mult = _SL_ATR_MULT.get("bb_squeeze", {}).get("long", 1.5)
-        self._test_sl_triggers("bb_squeeze", "long", actual_mult)
-
-    def test_adx_pullback_long_sl_at_1_5x_atr(self):
-        """ADX Pullback long: SL should trigger at 1.5x ATR below entry."""
-        actual_mult = _SL_ATR_MULT.get("adx_pullback", {}).get("long", 1.5)
-        self._test_sl_triggers("adx_pullback", "long", actual_mult)
-
-    def test_overbought_short_sl_at_2_5x_atr(self):
-        """Overbought Short: SL should trigger at 2.5x ATR above entry."""
-        actual_mult = _SL_ATR_MULT.get("overbought_short", {}).get("short", 2.5)
-        self._test_sl_triggers("overbought_short", "short", actual_mult)
-
-    def test_regime_momentum_long_sl_at_1_5x_atr(self):
-        """Regime Momentum long: SL should trigger at 1.5x ATR below entry."""
-        actual_mult = _SL_ATR_MULT.get("regime_momentum", {}).get("long", 1.5)
-        self._test_sl_triggers("regime_momentum", "long", actual_mult)
+    def test_consecutive_down_long_sl_at_1x_atr(self):
+        """Consecutive Down long: SL should trigger at 1.0x ATR below entry."""
+        actual_mult = _SL_ATR_MULT.get("consecutive_down", {}).get("long", 2.0)
+        self._test_sl_triggers("consecutive_down", "long", actual_mult)
 
     def test_sl_does_not_trigger_above_level_long(self):
         """Long SL should NOT trigger when price is above stop level."""
@@ -335,8 +320,8 @@ class TestDay2StopLoss:
 
     def test_sl_does_not_trigger_below_level_short(self):
         """Short SL should NOT trigger when price is below stop level."""
-        actual_mult = _SL_ATR_MULT.get("overbought_short", {}).get("short", 2.5)
-        self._test_sl_holds("overbought_short", "short", actual_mult)
+        actual_mult = _SL_ATR_MULT.get("rsi_mean_reversion", {}).get("short", 2.0)
+        self._test_sl_holds("rsi_mean_reversion", "short", actual_mult)
 
     def test_sl_uses_fallback_atr_when_indicator_unavailable(self):
         """When ATR_14 not in indicators, entry_atr should be used as fallback."""
@@ -344,14 +329,14 @@ class TestDay2StopLoss:
         atr = 3.0
         entry_price = 100.0
         pos = _make_position(
-            strategy="rsi_mean_reversion",
+            strategy="consecutive_down",
             direction="long",
             entry_price=entry_price,
             entry_atr=atr,
             entry_date_et=ENTRY_DATE,
             bars_held=1,
         )
-        sl_mult = _SL_ATR_MULT["rsi_mean_reversion"]["long"]
+        sl_mult = _SL_ATR_MULT["consecutive_down"]["long"]
         # Price below SL using fallback atr
         bar_close = entry_price - sl_mult * atr - 0.01
 
@@ -414,120 +399,83 @@ class TestDay2TakeProfit:
         assert decision.action == "exit"
         assert "tp_rsi" in decision.reason
 
-    def test_bb_squeeze_long_tp_triggers_rsi_above_75(self):
-        """BB Squeeze long: TP triggers when RSI > 75."""
+    def test_consecutive_down_long_tp_triggers_above_ema5(self):
+        """Consecutive Down long: TP triggers when close > EMA(5)."""
         engine = ExitRuleEngine()
         pos = _make_position(
-            strategy="bb_squeeze",
+            strategy="consecutive_down",
             direction="long",
             entry_price=100.0,
             bars_held=1,
         )
+        indicators = _indicators(rsi=45.0)
+        indicators["EMA_5"] = 101.0
         decision = engine.evaluate(
             position=pos,
-            bar_close=108.0,
-            bar_high=109.0,
-            bar_low=107.0,
-            indicators=_indicators(rsi=80.0),  # RSI > 75
+            bar_close=102.0,  # close > EMA_5 (101)
+            bar_high=103.0,
+            bar_low=101.0,
+            indicators=indicators,
             current_date_et=NEXT_DAY,
         )
         assert decision.action == "exit"
+        assert "tp_ema5" in decision.reason
 
-    def test_overbought_short_tp_triggers_rsi_below_55(self):
-        """Overbought Short: TP triggers when RSI < 55."""
-        engine = ExitRuleEngine()
-        pos = _make_position(
-            strategy="overbought_short",
-            direction="short",
-            entry_price=100.0,
-            bars_held=1,
-        )
-        decision = engine.evaluate(
-            position=pos,
-            bar_close=96.0,
-            bar_high=97.0,
-            bar_low=95.0,
-            indicators=_indicators(rsi=50.0),  # RSI < 55
-            current_date_et=NEXT_DAY,
-        )
-        assert decision.action == "exit"
-
-    def test_overbought_short_tp_triggers_pct_b_below_050(self):
-        """Overbought Short: TP also triggers when pct_b < 0.50."""
-        engine = ExitRuleEngine()
-        pos = _make_position(
-            strategy="overbought_short",
-            direction="short",
-            entry_price=100.0,
-            bars_held=1,
-        )
-        decision = engine.evaluate(
-            position=pos,
-            bar_close=96.0,
-            bar_high=97.0,
-            bar_low=95.0,
-            indicators=_indicators(rsi=60.0, pct_b=0.40),  # pct_b < 0.50
-            current_date_et=NEXT_DAY,
-        )
-        assert decision.action == "exit"
-
-    def test_adx_pullback_long_tp_at_2_5x_atr_gain(self):
-        """ADX Pullback long: TP triggers when close >= entry + 2.5x ATR."""
+    def test_rsi_mr_long_atr_tp_cap_at_2_0x_atr(self):
+        """RSI MR long: auxiliary ATR TP cap triggers when close >= entry + 2.0x ATR."""
         engine = ExitRuleEngine()
         atr = 2.0
         entry_price = 100.0
-        tp_mult = _TP_ATR_MULT["adx_pullback"]  # 2.5
+        atr_tp_mult = 2.0
         pos = _make_position(
-            strategy="adx_pullback",
+            strategy="rsi_mean_reversion",
             direction="long",
             entry_price=entry_price,
             entry_atr=atr,
             bars_held=1,
         )
-        tp_price = entry_price + tp_mult * atr  # 105.0
+        tp_price = entry_price + atr_tp_mult * atr  # 104.0
 
         decision = engine.evaluate(
             position=pos,
             bar_close=tp_price + 0.01,
             bar_high=tp_price + 1.0,
             bar_low=tp_price - 0.5,
-            indicators=_indicators(atr=atr),
+            indicators=_indicators(atr=atr, rsi=45.0),  # RSI below 50 -> indicator TP not triggered
             current_date_et=NEXT_DAY,
         )
         assert decision.action == "exit"
         assert decision.reason == "take_profit"
 
-    def test_adx_pullback_does_not_tp_below_target(self):
-        """ADX Pullback should NOT take profit when price is below TP level."""
+    def test_rsi_mr_long_no_tp_below_atr_cap(self):
+        """RSI MR long: should NOT take profit when price is below the 2.0 ATR cap."""
         engine = ExitRuleEngine()
         atr = 2.0
         entry_price = 100.0
-        tp_mult = _TP_ATR_MULT["adx_pullback"]
-        # Use HeldPosition directly to set highest_price explicitly
+        atr_tp_mult = 2.0
         pos = HeldPosition(
             symbol="AAPL",
-            strategy="adx_pullback",
+            strategy="rsi_mean_reversion",
             direction="long",
             entry_price=entry_price,
             entry_atr=atr,
             entry_date_et=ENTRY_DATE,
             bars_held=1,
             qty=10.0,
-            highest_price=entry_price,  # no upward move, so trailing stop won't fire
+            highest_price=entry_price,
             lowest_price=entry_price,
         )
-        # Price below TP level
-        bar_close = entry_price + tp_mult * atr - 0.01
+        # Price just below the ATR cap
+        bar_close = entry_price + atr_tp_mult * atr - 0.01  # 103.99
 
         decision = engine.evaluate(
             position=pos,
             bar_close=bar_close,
             bar_high=bar_close + 0.5,
             bar_low=bar_close - 0.5,
-            indicators=_indicators(atr=atr, rsi=40.0),
+            indicators=_indicators(atr=atr, rsi=45.0),  # RSI below TP threshold
             current_date_et=NEXT_DAY,
         )
-        # Either hold, or trailing stop fires, but NOT take_profit
         assert decision.action == "hold" or decision.reason != "take_profit"
 
 
@@ -536,160 +484,29 @@ class TestDay2TakeProfit:
 # ---------------------------------------------------------------------------
 
 class TestTrailingStop:
-    """Trailing stops apply to adx_pullback and regime_momentum only."""
+    """Trailing stops: currently no strategies use trailing stops."""
 
-    def test_adx_pullback_trailing_stop_triggers(self):
-        """ADX Pullback long trailing stop: close <= highest_price - 2x ATR."""
-        engine = ExitRuleEngine()
-        # Use large ATR so TP (entry + 2.5*atr) is much higher than trailing stop
-        # entry=100, atr=2: TP = 100 + 2.5*2 = 105, trail_stop = 110 - 2*2 = 106
-        # bar_close at 105.99 triggers TP first. 
-        # Solution: set bar_close above TP to avoid TP, but then trailing fires at 106.
-        # Actually the test: close = trail_stop - 0.01 = 105.99 >= TP=105 -> TP fires.
-        # Fix: make entry_price high enough so TP is above highest_price
-        # OR use highest_price == entry_price so trail_stop is low and TP is reachable
-        # Better: set entry_price such that bar_close < TP
-        # TP = entry + 2.5*atr. Trail = highest - 2*atr.
-        # We want bar_close < TP but bar_close <= trail.
-        # Use entry=100, atr=1, highest=120 -> TP=102.5, trail=118
-        # bar_close=118.01 >= TP=102.5 -> TP fires. Still wrong.
-        # The issue: SL and TP evaluated before trailing.
-        # Solution: make bar_close exactly equal to trailing stop but below SL and TP.
-        # ADX pullback: SL=entry-1.5*atr=98.5, TP=entry+2.5*atr=102.5, trail=high-2*atr
-        # If high=120, atr=1: trail=118. bar_close=117.99 >= TP(102.5) -> TP fires.
-        # The only way trailing fires before TP is if RSI/ATR based TP doesn't apply
-        # ADX pullback uses ATR-based TP (not RSI). TP evaluated before trailing.
-        # So if bar_close >= TP, TP fires. Trailing only fires if bar_close < TP.
-        # bar_close at trailing_stop < TP: trail=high-2*atr < entry+2.5*atr
-        #   => high < entry + 4.5*atr => if high=entry+4*atr, trail=entry+2*atr < TP(entry+2.5*atr)
-        # entry=100, atr=2, high=108 -> trail=104, TP=105. bar_close=103.99 < TP -> trailing fires!
-        entry_price = 100.0
-        atr = 2.0
-        highest_price = 108.0  # trail_stop = 108 - 4 = 104; TP = 100 + 5 = 105
-
-        pos = HeldPosition(
-            symbol="AAPL",
-            strategy="adx_pullback",
-            direction="long",
-            entry_price=entry_price,
-            entry_atr=atr,
-            entry_date_et=ENTRY_DATE,
-            bars_held=2,
-            qty=10.0,
-            highest_price=highest_price,
-            lowest_price=entry_price,
-        )
-
-        trail_stop = highest_price - _TRAILING_ATR_MULT * atr  # 108 - 4 = 104
-        bar_close = trail_stop - 0.01  # 103.99, below trail stop and below TP(105)
-
-        decision = engine.evaluate(
-            position=pos,
-            bar_close=bar_close,
-            bar_high=bar_close + 0.5,
-            bar_low=bar_close - 0.5,
-            indicators=_indicators(atr=atr, rsi=40.0),
-            current_date_et=NEXT_DAY,
-        )
-        assert decision.action == "exit"
-        assert decision.reason == "trailing_stop"
-
-    def test_regime_momentum_trailing_stop_triggers(self):
-        """Regime Momentum long trailing stop should trigger."""
-        engine = ExitRuleEngine()
-        atr = 3.0
-        entry_price = 200.0
-        highest_price = 220.0
-
-        pos = HeldPosition(
-            symbol="MSFT",
-            strategy="regime_momentum",
-            direction="long",
-            entry_price=entry_price,
-            entry_atr=atr,
-            entry_date_et=ENTRY_DATE,
-            bars_held=2,
-            qty=5.0,
-            highest_price=highest_price,
-            lowest_price=entry_price,
-        )
-
-        trail_stop = highest_price - _TRAILING_ATR_MULT * atr  # 220 - 6 = 214
-        bar_close = trail_stop - 0.01
-
-        decision = engine.evaluate(
-            position=pos,
-            bar_close=bar_close,
-            bar_high=bar_close + 1.0,
-            bar_low=bar_close - 1.0,
-            indicators=_indicators(atr=atr, rsi=40.0),
-            current_date_et=NEXT_DAY,
-        )
-        assert decision.action == "exit"
-        assert decision.reason == "trailing_stop"
+    def test_no_strategy_uses_trailing_stop(self):
+        """_TRAILING_STRATEGIES should be empty (no strategies use trailing stops)."""
+        assert len(_TRAILING_STRATEGIES) == 0
 
     def test_rsi_mr_no_trailing_stop(self):
         """RSI MR should NOT use trailing stop."""
         assert "rsi_mean_reversion" not in _TRAILING_STRATEGIES
 
-    def test_bb_squeeze_no_trailing_stop(self):
-        """BB Squeeze should NOT use trailing stop."""
-        assert "bb_squeeze" not in _TRAILING_STRATEGIES
+    def test_consecutive_down_no_trailing_stop(self):
+        """Consecutive Down should NOT use trailing stop."""
+        assert "consecutive_down" not in _TRAILING_STRATEGIES
 
-    def test_overbought_short_no_trailing_stop(self):
-        """Overbought Short should NOT use trailing stop."""
-        assert "overbought_short" not in _TRAILING_STRATEGIES
-
-    def test_trailing_stop_short_triggers_when_price_rises(self):
-        """Short trailing stop: triggers when close >= lowest_price + 2x ATR."""
-        engine = ExitRuleEngine()
-        atr = 2.0
-        entry_price = 100.0
-        # For ADX pullback short: TP = entry - 2.5*atr = 95
-        # Trail = lowest + 2*atr. 
-        # We need bar_close > TP (95) AND bar_close >= trail.
-        # With lowest=90: trail=94. bar_close=95.01 > TP(95)? No, TP for short fires when close<=tp.
-        # 95.01 <= 95? No -> TP does not fire. 95.01 >= trail(94)? Yes -> trailing fires!
-        lowest_price = 90.0  # trail = 90 + 4 = 94
-
-        pos = HeldPosition(
-            symbol="AAPL",
-            strategy="adx_pullback",
-            direction="short",
-            entry_price=entry_price,
-            entry_atr=atr,
-            entry_date_et=ENTRY_DATE,
-            bars_held=2,
-            qty=10.0,
-            highest_price=entry_price,
-            lowest_price=lowest_price,
-        )
-
-        trail_stop = lowest_price + _TRAILING_ATR_MULT * atr  # 94
-        # TP for short = entry - 2.5*atr = 95; trailing fires if close >= 94
-        # Use close just above TP (95.01) so TP doesn't trigger but trailing does
-        tp_price = entry_price - _TP_ATR_MULT["adx_pullback"] * atr  # 95
-        bar_close = tp_price + 0.01  # 95.01 > TP(95) -> TP not fired; 95.01 >= trail(94) -> trailing
-
-        decision = engine.evaluate(
-            position=pos,
-            bar_close=bar_close,
-            bar_high=bar_close + 0.5,
-            bar_low=bar_close - 0.5,
-            indicators=_indicators(atr=atr, rsi=60.0),
-            current_date_et=NEXT_DAY,
-        )
-        assert decision.action == "exit"
-        assert decision.reason == "trailing_stop"
-
-    def test_trailing_stop_does_not_trigger_above_stop_level(self):
-        """Trailing stop should not trigger if price is above the stop level."""
+    def test_trailing_stop_never_fires_for_any_active_strategy(self):
+        """Trailing stop should never fire for any of the active strategies."""
         engine = ExitRuleEngine()
         atr = 2.0
         highest_price = 110.0
+        # Use rsi_mean_reversion as representative active strategy
         pos = HeldPosition(
             symbol="AAPL",
-            strategy="adx_pullback",
+            strategy="rsi_mean_reversion",
             direction="long",
             entry_price=100.0,
             entry_atr=atr,
@@ -699,18 +516,17 @@ class TestTrailingStop:
             highest_price=highest_price,
             lowest_price=100.0,
         )
-        trail_stop = highest_price - _TRAILING_ATR_MULT * atr  # 106
-        bar_close = trail_stop + 0.5  # just above stop
+        # Price well below what would be a trailing stop level, but strategy not in set
+        bar_close = 106.5
 
         decision = engine.evaluate(
             position=pos,
             bar_close=bar_close,
             bar_high=bar_close + 1.0,
             bar_low=bar_close - 0.5,
-            indicators=_indicators(atr=atr, rsi=40.0),
+            indicators=_indicators(atr=atr, rsi=45.0),
             current_date_et=NEXT_DAY,
         )
-        # Should not exit from trailing stop
         assert decision.reason != "trailing_stop"
 
 
@@ -737,92 +553,13 @@ class TestTimeBasedExit:
         assert decision.action == "exit"
         assert decision.reason == "time_exit"
 
-    def test_overbought_short_exits_at_5_bars(self):
-        """Overbought Short: exit when bars_held >= 5."""
+    def test_consecutive_down_exits_at_5_bars(self):
+        """Consecutive Down: exit when bars_held >= 5."""
         engine = ExitRuleEngine()
         pos = _make_position(
-            strategy="overbought_short",
-            direction="short",
-            entry_price=100.0,
-            bars_held=5,
-        )
-        decision = engine.evaluate(
-            position=pos,
-            bar_close=98.0,  # slight loss for short (price up)
-            bar_high=99.0,
-            bar_low=97.5,
-            indicators=_indicators(rsi=60.0, pct_b=0.60),  # above TP levels
-            current_date_et=NEXT_DAY,
-        )
-        assert decision.action == "exit"
-        assert decision.reason == "time_exit"
-
-    def test_bb_squeeze_exits_at_5_bars(self):
-        """BB Squeeze: exit when bars_held >= 5."""
-        engine = ExitRuleEngine()
-        pos = _make_position(
-            strategy="bb_squeeze",
+            strategy="consecutive_down",
             direction="long",
             bars_held=5,
-        )
-        decision = engine.evaluate(
-            position=pos,
-            bar_close=100.5,
-            bar_high=101.0,
-            bar_low=99.5,
-            indicators=_indicators(rsi=40.0, pct_b=0.40),
-            current_date_et=NEXT_DAY,
-        )
-        assert decision.action == "exit"
-        assert decision.reason == "time_exit"
-
-    def test_adx_pullback_exits_at_7_bars(self):
-        """ADX Pullback: max hold is 7 days (not 5)."""
-        engine = ExitRuleEngine()
-        # Use HeldPosition directly to set highest_price == entry_price
-        # so trailing stop (highest - 2*atr = 100-4=96) is far below bar_close (100.5)
-        # and TP (entry + 2.5*atr = 105) is above bar_close (100.5)
-        # -> only time_exit fires at bars_held >= 7
-        pos = HeldPosition(
-            symbol="AAPL",
-            strategy="adx_pullback",
-            direction="long",
-            entry_price=100.0,
-            entry_atr=2.0,
-            entry_date_et=ENTRY_DATE,
-            bars_held=7,
-            qty=10.0,
-            highest_price=100.0,  # no run-up so trailing stop not near
-            lowest_price=100.0,
-        )
-        decision = engine.evaluate(
-            position=pos,
-            bar_close=100.5,
-            bar_high=101.0,
-            bar_low=99.5,
-            indicators=_indicators(rsi=40.0),
-            current_date_et=NEXT_DAY,
-        )
-        assert decision.action == "exit"
-        assert decision.reason == "time_exit"
-
-    def test_regime_momentum_exits_at_7_bars(self):
-        """Regime Momentum: max hold is 7 days."""
-        engine = ExitRuleEngine()
-        # Use HeldPosition directly to set highest_price == entry_price
-        # so trailing stop (highest - 2*atr = 96) is far below bar_close (100.5)
-        # -> only time_exit fires at bars_held >= 7
-        pos = HeldPosition(
-            symbol="AAPL",
-            strategy="regime_momentum",
-            direction="long",
-            entry_price=100.0,
-            entry_atr=2.0,
-            entry_date_et=ENTRY_DATE,
-            bars_held=7,
-            qty=10.0,
-            highest_price=100.0,
-            lowest_price=100.0,
         )
         decision = engine.evaluate(
             position=pos,
@@ -840,7 +577,7 @@ class TestTimeBasedExit:
         engine = ExitRuleEngine()
         pos = _make_position(
             strategy="rsi_mean_reversion",
-            bars_held=4,  # Max is 5, so 4 bars should hold
+            bars_held=3,  # Max is 5, so 3 bars should hold
         )
         decision = engine.evaluate(
             position=pos,
@@ -855,10 +592,9 @@ class TestTimeBasedExit:
     def test_max_hold_days_constants_match_spec(self):
         """MAX_HOLD_DAYS should match the spec values."""
         assert _MAX_HOLD_DAYS["rsi_mean_reversion"] == 5
-        assert _MAX_HOLD_DAYS["overbought_short"] == 5
-        assert _MAX_HOLD_DAYS["bb_squeeze"] == 5
-        assert _MAX_HOLD_DAYS["adx_pullback"] == 7
-        assert _MAX_HOLD_DAYS["regime_momentum"] == 7
+        assert _MAX_HOLD_DAYS["consecutive_down"] == 5
+        assert "volume_divergence" not in _MAX_HOLD_DAYS
+        assert "ema_pullback" not in _MAX_HOLD_DAYS
 
 
 # ---------------------------------------------------------------------------

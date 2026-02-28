@@ -39,42 +39,35 @@ class PositionReview:
 #
 # Reference weights (from regime_detector._REGIME_WEIGHTS):
 #
-#   rsi_mean_reversion : TREND 15% | RANGING 35% | HIGH_VOL 20% | UNCERTAIN 20%
-#   adx_pullback       : TREND 30% | RANGING 10% | HIGH_VOL 10% | UNCERTAIN 15%
-#   bb_squeeze         : TREND 20% | RANGING 25% | HIGH_VOL 30% | UNCERTAIN 20%
-#   overbought_short   : TREND 10% | RANGING 20% | HIGH_VOL 25% | UNCERTAIN 20%
-#   regime_momentum    : TREND 25% | RANGING 10% | HIGH_VOL 15% | UNCERTAIN 15%
+#   rsi_mean_reversion : TREND 15% | RANGING 35% | HIGH_VOL 25% | UNCERTAIN 25%
+#   consecutive_down   : TREND 20% | RANGING 30% | HIGH_VOL 30% | UNCERTAIN 25%
+#   ema_pullback       : TREND 40% | RANGING 10% | HIGH_VOL 10% | UNCERTAIN 25%
+#   volume_divergence  : TREND 25% | RANGING 25% | HIGH_VOL 35% | UNCERTAIN 25%
 # ---------------------------------------------------------------------------
 
 STRATEGY_REGIME_COMPATIBLE: dict[str, set[MarketRegime]] = {
     "rsi_mean_reversion": {
         MarketRegime.TREND,            # 15%
         MarketRegime.RANGING,          # 35%
-        MarketRegime.HIGH_VOLATILITY,  # 20%
-        MarketRegime.UNCERTAIN,        # 20%
+        MarketRegime.HIGH_VOLATILITY,  # 25%
+        MarketRegime.UNCERTAIN,        # 25%
     },
-    "adx_pullback": {
-        MarketRegime.TREND,            # 30%
-        MarketRegime.UNCERTAIN,        # 15%
+    "consecutive_down": {
+        MarketRegime.RANGING,          # 30%
+        MarketRegime.HIGH_VOLATILITY,  # 30%
+        MarketRegime.UNCERTAIN,        # 25%
+        # TREND 20% -- compatible but reduced
+    },
+    "ema_pullback": {
+        MarketRegime.TREND,            # 40%
+        MarketRegime.UNCERTAIN,        # 25%
         # RANGING 10%, HIGH_VOL 10% -- incompatible
     },
-    "bb_squeeze": {
-        MarketRegime.TREND,            # 20%
-        MarketRegime.RANGING,          # 25%
-        MarketRegime.HIGH_VOLATILITY,  # 30%
-        MarketRegime.UNCERTAIN,        # 20%
-    },
-    "overbought_short": {
-        MarketRegime.RANGING,          # 20%
-        MarketRegime.HIGH_VOLATILITY,  # 25%
-        MarketRegime.UNCERTAIN,        # 20%
-        # TREND 10% -- incompatible
-    },
-    "regime_momentum": {
+    "volume_divergence": {
         MarketRegime.TREND,            # 25%
-        MarketRegime.HIGH_VOLATILITY,  # 15%
-        MarketRegime.UNCERTAIN,        # 15%
-        # RANGING 10% -- incompatible
+        MarketRegime.RANGING,          # 25%
+        MarketRegime.HIGH_VOLATILITY,  # 35%
+        MarketRegime.UNCERTAIN,        # 25%
     },
 }
 

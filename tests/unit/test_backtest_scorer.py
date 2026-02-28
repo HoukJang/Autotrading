@@ -16,10 +16,9 @@ from autotrader.backtest.engine import BacktestEngine, BacktestResult
 from autotrader.core.config import RiskConfig
 from autotrader.core.types import Bar
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
-from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
-from autotrader.strategy.adx_pullback import AdxPullback
-from autotrader.strategy.overbought_short import OverboughtShort
-from autotrader.strategy.regime_momentum import RegimeMomentum
+from autotrader.strategy.consecutive_down import ConsecutiveDown
+from autotrader.strategy.ema_pullback import EmaPullback
+from autotrader.strategy.volume_divergence import VolumeDivergence
 
 
 # ─────────────────────────────────────────────────────
@@ -68,7 +67,7 @@ class TestBacktestScorer:
 # ─────────────────────────────────────────────────────
 
 class TestBacktestScorerWithEngine:
-    """Integration test: run BacktestEngine with all 5 strategies and feed results to BacktestScorer."""
+    """Integration test: run BacktestEngine with all 4 strategies and feed results to BacktestScorer."""
 
     @staticmethod
     def _make_bars(symbol: str, n: int = 100) -> list[Bar]:
@@ -92,7 +91,7 @@ class TestBacktestScorerWithEngine:
         return bars
 
     def test_engine_result_feeds_scorer(self):
-        """Run BacktestEngine with all 5 strategies on synthetic data, then score the result."""
+        """Run BacktestEngine with all 4 strategies on synthetic data, then score the result."""
         risk = RiskConfig(
             max_position_pct=0.30,
             max_drawdown_pct=0.30,
@@ -101,10 +100,9 @@ class TestBacktestScorerWithEngine:
         engine = BacktestEngine(3000.0, risk)
         strategies = [
             RsiMeanReversion(),
-            BbSqueezeBreakout(),
-            AdxPullback(),
-            OverboughtShort(),
-            RegimeMomentum(),
+            ConsecutiveDown(),
+            EmaPullback(),
+            VolumeDivergence(),
         ]
         for s in strategies:
             engine.add_strategy(s)

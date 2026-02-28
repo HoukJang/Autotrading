@@ -1,7 +1,7 @@
-"""Integration tests for all 5 swing trading strategies running together.
+"""Integration tests for all 4 swing trading strategies running together.
 
-Verifies that the full swing portfolio (RsiMeanReversion, BbSqueezeBreakout,
-AdxPullback, OverboughtShort, RegimeMomentum) operates correctly through the
+Verifies that the full swing portfolio (RsiMeanReversion, ConsecutiveDown,
+EmaPullback, VolumeDivergence) operates correctly through the
 BacktestEngine, and that the RegimeDetector and AllocationEngine produce
 valid regime classifications and position sizes.
 """
@@ -18,11 +18,10 @@ from autotrader.core.config import RiskConfig
 from autotrader.core.types import Bar
 from autotrader.portfolio.allocation_engine import AllocationEngine
 from autotrader.portfolio.regime_detector import MarketRegime, RegimeDetector
-from autotrader.strategy.adx_pullback import AdxPullback
-from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
-from autotrader.strategy.overbought_short import OverboughtShort
-from autotrader.strategy.regime_momentum import RegimeMomentum
+from autotrader.strategy.consecutive_down import ConsecutiveDown
+from autotrader.strategy.ema_pullback import EmaPullback
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
+from autotrader.strategy.volume_divergence import VolumeDivergence
 
 
 # ---------------------------------------------------------------------------
@@ -116,22 +115,20 @@ def _generate_volatile_bars(
 # ---------------------------------------------------------------------------
 
 def _create_all_strategies() -> list:
-    """Instantiate all 5 swing trading strategies."""
+    """Instantiate all 4 swing trading strategies."""
     return [
         RsiMeanReversion(),
-        BbSqueezeBreakout(),
-        AdxPullback(),
-        OverboughtShort(),
-        RegimeMomentum(),
+        ConsecutiveDown(),
+        EmaPullback(),
+        VolumeDivergence(),
     ]
 
 
 ALL_STRATEGY_NAMES = {
     "rsi_mean_reversion",
-    "bb_squeeze",
-    "adx_pullback",
-    "overbought_short",
-    "regime_momentum",
+    "consecutive_down",
+    "ema_pullback",
+    "volume_divergence",
 }
 
 SWING_RISK_CONFIG = RiskConfig(
@@ -147,10 +144,10 @@ SWING_RISK_CONFIG = RiskConfig(
 
 
 class TestAllStrategiesRunTogether:
-    """Verify that all 5 strategies can be registered and executed without error."""
+    """Verify that all 4 strategies can be registered and executed without error."""
 
     def test_all_strategies_run_without_error(self) -> None:
-        """Create all 5 strategies, add to BacktestEngine, run 300 bars.
+        """Create all 4 strategies, add to BacktestEngine, run 300 bars.
 
         Asserts:
             - No exceptions raised during the full run.
@@ -178,13 +175,11 @@ class TestStrategiesDifferentiation:
     """Verify strategies are actually differentiated in their signal generation."""
 
     def test_strategies_produce_different_sub_strategies(self) -> None:
-        """Run all 5 strategies on 500 bars and verify that completed trades
+        """Run all 4 strategies on 500 bars and verify that completed trades
         originate from different strategies when trades occur.
 
-        Note: The BacktestSimulator only supports 'long' and 'close' directions.
-        Short-only strategies (OverboughtShort) and short entries from bidirectional
-        strategies will not produce filled trades. This test validates that at least
-        the long-capable strategies generate differentiated trades.
+        Note: All 4 strategies are long-only. This test validates that at least
+        some strategies generate differentiated trades.
         """
         bars = _generate_bars(n=500, seed=123)
         engine = BacktestEngine(
@@ -275,18 +270,12 @@ class TestRegimeDetector:
         for regime in MarketRegime:
             weights = detector.get_weights(regime)
             total = sum(weights.values())
-            if regime == MarketRegime.UNCERTAIN:
-                # UNCERTAIN retains 10% cash buffer, weights sum to 0.90
-                assert abs(total - 0.90) < 1e-9, (
-                    f"{regime.value} weights sum to {total}, expected 0.90"
-                )
-            else:
-                assert abs(total - 1.0) < 1e-9, (
-                    f"{regime.value} weights sum to {total}, expected 1.0"
-                )
+            assert abs(total - 1.0) < 1e-9, (
+                f"{regime.value} weights sum to {total}, expected 1.0"
+            )
 
     def test_all_strategies_present_in_weights(self) -> None:
-        """Every regime must include weights for all 5 strategies."""
+        """Every regime must include weights for all 4 strategies."""
         detector = RegimeDetector()
         for regime in MarketRegime:
             weights = detector.get_weights(regime)
@@ -299,62 +288,62 @@ class TestRegimeDetector:
 class TestAllocationEnginePositionSizing:
     """Verify AllocationEngine computes correct position sizes per regime."""
 
-    def test_trend_regime_adx_pullback_sizing(self) -> None:
-        """In TREND regime, adx_pullback gets 30% of equity.
+    def test_trend_regime_ema_pullback_sizing(self) -> None:
+        """In TREND regime, ema_pullback gets 40% of equity.
 
-        With $3000 equity and price $100, that is $900 max allocation => 9 shares.
+        With $3000 equity and price $100, that is $1200 max allocation => 12 shares.
         """
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
 
         shares = allocator.get_position_size(
-            strategy_name="adx_pullback",
+            strategy_name="ema_pullback",
             price=100.0,
             equity=3000.0,
             regime=MarketRegime.TREND,
         )
-        # 30% of $3000 = $900 => $900 / $100 = 9 shares
-        assert shares == 9
+        # 40% of $3000 = $1200 => $1200 / $100 = 12 shares
+        assert shares == 12
 
-    def test_trend_regime_overbought_short_sizing(self) -> None:
-        """In TREND regime, overbought_short gets 10% of equity.
+    def test_trend_regime_rsi_mean_reversion_sizing(self) -> None:
+        """In TREND regime, rsi_mean_reversion gets 15% of equity.
 
-        With $3000 equity and price $100, that is $300 max allocation => 3 shares.
+        With $3000 equity and price $100, that is $450 max allocation => 4 shares.
         """
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
 
         shares = allocator.get_position_size(
-            strategy_name="overbought_short",
+            strategy_name="rsi_mean_reversion",
             price=100.0,
             equity=3000.0,
             regime=MarketRegime.TREND,
         )
-        # 10% of $3000 = $300 => $300 / $100 = 3 shares
-        assert shares == 3
+        # 15% of $3000 = $450 => $450 / $100 = 4 shares
+        assert shares == 4
 
-    def test_adx_pullback_produces_more_shares_than_overbought_short(self) -> None:
-        """adx_pullback (30%) should get a meaningfully larger position than
-        overbought_short (10%) in TREND regime.
+    def test_ema_pullback_produces_more_shares_than_rsi_mr(self) -> None:
+        """ema_pullback (40%) should get a meaningfully larger position than
+        rsi_mean_reversion (15%) in TREND regime.
         """
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
 
-        adx_shares = allocator.get_position_size(
-            strategy_name="adx_pullback",
+        ema_shares = allocator.get_position_size(
+            strategy_name="ema_pullback",
             price=100.0,
             equity=3000.0,
             regime=MarketRegime.TREND,
         )
-        ob_shares = allocator.get_position_size(
-            strategy_name="overbought_short",
+        rsi_shares = allocator.get_position_size(
+            strategy_name="rsi_mean_reversion",
             price=100.0,
             equity=3000.0,
             regime=MarketRegime.TREND,
         )
-        assert adx_shares > ob_shares, (
-            f"adx_pullback ({adx_shares}) should have more shares "
-            f"than overbought_short ({ob_shares})"
+        assert ema_shares > rsi_shares, (
+            f"ema_pullback ({ema_shares}) should have more shares "
+            f"than rsi_mean_reversion ({rsi_shares})"
         )
 
     def test_below_minimum_position_returns_zero(self) -> None:
@@ -362,9 +351,9 @@ class TestAllocationEnginePositionSizing:
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
 
-        # In TREND regime, overbought_short gets 10% of $1000 = $100 < $200 min
+        # In TREND regime, rsi_mean_reversion gets 15% of $1000 = $150 < $200 min
         shares = allocator.get_position_size(
-            strategy_name="overbought_short",
+            strategy_name="rsi_mean_reversion",
             price=100.0,
             equity=1000.0,
             regime=MarketRegime.TREND,
@@ -377,7 +366,7 @@ class TestAllocationEnginePositionSizing:
         allocator = AllocationEngine(detector)
 
         shares = allocator.get_position_size(
-            strategy_name="adx_pullback",
+            strategy_name="ema_pullback",
             price=0.0,
             equity=3000.0,
             regime=MarketRegime.TREND,

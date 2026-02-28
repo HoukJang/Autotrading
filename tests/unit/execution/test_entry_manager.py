@@ -1,8 +1,8 @@
 """Unit tests for EntryManager (autotrader/execution/entry_manager.py).
 
 Tests cover:
-- Group A (MOO): RSI MR and Overbought Short at 9:30
-- Group B (Confirm): ADX, BB, Momentum at 9:45-10:00
+- Group A (MOO): RSI MR, Consecutive Down, Volume Divergence at 9:30
+- Group B (Confirm): EMA Pullback at 9:45-10:00
 - Confirmation condition: long price >= prev_close * 0.997
 - Confirmation condition: short price <= prev_close * 1.003
 - Signal discarded if confirmation fails by 10:00
@@ -143,35 +143,36 @@ class TestGroupMembership:
         """rsi_mean_reversion should be in Group A (MOO)."""
         assert "rsi_mean_reversion" in _GROUP_A_STRATEGIES
 
-    def test_overbought_short_is_group_a(self):
-        """overbought_short should be in Group A (MOO)."""
-        assert "overbought_short" in _GROUP_A_STRATEGIES
+    def test_consecutive_down_is_group_a(self):
+        """consecutive_down should be in Group A (MOO)."""
+        assert "consecutive_down" in _GROUP_A_STRATEGIES
 
-    def test_adx_pullback_is_group_b(self):
-        """adx_pullback should be in Group B (confirmation)."""
-        assert "adx_pullback" in _GROUP_B_STRATEGIES
+    def test_volume_divergence_not_in_group_a(self):
+        """volume_divergence should NOT be in Group A (removed in 13th backtest)."""
+        assert "volume_divergence" not in _GROUP_A_STRATEGIES
 
-    def test_bb_squeeze_is_group_b(self):
-        """bb_squeeze should be in Group B (confirmation)."""
-        assert "bb_squeeze" in _GROUP_B_STRATEGIES
+    def test_ema_pullback_not_in_group_b(self):
+        """ema_pullback should NOT be in Group B (strategy disabled)."""
+        assert "ema_pullback" not in _GROUP_B_STRATEGIES
 
-    def test_regime_momentum_is_group_b(self):
-        """regime_momentum should be in Group B (confirmation)."""
-        assert "regime_momentum" in _GROUP_B_STRATEGIES
+    def test_group_a_has_two_strategies(self):
+        """Group A should contain exactly 2 strategies."""
+        assert len(_GROUP_A_STRATEGIES) == 2
+
+    def test_group_b_is_empty(self):
+        """Group B should be empty (no confirmation strategies currently active)."""
+        assert len(_GROUP_B_STRATEGIES) == 0
 
     def test_load_candidates_splits_by_group(self):
-        """load_candidates() should correctly route to _group_a and _group_b."""
+        """load_candidates() should correctly route to _group_a (Group B is empty)."""
         em = _make_entry_manager()
         candidates = [
             _make_candidate(strategy="rsi_mean_reversion", symbol="AAPL"),
-            _make_candidate(strategy="overbought_short", symbol="MSFT", direction="short"),
-            _make_candidate(strategy="adx_pullback", symbol="NVDA"),
-            _make_candidate(strategy="bb_squeeze", symbol="AMZN"),
-            _make_candidate(strategy="regime_momentum", symbol="TSLA"),
+            _make_candidate(strategy="consecutive_down", symbol="MSFT"),
         ]
         em.load_candidates(candidates)
         assert len(em._group_a) == 2
-        assert len(em._group_b) == 3
+        assert len(em._group_b) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -184,33 +185,33 @@ class TestConfirmationLogic:
     def test_long_confirmed_when_price_at_prev_close(self):
         """Long confirmed when current_price == prev_close (0% gap)."""
         em = _make_entry_manager()
-        candidate = _make_candidate(strategy="adx_pullback", direction="long", prev_close=100.0)
+        candidate = _make_candidate(strategy="ema_pullback", direction="long", prev_close=100.0)
         assert em._is_confirmed(candidate, current_price=100.0) is True
 
     def test_long_confirmed_when_price_above_threshold(self):
         """Long confirmed when current_price >= prev_close * (1 - 0.003)."""
         em = _make_entry_manager()
-        candidate = _make_candidate(strategy="adx_pullback", direction="long", prev_close=100.0)
+        candidate = _make_candidate(strategy="ema_pullback", direction="long", prev_close=100.0)
         # Threshold = 100 * 0.997 = 99.7
         assert em._is_confirmed(candidate, current_price=99.7) is True
 
     def test_long_not_confirmed_below_threshold(self):
         """Long NOT confirmed when price < prev_close * 0.997."""
         em = _make_entry_manager()
-        candidate = _make_candidate(strategy="adx_pullback", direction="long", prev_close=100.0)
+        candidate = _make_candidate(strategy="ema_pullback", direction="long", prev_close=100.0)
         # Below threshold: 99.69 < 99.70
         assert em._is_confirmed(candidate, current_price=99.69) is False
 
     def test_short_confirmed_when_price_at_prev_close(self):
         """Short confirmed when current_price == prev_close."""
         em = _make_entry_manager()
-        candidate = _make_candidate(strategy="bb_squeeze", direction="short", prev_close=100.0)
+        candidate = _make_candidate(strategy="ema_pullback", direction="short", prev_close=100.0)
         assert em._is_confirmed(candidate, current_price=100.0) is True
 
     def test_short_confirmed_when_price_below_threshold(self):
         """Short confirmed when current_price <= prev_close * (1 + 0.003)."""
         em = _make_entry_manager()
-        candidate = _make_candidate(strategy="bb_squeeze", direction="short", prev_close=100.0)
+        candidate = _make_candidate(strategy="ema_pullback", direction="short", prev_close=100.0)
         # Threshold = 100 * 1.003 = 100.29999... (float precision)
         # Use 100.29 which is clearly below threshold
         assert em._is_confirmed(candidate, current_price=100.29) is True
@@ -218,7 +219,7 @@ class TestConfirmationLogic:
     def test_short_not_confirmed_above_threshold(self):
         """Short NOT confirmed when price > prev_close * 1.003."""
         em = _make_entry_manager()
-        candidate = _make_candidate(strategy="bb_squeeze", direction="short", prev_close=100.0)
+        candidate = _make_candidate(strategy="ema_pullback", direction="short", prev_close=100.0)
         # Above threshold: 100.31 > 100.30
         assert em._is_confirmed(candidate, current_price=100.31) is False
 
@@ -417,7 +418,7 @@ class TestDirectionPositionLimits:
         em = _make_entry_manager(order_result=_make_order_result())
         short_positions = [_make_position(symbol=f"SYM{i}", side="short") for i in range(3)]
         em.load_candidates([_make_candidate(
-            strategy="overbought_short",
+            strategy="rsi_mean_reversion",
             direction="short",
             symbol="NEWSHORT",
         )])
@@ -437,71 +438,62 @@ class TestDirectionPositionLimits:
 # ---------------------------------------------------------------------------
 
 class TestExecuteConfirmation:
-    """Tests for Group B confirmation window execution."""
+    """Tests for Group B confirmation window execution (Group B is currently empty)."""
 
     @pytest.mark.asyncio
-    async def test_confirmed_long_candidate_is_entered(self):
-        """Confirmed Group B long candidate should be entered."""
+    async def test_confirmation_returns_empty_when_group_b_empty(self):
+        """execute_confirmation() should return empty list when Group B has no candidates."""
         fill_result = _make_order_result(status="filled", filled_price=100.5)
         em = _make_entry_manager(order_result=fill_result)
-        em.load_candidates([_make_candidate(strategy="adx_pullback", symbol="AAPL", prev_close=100.0)])
+        em.load_candidates([_make_candidate(strategy="rsi_mean_reversion", symbol="AAPL", prev_close=100.0)])
 
         result = await em.execute_confirmation(
             account=_make_account(),
             positions=[],
             regime=MarketRegime.TREND,
             current_date_et=TRADE_DATE,
-            current_prices={"AAPL": 100.5},  # within 0.3% of prev_close
+            current_prices={"AAPL": 100.5},
         )
 
-        assert len(result) == 1
-        assert result[0].symbol == "AAPL"
+        assert len(result) == 0
 
     @pytest.mark.asyncio
-    async def test_unconfirmed_candidate_stays_pending(self):
-        """Unconfirmed Group B candidate should remain in _group_b (not discarded)."""
+    async def test_group_b_always_empty_after_load(self):
+        """After load_candidates(), _group_b should always be empty."""
         em = _make_entry_manager(order_result=_make_order_result())
-        em.load_candidates([_make_candidate(strategy="adx_pullback", symbol="AAPL", prev_close=100.0)])
+        # Even if ema_pullback candidates are passed, they go nowhere (not in _GROUP_B_STRATEGIES)
+        em.load_candidates([_make_candidate(strategy="rsi_mean_reversion", symbol="AAPL", prev_close=100.0)])
+
+        assert len(em._group_b) == 0
+
+    @pytest.mark.asyncio
+    async def test_missing_price_does_not_affect_group_b(self):
+        """Group B is empty; missing prices result in empty confirmation result."""
+        em = _make_entry_manager(order_result=_make_order_result())
+        em.load_candidates([_make_candidate(strategy="consecutive_down", symbol="AAPL")])
 
         await em.execute_confirmation(
             account=_make_account(),
             positions=[],
             regime=MarketRegime.TREND,
             current_date_et=TRADE_DATE,
-            current_prices={"AAPL": 99.0},  # -1% -> below threshold, not confirmed
+            current_prices={},
         )
 
-        # Candidate should still be pending
-        assert len(em._group_b) == 1
+        assert len(em._group_b) == 0
 
     @pytest.mark.asyncio
-    async def test_missing_price_candidate_stays_pending(self):
-        """Candidate with no price in current_prices should stay pending."""
-        em = _make_entry_manager(order_result=_make_order_result())
-        em.load_candidates([_make_candidate(strategy="adx_pullback", symbol="AAPL")])
-
-        await em.execute_confirmation(
-            account=_make_account(),
-            positions=[],
-            regime=MarketRegime.TREND,
-            current_date_et=TRADE_DATE,
-            current_prices={},  # AAPL not in prices
-        )
-
-        assert len(em._group_b) == 1
-
-    @pytest.mark.asyncio
-    async def test_close_entry_window_discards_remaining_group_b(self):
-        """close_entry_window() should clear all remaining Group B candidates."""
+    async def test_close_entry_window_returns_zero_when_group_b_empty(self):
+        """close_entry_window() returns 0 when Group B is empty."""
         em = _make_entry_manager()
         em.load_candidates([
-            _make_candidate(strategy="adx_pullback", symbol="AAPL"),
-            _make_candidate(strategy="bb_squeeze", symbol="MSFT"),
+            _make_candidate(strategy="rsi_mean_reversion", symbol="AAPL"),
+            _make_candidate(strategy="consecutive_down", symbol="MSFT"),
         ])
 
         discarded = em.close_entry_window()
 
-        assert discarded == 2
+        assert discarded == 0
         assert em._group_b == []
 
     @pytest.mark.asyncio

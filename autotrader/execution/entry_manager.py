@@ -1,18 +1,17 @@
 """EntryManager: orchestrates Group A (MOO) and Group B (confirmation) entries.
 
 Entry architecture:
-  - Group A (rsi_mean_reversion, overbought_short):
+  - Group A (rsi_mean_reversion, consecutive_down):
       Market-on-Open orders submitted at 9:30 AM ET.
       SL/TP anchored to actual fill price.
-  - Group B (adx_pullback, bb_squeeze, regime_momentum):
+  - Group B (currently empty):
       Confirmation window 9:45-10:00 AM ET.
       Long confirm: current price >= prev_close * (1 - GAP_TOLERANCE)
-      Short confirm: current price <= prev_close * (1 + GAP_TOLERANCE)
       Unconfirmed candidates are DISCARDED at 10:00 AM.
 
 Daily constraints enforced here:
-  - Max 3 new entries per day.
-  - Max 6 concurrent long positions.
+  - Max 2 new entries per day.
+  - Max 5 concurrent long positions.
   - Max 3 concurrent short positions.
   - Re-entry block checked via ExitRuleEngine.is_reentry_blocked().
 """
@@ -38,8 +37,8 @@ _ET = ZoneInfo("America/New_York")
 logger = logging.getLogger("autotrader.execution.entry_manager")
 
 # Entry group membership
-_GROUP_A_STRATEGIES: frozenset[str] = frozenset({"rsi_mean_reversion", "overbought_short"})
-_GROUP_B_STRATEGIES: frozenset[str] = frozenset({"adx_pullback", "bb_squeeze", "regime_momentum"})
+_GROUP_A_STRATEGIES: frozenset[str] = frozenset({"rsi_mean_reversion", "consecutive_down"})
+_GROUP_B_STRATEGIES: frozenset[str] = frozenset()
 
 # Confirmation window gap tolerance (3 bps)
 _GAP_TOLERANCE: float = 0.003
@@ -48,6 +47,9 @@ _GAP_TOLERANCE: float = 0.003
 _MAX_DAILY_ENTRIES: int = 3
 _MAX_LONG_POSITIONS: int = 6
 _MAX_SHORT_POSITIONS: int = 3
+
+# Per-strategy position caps (prevents single strategy from dominating)
+_MAX_STRATEGY_POSITIONS: dict[str, int] = {}
 
 
 @dataclass
@@ -357,6 +359,20 @@ class EntryManager:
         if any(p.symbol == symbol for p in positions):
             logger.debug("Skipping %s: position already open", symbol)
             return False
+
+        # Per-strategy position cap (e.g., ema_pullback max 3)
+        strategy_cap = _MAX_STRATEGY_POSITIONS.get(signal.strategy)
+        if strategy_cap is not None:
+            strategy_count = sum(
+                1 for p in positions
+                if getattr(p, "_strategy", None) == signal.strategy
+            )
+            if strategy_count >= strategy_cap:
+                logger.info(
+                    "Strategy position cap reached for %s (%d/%d)",
+                    signal.strategy, strategy_count, strategy_cap,
+                )
+                return False
 
         # RiskManager validation (max positions, daily loss, drawdown)
         if not self._risk_manager.validate(signal, account, positions):

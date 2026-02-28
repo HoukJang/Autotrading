@@ -76,7 +76,7 @@ class TestLimitOrderFlow:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="adx_pullback",
+            strategy="consecutive_down",
             symbol="AAPL",
             direction="long",
             strength=0.8,
@@ -98,7 +98,7 @@ class TestLimitOrderFlow:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="adx_pullback",
+            strategy="consecutive_down",
             symbol="AAPL",
             direction="long",
             strength=0.8,
@@ -140,8 +140,8 @@ class TestLimitOrderFlow:
         assert order.quantity == 10
 
     @pytest.mark.asyncio
-    async def test_short_signal_with_limit(self, app):
-        """Short signal with limit_price produces a limit sell order."""
+    async def test_long_signal_with_limit_different_strategy(self, app):
+        """Long signal with limit_price from ema_pullback produces a limit buy order."""
         await app._broker.connect()
         account = await app._broker.get_account()
 
@@ -149,14 +149,14 @@ class TestLimitOrderFlow:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="overbought_short",
+            strategy="ema_pullback",
             symbol="AAPL",
-            direction="short",
+            direction="long",
             strength=0.9,
-            limit_price=152.00,
+            limit_price=148.00,
         )
         order = app._signal_to_order(signal, account, [])
         assert order is not None
         assert order.order_type == "limit"
-        assert order.limit_price == 152.00
-        assert order.side == "sell"
+        assert order.limit_price == 148.00
+        assert order.side == "buy"

@@ -16,8 +16,8 @@ from autotrader.rotation.backtest_engine import RotationBacktestEngine, Rotation
 from autotrader.rotation.manager import RotationManager
 from autotrader.rotation.types import WatchlistEntry
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
-from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
-from autotrader.strategy.adx_pullback import AdxPullback
+from autotrader.strategy.consecutive_down import ConsecutiveDown
+from autotrader.strategy.ema_pullback import EmaPullback
 from autotrader.universe import UniverseResult
 
 
@@ -83,7 +83,7 @@ class TestRotationPipelineFull:
             rotation_config=RotationConfig(force_close_day=4, force_close_hour=14),
         )
         engine.add_strategy(RsiMeanReversion())
-        engine.add_strategy(BbSqueezeBreakout())
+        engine.add_strategy(ConsecutiveDown())
 
         # Rotation at bar 20: drop GOOG+META, add TSLA+NVDA
         rotation_schedule = {

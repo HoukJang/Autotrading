@@ -18,10 +18,9 @@ from autotrader.risk.manager import RiskManager
 from autotrader.risk.position_sizer import PositionSizer
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
-from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
-from autotrader.strategy.adx_pullback import AdxPullback
-from autotrader.strategy.overbought_short import OverboughtShort
-from autotrader.strategy.regime_momentum import RegimeMomentum
+from autotrader.strategy.consecutive_down import ConsecutiveDown
+from autotrader.strategy.ema_pullback import EmaPullback
+from autotrader.strategy.volume_divergence import VolumeDivergence
 
 
 def _make_bar(symbol: str = "AAPL", close: float = 150.0, idx: int = 0) -> Bar:
@@ -63,25 +62,24 @@ class TestAutoTrader:
 
 
 class TestRegisterStrategies:
-    def test_register_adds_five_swing_strategies(self):
+    def test_register_adds_four_swing_strategies(self):
         app = AutoTrader(Settings())
         app._register_strategies()
-        assert len(app._strategy_engine._strategies) == 5
+        assert len(app._strategy_engine._strategies) == 4
         types = [type(s) for s in app._strategy_engine._strategies]
         assert RsiMeanReversion in types
-        assert BbSqueezeBreakout in types
-        assert AdxPullback in types
-        assert OverboughtShort in types
-        assert RegimeMomentum in types
+        assert ConsecutiveDown in types
+        assert EmaPullback in types
+        assert VolumeDivergence in types
 
     def test_register_registers_indicators(self):
         app = AutoTrader(Settings())
         app._register_strategies()
         keys = set(app._indicator_engine._indicators.keys())
         assert "RSI_14" in keys
-        assert "ADX_14" in keys
         assert "ATR_14" in keys
-        assert "BBANDS_20" in keys
+        assert "EMA_50" in keys
+        assert "EMA_21" in keys
 
     def test_register_deduplicates_indicators(self):
         app = AutoTrader(Settings())
@@ -104,7 +102,7 @@ class TestSignalToOrder:
         bar = _make_bar("AAPL", 150.0)
         app._bar_history["AAPL"].append(bar)
         signal = Signal(
-            strategy="adx_pullback", symbol="AAPL",
+            strategy="consecutive_down", symbol="AAPL",
             direction="long", strength=0.8,
         )
         order = app._signal_to_order(signal, account, [])
@@ -254,7 +252,7 @@ class TestAutoTraderTradingLoop:
         account = await app._broker.get_account()
         positions = await app._broker.get_positions()
         signal = Signal(
-            strategy="adx_pullback", symbol="AAPL",
+            strategy="consecutive_down", symbol="AAPL",
             direction="long", strength=0.8,
         )
         result = await app._process_signal(signal, account, positions)
@@ -451,7 +449,7 @@ class TestAllocationIntegration:
         bar = _make_bar("AAPL", 100.0)
         app._bar_history["AAPL"].append(bar)
         signal = Signal(
-            strategy="overbought_short", symbol="AAPL",
+            strategy="rsi_mean_reversion", symbol="AAPL",
             direction="short", strength=0.8,
         )
         order = app._signal_to_order(signal, account, [])
@@ -468,7 +466,7 @@ class TestAllocationIntegration:
                      market_value=1000.0, unrealized_pnl=50.0, side="short"),
         ]
         signal = Signal(
-            strategy="overbought_short", symbol="AAPL",
+            strategy="rsi_mean_reversion", symbol="AAPL",
             direction="close", strength=1.0,
         )
         order = app._signal_to_order(signal, account, positions)
@@ -505,12 +503,12 @@ class TestAllocationIntegration:
         account = await app._broker.get_account()
         positions = await app._broker.get_positions()
         signal = Signal(
-            strategy="adx_pullback", symbol="AAPL",
+            strategy="consecutive_down", symbol="AAPL",
             direction="long", strength=0.8,
         )
         result = await app._process_signal(signal, account, positions)
         if result and result.status == "filled":
-            assert app._position_strategy_map.get("AAPL") == "adx_pullback"
+            assert app._position_strategy_map.get("AAPL") == "consecutive_down"
 
     @pytest.mark.asyncio
     async def test_close_removes_from_strategy_map(self, app):
@@ -632,14 +630,14 @@ class TestTradeLoggerIntegration:
         app._bar_history["AAPL"].append(bar)
         account = await app._broker.get_account()
         positions = await app._broker.get_positions()
-        signal = Signal(strategy="adx_pullback", symbol="AAPL",
+        signal = Signal(strategy="consecutive_down", symbol="AAPL",
                         direction="long", strength=0.8)
         result = await app._process_signal(signal, account, positions)
         if result and result.status == "filled":
             trades = app._trade_logger.read_trades()
             assert len(trades) >= 1
             assert trades[0].symbol == "AAPL"
-            assert trades[0].strategy == "adx_pullback"
+            assert trades[0].strategy == "consecutive_down"
         await app.stop()
 
 
@@ -816,7 +814,7 @@ class TestPDTGuard:
         bar = _make_bar("AAPL", 100.0)
         app._bar_history["AAPL"].append(bar)
         signal = Signal(
-            strategy="adx_pullback", symbol="AAPL",
+            strategy="consecutive_down", symbol="AAPL",
             direction="long", strength=0.8,
         )
         order = app._signal_to_order(signal, account, [])

@@ -63,10 +63,9 @@ from autotrader.rotation.event_driven import EventDrivenRotation
 from autotrader.rotation.manager import RotationManager
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
-from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
-from autotrader.strategy.adx_pullback import AdxPullback
-from autotrader.strategy.overbought_short import OverboughtShort
-from autotrader.strategy.regime_momentum import RegimeMomentum
+from autotrader.strategy.consecutive_down import ConsecutiveDown
+from autotrader.strategy.ema_pullback import EmaPullback
+from autotrader.strategy.volume_divergence import VolumeDivergence
 
 logger = logging.getLogger("autotrader.main")
 
@@ -1138,13 +1137,12 @@ class AutoTrader:
     # -----------------------------------------------------------------------
 
     def _register_strategies(self) -> None:
-        """Register all 5 strategies and their indicators."""
+        """Register all 4 strategies and their indicators."""
         strategies = [
             RsiMeanReversion(),
-            BbSqueezeBreakout(),
-            AdxPullback(),
-            OverboughtShort(),
-            RegimeMomentum(),
+            ConsecutiveDown(),
+            EmaPullback(),
+            VolumeDivergence(),
         ]
         registered_keys: set[str] = set(self._indicator_engine._indicators.keys())
         for strategy in strategies:

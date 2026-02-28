@@ -26,10 +26,9 @@ from autotrader.universe.scorer import ProxyScorer, BacktestScorer
 from autotrader.universe.optimizer import PortfolioOptimizer
 from autotrader.backtest.engine import BacktestEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
-from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
-from autotrader.strategy.adx_pullback import AdxPullback
-from autotrader.strategy.overbought_short import OverboughtShort
-from autotrader.strategy.regime_momentum import RegimeMomentum
+from autotrader.strategy.consecutive_down import ConsecutiveDown
+from autotrader.strategy.ema_pullback import EmaPullback
+from autotrader.strategy.volume_divergence import VolumeDivergence
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +217,7 @@ class UniverseSelector:
     def _run_backtest_for_symbol(self, bars: list[Bar]) -> float:
         """Run all 5 strategies via BacktestEngine and return backtest score.
 
-        Creates a fresh BacktestEngine with all 5 strategies, runs it on
+        Creates a fresh BacktestEngine with all 4 strategies, runs it on
         the provided bars, and feeds the results to BacktestScorer.
 
         Returns:
@@ -227,10 +226,9 @@ class UniverseSelector:
         engine = BacktestEngine(self._initial_balance, self._risk_config)
         strategies = [
             RsiMeanReversion(),
-            BbSqueezeBreakout(),
-            AdxPullback(),
-            OverboughtShort(),
-            RegimeMomentum(),
+            ConsecutiveDown(),
+            EmaPullback(),
+            VolumeDivergence(),
         ]
         for s in strategies:
             engine.add_strategy(s)
