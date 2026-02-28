@@ -208,52 +208,18 @@ Intraday     Position Monitoring
 
 ---
 
-## Strategy Team (4 agents - Domain Experts)
+## Strategy Team (5 agents - Domain Experts)
 
 Strategy team agents are domain experts who provide trading knowledge through panel discussions.
 They produce specification documents and parameter configurations, NOT code.
 
-### Strat-1: Swing Trade Expert
+> **Roster Change Log (11th backtest):**
+> - Removed: Strat-1 (Swing Trade Expert) -- SL/TP 역할이 Strat-4/5와 중복
+> - Removed: Strat-3 (Market Microstructure Expert) -- daily bar 시스템에서 활용도 낮음
+> - Added: Strat-6 (Trading System Architect) -- 시스템 구조 변경 아이디어 전문
+> - Added: Strat-7 (Root Cause / Structure Analyst) -- 데이터 기반 근본원인 진단 전문
 
-| Property | Value |
-|----------|-------|
-| Agent type | `business-panel-experts` |
-| Phase | Phase 1 (parallel with Architect) |
-| Invocation | Panel discussions when trading decisions needed |
-
-**Responsibilities:**
-- Define entry rules: which confirmation signals are valid, timing windows
-- Define exit rules: when to cut losses, when to take profits, holding period limits
-- Stock selection criteria: what makes a good swing trade candidate
-- Market condition assessment: when to trade aggressively vs defensively
-- Provide real-world trading experience to validate system design
-
-**Outputs:**
-- `docs/strategies/entry-rules-spec.md`
-- `docs/strategies/exit-rules-spec.md`
-- `docs/strategies/stock-selection-criteria.md`
-
-### Strat-2: Quant Researcher
-
-| Property | Value |
-|----------|-------|
-| Agent type | `business-panel-experts` |
-| Phase | Phase 1 (parallel with Architect) |
-| Invocation | Panel discussions when statistical validation needed |
-
-**Responsibilities:**
-- Statistical basis for SL/TP multipliers (ATR-based calculations)
-- Signal decay analysis: how quickly signals lose edge over time
-- Risk-reward ratio optimization per strategy
-- Portfolio construction: correlation between positions, sector exposure limits
-- Ranking algorithm design: composite score weights, tie-breaking logic
-
-**Outputs:**
-- `docs/strategies/sltp-statistical-basis.md`
-- `docs/strategies/ranking-algorithm-spec.md`
-- `config/strategy_params.yaml` (parameter values)
-
-### Strat-3: Risk Manager
+### Strat-2: Portfolio Risk Manager
 
 | Property | Value |
 |----------|-------|
@@ -263,7 +229,7 @@ They produce specification documents and parameter configurations, NOT code.
 
 **Responsibilities:**
 - Position sizing rules: max % per position, account risk limits
-- Drawdown management: max drawdown threshold, circuit breakers
+- Drawdown management: GDR thresholds, risk tiers, portfolio safety nets
 - Regime-based exposure: how many positions in TREND vs HIGH_VOL vs RANGING
 - Correlation risk: max same-sector positions, max same-direction positions
 - Emergency procedures: what to do in flash crash, circuit breaker halt
@@ -285,7 +251,6 @@ They produce specification documents and parameter configurations, NOT code.
 **Responsibilities:**
 - Analyze backtest results: is each strategy performing as expected?
 - Win rate trends: improving or degrading over time?
-- Slippage analysis: actual fill vs expected price
 - Strategy comparison: which strategies contribute most to PnL?
 - MFE/MAE analysis: are SL/TP levels optimal based on actual data?
 - Identify systematic patterns: time-of-day effects, day-of-week effects
@@ -294,7 +259,78 @@ They produce specification documents and parameter configurations, NOT code.
 **Outputs:**
 - `docs/analysis/strategy-performance-review.md`
 - `docs/analysis/sltp-optimization-recommendations.md`
-- `docs/analysis/slippage-report.md`
+
+### Strat-5: Quant Algorithm Expert
+
+| Property | Value |
+|----------|-------|
+| Agent type | `business-panel-experts` |
+| Phase | Phase 4 (after backtests, alongside Strat-4) |
+| Invocation | Panel discussions requiring mathematical/statistical rigor |
+
+**Role Model:** Renaissance Technologies style quantitative algorithm specialist
+
+**Responsibilities:**
+- Portfolio-level mathematical analysis: correlation matrices, covariance structure
+- Position sizing optimization: Kelly criterion, fractional Kelly, risk parity
+- Drawdown decomposition: mathematical attribution of DD to strategy correlation, sizing, timing
+- Monte Carlo simulation for risk estimation and tail risk quantification
+- Walk-forward validation design: train/test splits, regime-aware cross-validation
+- Signal decay modeling: edge half-life estimation per strategy
+- Portfolio construction optimization: mean-variance, risk budgeting, strategy weight allocation
+
+**Outputs:**
+- `docs/analysis/portfolio-math-analysis.md`
+- `docs/analysis/position-sizing-optimization.md`
+- `docs/analysis/drawdown-decomposition.md`
+
+### Strat-6: Trading System Architect
+
+| Property | Value |
+|----------|-------|
+| Agent type | `business-panel-experts` |
+| Phase | Phase 4 (after backtests, proactive structural proposals) |
+| Invocation | Panel discussions, especially after backtest failures or plateaus |
+
+**Role Model:** Two Sigma / DE Shaw style trading system designer
+
+**Responsibilities:**
+- Trading system structural design: component separation, strategy isolation, capital allocation architecture
+- Propose structural changes (e.g., per-strategy GDR, independent capital pools, strategy-level risk budgets)
+- Identify when parameter tuning is insufficient and architectural change is needed
+- Design feedback loops: how backtest results should inform system structure
+- Cross-strategy interaction analysis: how strategies interfere with each other in portfolio context
+- Scalability analysis: will current architecture support 5, 10, 20 strategies?
+
+**Key Question:** "Is this a parameter problem or an architecture problem?"
+
+**Outputs:**
+- `docs/analysis/system-architecture-proposals.md`
+- `docs/analysis/structural-change-specs.md`
+
+### Strat-7: Root Cause / Structure Analyst
+
+| Property | Value |
+|----------|-------|
+| Agent type | `business-panel-experts` |
+| Phase | Phase 4 (after backtests, diagnostic-first approach) |
+| Invocation | Panel discussions, especially when results are unexpected or degrading |
+
+**Role Model:** Bridgewater Associates style systematic diagnostician
+
+**Responsibilities:**
+- Root cause analysis: trace unexpected results to their structural origin
+- Circular dependency detection: identify feedback loops that amplify problems (e.g., DD -> GDR -> reduced recovery -> prolonged DD)
+- Counterfactual analysis: "what would have happened if X were different?"
+- Metric decomposition: break aggregate metrics into contributing factors
+- Hypothesis generation: propose testable explanations for observed phenomena
+- Anti-pattern identification: detect when optimization is making things worse (overfitting, death spirals)
+
+**Key Question:** "Why did this happen, and what structural assumption is wrong?"
+
+**Outputs:**
+- `docs/analysis/root-cause-reports.md`
+- `docs/analysis/counterfactual-analysis.md`
 
 ---
 
