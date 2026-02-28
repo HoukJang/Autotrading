@@ -6,8 +6,8 @@ Tests cover:
 - Day 1: Immediate emergency stop at -10%
 - Day 2+: SL triggered at correct ATR multiple per strategy
 - Day 2+: TP triggered at correct condition per strategy
-- Trailing stop (currently no strategies use trailing stops)
-- Time-based exit: 5 days for all strategies
+- Trailing stop (ema_cross_trend uses trailing stops)
+- Time-based exit: per-strategy hold limits
 - Re-entry block: same symbol blocked after exit (both directions)
 - Re-entry block: cleared on new trading day
 - Long vs Short direction correctly handled
@@ -313,6 +313,18 @@ class TestDay2StopLoss:
         actual_mult = _SL_ATR_MULT.get("consecutive_down", {}).get("long", 2.0)
         self._test_sl_triggers("consecutive_down", "long", actual_mult)
 
+    def test_ema_cross_trend_long_sl_at_3_0x_atr(self):
+        """EMA Cross Trend long: SL should trigger at 3.0x ATR below entry."""
+        actual_mult = _SL_ATR_MULT.get("ema_cross_trend", {}).get("long", 2.0)
+        assert actual_mult == 3.0
+        self._test_sl_triggers("ema_cross_trend", "long", actual_mult)
+
+    def test_ema_cross_trend_short_sl_at_3_0x_atr(self):
+        """EMA Cross Trend short: SL should trigger at 3.0x ATR above entry."""
+        actual_mult = _SL_ATR_MULT.get("ema_cross_trend", {}).get("short", 2.0)
+        assert actual_mult == 3.0
+        self._test_sl_triggers("ema_cross_trend", "short", actual_mult)
+
     def test_sl_does_not_trigger_above_level_long(self):
         """Long SL should NOT trigger when price is above stop level."""
         actual_mult = _SL_ATR_MULT.get("rsi_mean_reversion", {}).get("long", 2.0)
@@ -421,6 +433,82 @@ class TestDay2TakeProfit:
         assert decision.action == "exit"
         assert "tp_ema5" in decision.reason
 
+    def test_ema_cross_trend_long_tp_at_5_0x_atr(self):
+        """EMA Cross Trend long: TP triggers when close >= entry + 5.0x ATR."""
+        engine = ExitRuleEngine()
+        atr = 2.0
+        entry_price = 100.0
+        tp_atr_mult = _TP_ATR_MULT.get("ema_cross_trend")
+        assert tp_atr_mult == 5.0
+        pos = _make_position(
+            strategy="ema_cross_trend",
+            direction="long",
+            entry_price=entry_price,
+            entry_atr=atr,
+            bars_held=1,
+        )
+        tp_price = entry_price + tp_atr_mult * atr  # 110.0
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=tp_price + 0.01,
+            bar_high=tp_price + 1.0,
+            bar_low=tp_price - 0.5,
+            indicators=_indicators(atr=atr, rsi=55.0),
+            current_date_et=NEXT_DAY,
+        )
+        assert decision.action == "exit"
+        assert decision.reason == "take_profit"
+
+    def test_ema_cross_trend_long_no_tp_below_5_atr(self):
+        """EMA Cross Trend long: should NOT TP when price below 5.0 ATR from entry."""
+        engine = ExitRuleEngine()
+        atr = 2.0
+        entry_price = 100.0
+        tp_atr_mult = 5.0
+        pos = _make_position(
+            strategy="ema_cross_trend",
+            direction="long",
+            entry_price=entry_price,
+            entry_atr=atr,
+            bars_held=1,
+        )
+        bar_close = entry_price + tp_atr_mult * atr - 0.01  # 109.99 -- just below TP
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=bar_close,
+            bar_high=bar_close + 0.5,
+            bar_low=bar_close - 0.5,
+            indicators=_indicators(atr=atr, rsi=55.0),
+            current_date_et=NEXT_DAY,
+        )
+        assert decision.action == "hold" or decision.reason != "take_profit"
+
+    def test_ema_cross_trend_short_tp_at_5_0x_atr(self):
+        """EMA Cross Trend short: TP triggers when close <= entry - 5.0x ATR."""
+        engine = ExitRuleEngine()
+        atr = 2.0
+        entry_price = 100.0
+        tp_atr_mult = _TP_ATR_MULT.get("ema_cross_trend")
+        assert tp_atr_mult == 5.0
+        pos = _make_position(
+            strategy="ema_cross_trend",
+            direction="short",
+            entry_price=entry_price,
+            entry_atr=atr,
+            bars_held=1,
+        )
+        tp_price = entry_price - tp_atr_mult * atr  # 90.0
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=tp_price - 0.01,
+            bar_high=tp_price + 0.5,
+            bar_low=tp_price - 0.5,
+            indicators=_indicators(atr=atr, rsi=45.0),
+            current_date_et=NEXT_DAY,
+        )
+        assert decision.action == "exit"
+        assert decision.reason == "take_profit"
+
     def test_rsi_mr_long_atr_tp_cap_at_2_0x_atr(self):
         """RSI MR long: auxiliary ATR TP cap triggers when close >= entry + 2.0x ATR."""
         engine = ExitRuleEngine()
@@ -484,11 +572,11 @@ class TestDay2TakeProfit:
 # ---------------------------------------------------------------------------
 
 class TestTrailingStop:
-    """Trailing stops: currently no strategies use trailing stops."""
+    """Trailing stops: ema_cross_trend uses trailing stops."""
 
-    def test_no_strategy_uses_trailing_stop(self):
-        """_TRAILING_STRATEGIES should be empty (no strategies use trailing stops)."""
-        assert len(_TRAILING_STRATEGIES) == 0
+    def test_ema_cross_trend_uses_trailing_stop(self):
+        """ema_cross_trend should be in _TRAILING_STRATEGIES."""
+        assert "ema_cross_trend" in _TRAILING_STRATEGIES
 
     def test_rsi_mr_no_trailing_stop(self):
         """RSI MR should NOT use trailing stop."""
@@ -498,12 +586,11 @@ class TestTrailingStop:
         """Consecutive Down should NOT use trailing stop."""
         assert "consecutive_down" not in _TRAILING_STRATEGIES
 
-    def test_trailing_stop_never_fires_for_any_active_strategy(self):
-        """Trailing stop should never fire for any of the active strategies."""
+    def test_trailing_stop_never_fires_for_rsi_mr(self):
+        """Trailing stop should never fire for rsi_mean_reversion."""
         engine = ExitRuleEngine()
         atr = 2.0
         highest_price = 110.0
-        # Use rsi_mean_reversion as representative active strategy
         pos = HeldPosition(
             symbol="AAPL",
             strategy="rsi_mean_reversion",
@@ -516,7 +603,6 @@ class TestTrailingStop:
             highest_price=highest_price,
             lowest_price=100.0,
         )
-        # Price well below what would be a trailing stop level, but strategy not in set
         bar_close = 106.5
 
         decision = engine.evaluate(
@@ -528,6 +614,76 @@ class TestTrailingStop:
             current_date_et=NEXT_DAY,
         )
         assert decision.reason != "trailing_stop"
+
+    def test_ema_cross_trend_trailing_activation_at_1_5_atr(self):
+        """ema_cross_trend trailing activates after 1.5 ATR profit."""
+        assert _TRAILING_ACTIVATION_ATR["ema_cross_trend"] == 1.5
+
+    def test_ema_cross_trend_trailing_stop_triggers_long(self):
+        """ema_cross_trend long trailing stop should trigger after activation and pullback."""
+        engine = ExitRuleEngine()
+        atr = 2.0
+        entry_price = 100.0
+        # Price moved up 8.0 (4.0 ATR, well above activation 1.5 ATR), then pulled back
+        highest_price = 108.0
+        pos = HeldPosition(
+            symbol="AAPL",
+            strategy="ema_cross_trend",
+            direction="long",
+            entry_price=entry_price,
+            entry_atr=atr,
+            entry_date_et=ENTRY_DATE,
+            bars_held=3,
+            qty=10.0,
+            highest_price=highest_price,
+            lowest_price=entry_price,
+        )
+        # Trailing stop = max(entry, highest - 2.0*ATR) = max(100, 108-4) = 104.0
+        # Close at 103.9 should trigger trailing stop
+        bar_close = 103.9
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=bar_close,
+            bar_high=bar_close + 0.5,
+            bar_low=bar_close - 0.5,
+            indicators=_indicators(atr=atr, rsi=50.0),
+            current_date_et=NEXT_DAY,
+        )
+        assert decision.action == "exit"
+        assert decision.reason == "trailing_stop"
+
+    def test_ema_cross_trend_trailing_stop_triggers_short(self):
+        """ema_cross_trend short trailing stop should trigger after activation and pullback."""
+        engine = ExitRuleEngine()
+        atr = 2.0
+        entry_price = 100.0
+        # Price moved down 8.0 (4.0 ATR, well above activation 1.5 ATR), then bounced
+        lowest_price = 92.0
+        pos = HeldPosition(
+            symbol="AAPL",
+            strategy="ema_cross_trend",
+            direction="short",
+            entry_price=entry_price,
+            entry_atr=atr,
+            entry_date_et=ENTRY_DATE,
+            bars_held=3,
+            qty=10.0,
+            highest_price=entry_price,
+            lowest_price=lowest_price,
+        )
+        # Trailing stop = min(entry, lowest + 2.0*ATR) = min(100, 92+4) = 96.0
+        # Close at 96.1 should trigger trailing stop
+        bar_close = 96.1
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=bar_close,
+            bar_high=bar_close + 0.5,
+            bar_low=bar_close - 0.5,
+            indicators=_indicators(atr=atr, rsi=50.0),
+            current_date_et=NEXT_DAY,
+        )
+        assert decision.action == "exit"
+        assert decision.reason == "trailing_stop"
 
 
 # ---------------------------------------------------------------------------
@@ -589,12 +745,51 @@ class TestTimeBasedExit:
         )
         assert decision.reason != "time_exit"
 
+    def test_ema_cross_trend_exits_at_10_bars(self):
+        """EMA Cross Trend: exit when bars_held >= 10."""
+        engine = ExitRuleEngine()
+        pos = _make_position(
+            strategy="ema_cross_trend",
+            direction="long",
+            bars_held=10,
+        )
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=100.5,
+            bar_high=101.0,
+            bar_low=99.5,
+            indicators=_indicators(rsi=50.0),
+            current_date_et=NEXT_DAY,
+        )
+        assert decision.action == "exit"
+        assert decision.reason == "time_exit"
+
+    def test_ema_cross_trend_no_time_exit_at_9_bars(self):
+        """EMA Cross Trend: 9 bars should NOT trigger time exit (max is 10)."""
+        engine = ExitRuleEngine()
+        pos = _make_position(
+            strategy="ema_cross_trend",
+            direction="long",
+            bars_held=9,
+        )
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=100.5,
+            bar_high=101.0,
+            bar_low=99.5,
+            indicators=_indicators(atr=2.0, rsi=50.0),
+            current_date_et=NEXT_DAY,
+        )
+        assert decision.reason != "time_exit"
+
     def test_max_hold_days_constants_match_spec(self):
         """MAX_HOLD_DAYS should match the spec values."""
         assert _MAX_HOLD_DAYS["rsi_mean_reversion"] == 5
         assert _MAX_HOLD_DAYS["consecutive_down"] == 5
+        assert _MAX_HOLD_DAYS["ema_cross_trend"] == 10
         assert "volume_divergence" not in _MAX_HOLD_DAYS
         assert "ema_pullback" not in _MAX_HOLD_DAYS
+        assert "adx_breakout" not in _MAX_HOLD_DAYS
 
 
 # ---------------------------------------------------------------------------
@@ -695,3 +890,36 @@ class TestHelperUtilities:
         """ATR_14 of 0 should fall back to entry_atr."""
         atr = ExitRuleEngine._get_atr({"ATR_14": 0.0}, fallback_atr=2.0)
         assert atr == 2.0
+
+
+# ---------------------------------------------------------------------------
+# Test class: HeldPosition.entry_adx field
+# ---------------------------------------------------------------------------
+
+class TestHeldPositionEntryAdx:
+    """Tests for the entry_adx field on HeldPosition."""
+
+    def test_entry_adx_defaults_to_zero(self):
+        """entry_adx should default to 0.0 when not specified."""
+        pos = _make_position()
+        assert pos.entry_adx == 0.0
+
+    def test_entry_adx_can_be_set(self):
+        """entry_adx can be set explicitly."""
+        pos = HeldPosition(
+            symbol="AAPL",
+            strategy="rsi_mean_reversion",
+            direction="long",
+            entry_price=100.0,
+            entry_atr=2.0,
+            entry_date_et=ENTRY_DATE,
+            entry_adx=18.5,
+        )
+        assert pos.entry_adx == pytest.approx(18.5)
+
+    def test_entry_adx_mutable(self):
+        """entry_adx should be mutable (can be updated after creation)."""
+        pos = _make_position()
+        assert pos.entry_adx == 0.0
+        pos.entry_adx = 22.0
+        assert pos.entry_adx == pytest.approx(22.0)

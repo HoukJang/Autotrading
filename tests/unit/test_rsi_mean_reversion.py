@@ -124,16 +124,24 @@ class TestNoSignal:
         assert strategy.on_context(ctx) is None
 
     def test_no_signal_when_adx_too_high(self):
-        """ADX >= 25 means trending market -- no mean reversion."""
+        """ADX >= 23 means trending market -- no mean reversion."""
         strategy = RsiMeanReversion()
-        ctx = _make_ctx(indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=25.0))
+        ctx = _make_ctx(indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=23.0))
         assert strategy.on_context(ctx) is None
 
-    def test_no_signal_when_adx_exactly_25(self):
-        """ADX == 25 is the boundary -- should NOT trigger."""
+    def test_no_signal_when_adx_exactly_23(self):
+        """ADX == 23 is the boundary -- should NOT trigger."""
         strategy = RsiMeanReversion()
-        ctx = _make_ctx(indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=25.0))
+        ctx = _make_ctx(indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=23.0))
         assert strategy.on_context(ctx) is None
+
+    def test_signal_when_adx_below_23(self):
+        """ADX just below 23 should allow entry."""
+        strategy = RsiMeanReversion()
+        ctx = _make_ctx(indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=22.9))
+        signal = strategy.on_context(ctx)
+        assert signal is not None
+        assert signal.direction == "long"
 
     def test_no_signal_when_bbands_not_dict(self):
         """BBANDS value is not a dict."""
@@ -877,3 +885,150 @@ class TestEdgeCases:
         assert signal is not None
         assert signal.direction == "close"
         assert signal.metadata["exit_reason"] in ("target", "timeout")
+
+
+# ===================================================================
+# 13. ADX Slope Filter
+# ===================================================================
+
+
+class TestAdxSlopeFilter:
+    """ADX slope filter: if ADX rises by more than 1.5 over 3 bars, block entry."""
+
+    def test_rising_adx_above_threshold_blocks_entry(self):
+        """When ADX rises by more than 1.5 over 3 bars, entry should be blocked."""
+        strategy = RsiMeanReversion()
+        # Feed 4 bars with rising ADX to build history (ADX: 12, 13, 14, 15)
+        adx_values = [12.0, 13.0, 14.0, 15.0]
+        for adx_val in adx_values:
+            ctx = _make_ctx(
+                close=100.0,
+                indicators=_full_indicators(rsi=50.0, pct_b=0.50, adx=adx_val, atr=2.0),
+            )
+            strategy.on_context(ctx)  # just to populate ADX history
+
+        # Now try entry: adx_history after adding 16.0 = [13, 14, 15, 16]
+        # slope = 16 - 13 = 3.0 > 1.5 -> blocked
+        ctx_entry = _make_ctx(
+            close=100.0,
+            indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=16.0, atr=2.0),
+        )
+        signal = strategy.on_context(ctx_entry)
+        assert signal is None
+
+    def test_small_adx_rise_allows_entry(self):
+        """When ADX rises by <= 1.5 over 3 bars, entry should be allowed."""
+        strategy = RsiMeanReversion()
+        # Feed 4 bars with slight rise (ADX: 15.0, 15.2, 15.4, 15.5)
+        adx_values = [15.0, 15.2, 15.4, 15.5]
+        for adx_val in adx_values:
+            ctx = _make_ctx(
+                close=100.0,
+                indicators=_full_indicators(rsi=50.0, pct_b=0.50, adx=adx_val, atr=2.0),
+            )
+            strategy.on_context(ctx)
+
+        # Try entry: adx_history after adding 16.0 = [15.2, 15.4, 15.5, 16.0]
+        # slope = 16.0 - 15.2 = 0.8 <= 1.5 -> allowed
+        ctx_entry = _make_ctx(
+            close=100.0,
+            indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=16.0, atr=2.0),
+        )
+        signal = strategy.on_context(ctx_entry)
+        assert signal is not None
+        assert signal.direction == "long"
+
+    def test_falling_adx_allows_entry(self):
+        """When ADX is falling over 3 bars, entry should be allowed."""
+        strategy = RsiMeanReversion()
+        # Feed 4 bars with falling ADX (ADX: 19, 18, 17, 16)
+        adx_values = [19.0, 18.0, 17.0, 16.0]
+        for adx_val in adx_values:
+            ctx = _make_ctx(
+                close=100.0,
+                indicators=_full_indicators(rsi=50.0, pct_b=0.50, adx=adx_val, atr=2.0),
+            )
+            strategy.on_context(ctx)
+
+        # Try entry with all conditions met
+        ctx_entry = _make_ctx(
+            close=100.0,
+            indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=15.0, atr=2.0),
+        )
+        signal = strategy.on_context(ctx_entry)
+        # adx_history is now [18, 17, 16, 15] -- 15 - 18 = -3.0, not > 1.5 -> allowed
+        assert signal is not None
+        assert signal.direction == "long"
+
+    def test_slope_check_needs_4_values(self):
+        """With fewer than 4 ADX values, slope check should be skipped."""
+        strategy = RsiMeanReversion()
+        # Only 2 bars of history (not enough for slope check)
+        for adx_val in [10.0, 15.0]:
+            ctx = _make_ctx(
+                close=100.0,
+                indicators=_full_indicators(rsi=50.0, pct_b=0.50, adx=adx_val, atr=2.0),
+            )
+            strategy.on_context(ctx)
+
+        # Entry should still work (slope check skipped, only 3 values after adding new one)
+        ctx_entry = _make_ctx(
+            close=100.0,
+            indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=18.0, atr=2.0),
+        )
+        signal = strategy.on_context(ctx_entry)
+        assert signal is not None
+        assert signal.direction == "long"
+
+    def test_exact_threshold_1_5_allows_entry(self):
+        """ADX rise of exactly 1.5 should be allowed (condition is > 1.5, not >=)."""
+        strategy = RsiMeanReversion()
+        # Feed 4 bars: [14.0, 14.5, 15.0, 15.0]
+        adx_values = [14.0, 14.5, 15.0, 15.0]
+        for adx_val in adx_values:
+            ctx = _make_ctx(
+                close=100.0,
+                indicators=_full_indicators(rsi=50.0, pct_b=0.50, adx=adx_val, atr=2.0),
+            )
+            strategy.on_context(ctx)
+
+        # Try entry: adx_history after adding 15.5 = [14.5, 15.0, 15.0, 15.5]
+        # slope = 15.5 - 14.5 = 1.0 <= 1.5 -> allowed
+        ctx_entry = _make_ctx(
+            close=100.0,
+            indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=15.5, atr=2.0),
+        )
+        signal = strategy.on_context(ctx_entry)
+        assert signal is not None
+        assert signal.direction == "long"
+
+
+# ===================================================================
+# 14. Entry ADX in Metadata
+# ===================================================================
+
+
+class TestEntryAdxMetadata:
+    """entry_adx should be stored in signal metadata for regime guard."""
+
+    def test_long_entry_includes_entry_adx(self):
+        strategy = RsiMeanReversion()
+        adx = 15.0
+        ctx = _make_ctx(
+            close=100.0,
+            indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=adx, atr=2.0),
+        )
+        signal = strategy.on_context(ctx)
+        assert signal is not None
+        assert signal.metadata["entry_adx"] == pytest.approx(adx)
+
+    def test_short_entry_includes_entry_adx(self):
+        strategy = RsiMeanReversion()
+        adx = 15.0
+        ctx = _make_ctx(
+            close=100.0,
+            indicators=_full_indicators(rsi=80.0, pct_b=0.98, adx=adx, atr=2.0),
+        )
+        signal = strategy.on_context(ctx)
+        assert signal is not None
+        assert signal.metadata["entry_adx"] == pytest.approx(adx)

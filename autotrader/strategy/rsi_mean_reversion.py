@@ -1,7 +1,9 @@
 """RSI Mean Reversion strategy for non-trending (low ADX) markets.
 
 Enters long when RSI oversold + BB %B near lower band, and enters short when
-RSI overbought + BB %B near upper band.  Only trades when ADX < 25 (non-trending).
+RSI overbought + BB %B near upper band.  Only trades when ADX < 23 (non-trending)
+and ADX slope has not risen by more than 1.5 points over the last 3 bars
+(regime transitioning to trend).
 """
 from __future__ import annotations
 
@@ -26,8 +28,8 @@ class RsiMeanReversion(Strategy):
     """Bidirectional mean-reversion strategy using RSI, Bollinger Bands, and ADX.
 
     Entry:
-        Long  -- RSI < 30, BB %B < 0.05, ADX < 25
-        Short -- RSI > 75, BB %B > 0.95, ADX < 25
+        Long  -- RSI < 30, BB %B < 0.05, ADX < 23, ADX slope <= 1.5 over 3 bars
+        Short -- RSI > 75, BB %B > 0.95, ADX < 23, ADX slope <= 1.5 over 3 bars
 
     Exit:
         Long target  -- RSI > 50 OR pct_b > 0.50
@@ -51,7 +53,7 @@ class RsiMeanReversion(Strategy):
     RSI_OVERBOUGHT = 75.0
     BB_LONG_ENTRY_PCT_B = 0.05
     BB_SHORT_ENTRY_PCT_B = 0.95
-    ADX_MAX = 25.0
+    ADX_MAX = 23.0
 
     # Exit thresholds
     RSI_LONG_EXIT = 50.0
@@ -77,6 +79,7 @@ class RsiMeanReversion(Strategy):
             IndicatorSpec(name="ATR", params={"period": self.ATR_PERIOD}),
         ]
         self._states: dict[str, _PositionState] = {}
+        self._adx_history: dict[str, list[float]] = {}
 
     # ------------------------------------------------------------------
     # Public interface
@@ -91,6 +94,16 @@ class RsiMeanReversion(Strategy):
         if symbol not in self._states:
             self._states[symbol] = _PositionState()
         state = self._states[symbol]
+
+        # Track recent ADX values per symbol for slope detection
+        adx_val = indicators["adx"]
+        if symbol not in self._adx_history:
+            self._adx_history[symbol] = []
+        adx_hist = self._adx_history[symbol]
+        adx_hist.append(adx_val)
+        # Keep only the last 4 values
+        if len(adx_hist) > 4:
+            self._adx_history[symbol] = adx_hist[-4:]
 
         if state.in_position:
             state.bars_since_entry += 1
@@ -137,6 +150,13 @@ class RsiMeanReversion(Strategy):
         if adx >= self.ADX_MAX:
             return None
 
+        # ADX slope filter: if ADX is rising over last 3 bars, regime is
+        # transitioning to trending -- block entry to avoid mean-reversion
+        # trades in an emerging trend.
+        adx_hist = self._adx_history.get(ctx.symbol, [])
+        if len(adx_hist) >= 4 and (adx_hist[-1] - adx_hist[-4]) > 1.5:
+            return None
+
         # Long entry
         if rsi < self.RSI_OVERSOLD and pct_b < self.BB_LONG_ENTRY_PCT_B:
             strength = min(
@@ -159,6 +179,7 @@ class RsiMeanReversion(Strategy):
                 metadata={
                     "sub_strategy": "mr_long",
                     "stop_loss": stop_loss,
+                    "entry_adx": adx,
                 },
             )
 
@@ -185,6 +206,7 @@ class RsiMeanReversion(Strategy):
                 metadata={
                     "sub_strategy": "mr_short",
                     "stop_loss": stop_loss,
+                    "entry_adx": adx,
                 },
             )
 

@@ -1,7 +1,7 @@
 """BatchBacktester: simulates the nightly batch trading architecture over historical data.
 
 Full simulation cycle per trading day:
-  1. Evening (signal generation): run all 2 strategies against the symbol universe.
+  1. Evening (signal generation): run all 3 strategies against the symbol universe.
   2. Gap filter: discard signals where the next-day open gap exceeds the threshold.
   3. Signal ranking: select top-N candidates by composite score.
   4. Next-day entry: simulate fills at next-day open price.
@@ -51,6 +51,7 @@ from autotrader.execution.exit_rules import (
 from autotrader.indicators.base import IndicatorSpec
 from autotrader.indicators.engine import IndicatorEngine
 from autotrader.strategy.consecutive_down import ConsecutiveDown
+# from autotrader.strategy.ema_cross_trend import EmaCrossTrend  # disabled after backtest RED LINE fail
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ _MAX_POSITION_PCT: float = 0.20         # hard cap: max 20% of equity per positi
 _MAX_LONG_POSITIONS: int = 4            # hard cap on concurrent long positions
 _MAX_SHORT_POSITIONS: int = 3           # hard cap on concurrent short positions
 _MAX_TOTAL_POSITIONS: int = 5           # overall position cap
+_MAX_LOSS_PER_TRADE_PCT: float = 0.03   # hard cap: max 3% of equity loss per trade
 
 # --- Per-Strategy GDR Configuration ---
 _PER_STRATEGY_GDR: bool = True          # Toggle: True = per-strategy, False = portfolio-level
@@ -77,13 +79,15 @@ _PER_STRATEGY_GDR: bool = True          # Toggle: True = per-strategy, False = p
 _STRATEGY_BASE_RISK: dict[str, float] = {
     "rsi_mean_reversion": 0.01,          # 1% (reduced from 2%)
     "consecutive_down": 0.02,            # 2%
+    "ema_cross_trend": 0.015,            # 1.5%
 }
 _DEFAULT_BASE_RISK: float = 0.02        # fallback for unknown strategies
 
 # Per-strategy GDR thresholds: (tier1_dd, tier2_dd)
 _STRATEGY_GDR_THRESHOLDS: dict[str, tuple[float, float]] = {
-    "rsi_mean_reversion": (0.03, 0.06),  # Tier 1 at 3% DD, Tier 2 at 6% DD
-    "consecutive_down": (0.04, 0.08),    # Tier 1 at 4% DD, Tier 2 at 8% DD
+    "rsi_mean_reversion": (0.025, 0.05),  # Tier 1 at 2.5% DD, Tier 2 at 5% DD
+    "consecutive_down": (0.03, 0.06),     # Tier 1 at 3% DD, Tier 2 at 6% DD
+    "ema_cross_trend": (0.04, 0.08),      # Tier 1 at 4% DD, Tier 2 at 8% DD
 }
 
 # GDR Risk Multipliers (Tier 2 = HALT, 0 entries)
@@ -133,8 +137,8 @@ _SOFT_STRATEGY_CAP: int = 2             # max positions per strategy under multi
 # Minimum bars needed before a symbol can generate a valid signal
 _MIN_BARS_WARMUP: int = 60
 
-# Gap filter threshold (5%)
-_DEFAULT_GAP_THRESHOLD: float = 0.05
+# Gap filter threshold (3%, tightened from 5%)
+_DEFAULT_GAP_THRESHOLD: float = 0.03
 
 # Slippage model: 3 basis points on entry and exit fills
 _SLIPPAGE_BPS: float = 0.0003
@@ -571,6 +575,7 @@ class BatchBacktester:
         self._peak_equity: float = initial_capital
         self._equity_history: deque[float] = deque(maxlen=_GDR_ROLLING_WINDOW)
         self._gdr_tier: int = 0
+        self._realized_pnl: float = 0.0  # cumulative realized PnL for DD tracking
         # Per-strategy GDR state
         self._strategy_cumulative_pnl: dict[str, float] = {s: 0.0 for s in _STRATEGY_NAMES}
         self._strategy_peak_pnl: dict[str, float] = {s: 0.0 for s in _STRATEGY_NAMES}
@@ -578,6 +583,8 @@ class BatchBacktester:
         self._strategy_entries_today: dict[str, int] = {s: 0 for s in _STRATEGY_NAMES}
         # Portfolio safety net state
         self._portfolio_safety_net_active: bool = False
+        # Regime guard: symbols pending forced close on next day
+        self._regime_guard_pending: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -674,8 +681,9 @@ class BatchBacktester:
             equity = self._compute_equity(day_bars)
             self._equity = equity
 
-            # Update peak equity and GDR tier
-            self._peak_equity = max(self._peak_equity, equity)
+            # Update peak equity using realized equity (MTM-free)
+            realized_eq = self._compute_realized_equity()
+            self._peak_equity = max(self._peak_equity, realized_eq)
             self._update_gdr()
 
             self._equity_curve.append((trading_date, equity))
@@ -1015,6 +1023,11 @@ class BatchBacktester:
                 lowest_price=fill_price,
             )
 
+            # Store entry ADX for regime guard downstream
+            adx_entry = scan_result.indicators.get("ADX_14")
+            if isinstance(adx_entry, (int, float)):
+                held.entry_adx = float(adx_entry)
+
             sim_pos = _SimPosition(
                 held=held,
                 qty=qty,
@@ -1060,6 +1073,20 @@ class BatchBacktester:
         daily_pnl = 0.0
         to_close: list[tuple[str, str, float]] = []  # (symbol, reason, exit_price)
 
+        # Execute pending regime guard forced closes (from yesterday's detection)
+        regime_guard_closes: list[str] = []
+        for sym in list(self._regime_guard_pending):
+            if sym in self._positions:
+                bar = day_bars.get(sym)
+                if bar is not None:
+                    exit_price = self._apply_slippage_to_fill(
+                        bar.open, self._positions[sym].held.direction, is_entry=False,
+                    )
+                    to_close.append((sym, "regime_guard", exit_price))
+                    regime_guard_closes.append(sym)
+        for sym in regime_guard_closes:
+            self._regime_guard_pending.discard(sym)
+
         for sym, sim_pos in self._positions.items():
             bar = day_bars.get(sym)
             if bar is None:
@@ -1101,10 +1128,41 @@ class BatchBacktester:
 
             if exit_price is not None and exit_reason is not None:
                 to_close.append((sym, exit_reason, exit_price))
+            elif _MAX_LOSS_PER_TRADE_PCT < 1.0:
+                # Equity-based hard cap: if unrealized loss exceeds threshold
+                # of equity, force exit. Only triggers when SL/TP did not fire.
+                unrealized_loss = self._unrealized_loss_dollars(sim_pos, bar.close)
+                equity = self._equity if self._equity > 0 else self._initial_capital
+                if unrealized_loss > equity * _MAX_LOSS_PER_TRADE_PCT:
+                    cap_exit_price = self._apply_slippage_to_fill(
+                        bar.close, held.direction, is_entry=False,
+                    )
+                    to_close.append((sym, "max_loss_cap", cap_exit_price))
+
+            # Regime guard detection for rsi_mean_reversion (detect today, close tomorrow)
+            if held.strategy == "rsi_mean_reversion" and exit_price is None:
+                current_adx = indicators.get("ADX_14")
+                if (
+                    isinstance(current_adx, (int, float))
+                    and held.entry_adx > 0
+                    and current_adx > 23.0
+                    and (current_adx - held.entry_adx) >= 3.0
+                ):
+                    self._regime_guard_pending.add(sym)
+                    logger.info(
+                        "Regime guard flagged %s for next-day close: ADX=%.1f "
+                        "(entry=%.1f, delta=+%.1f)",
+                        sym, current_adx, held.entry_adx,
+                        current_adx - held.entry_adx,
+                    )
 
         # Execute the closes
         for sym, reason, exit_price in to_close:
+            if sym not in self._positions:
+                continue  # already closed (e.g. regime guard + normal exit same day)
             sim_pos = self._positions.pop(sym)
+            # Clean up regime guard pending if this symbol is being closed normally
+            self._regime_guard_pending.discard(sym)
             pnl = self._compute_pnl(sim_pos, exit_price)
             daily_pnl += pnl
 
@@ -1112,6 +1170,9 @@ class BatchBacktester:
             if self._apply_commission:
                 commission = _COMMISSION_PER_SHARE * sim_pos.qty * 2  # entry + exit
                 pnl -= commission
+
+            # Track realized PnL for DD calculation (MTM-free)
+            self._realized_pnl += pnl
 
             # Return cash
             if sim_pos.held.direction == "long":
@@ -1486,6 +1547,7 @@ class BatchBacktester:
         self._peak_equity = self._initial_capital
         self._equity_history = deque(maxlen=_GDR_ROLLING_WINDOW)
         self._gdr_tier = 0
+        self._realized_pnl: float = 0.0  # cumulative realized PnL for DD tracking
         # Per-strategy GDR state
         self._strategy_cumulative_pnl = {s: 0.0 for s in _STRATEGY_NAMES}
         self._strategy_peak_pnl = {s: 0.0 for s in _STRATEGY_NAMES}
@@ -1493,6 +1555,8 @@ class BatchBacktester:
         self._strategy_entries_today = {s: 0 for s in _STRATEGY_NAMES}
         # Portfolio safety net state
         self._portfolio_safety_net_active = False
+        # Regime guard state
+        self._regime_guard_pending = set()
 
     def _update_gdr(self) -> None:
         """Update GDR: dispatches to per-strategy or legacy portfolio-level GDR."""
@@ -1588,7 +1652,8 @@ class BatchBacktester:
         portfolio drawdown exceeds _PORTFOLIO_SAFETY_NET_DD (20%). It deactivates
         when DD recovers below _PORTFOLIO_SAFETY_NET_RECOVERY (15%).
         """
-        self._equity_history.append(self._equity)
+        realized_eq = self._compute_realized_equity()
+        self._equity_history.append(realized_eq)
         if not self._equity_history:
             return
 
@@ -1596,25 +1661,25 @@ class BatchBacktester:
         if rolling_peak <= 0:
             return
 
-        dd = (rolling_peak - self._equity) / rolling_peak
+        dd = (rolling_peak - realized_eq) / rolling_peak
 
         if not self._portfolio_safety_net_active:
             if dd > _PORTFOLIO_SAFETY_NET_DD:
                 self._portfolio_safety_net_active = True
                 logger.warning(
                     "Portfolio safety net ACTIVATED: DD=%.1f%% > %.0f%% threshold "
-                    "(equity=%.0f, rolling_peak=%.0f)",
+                    "(realized_eq=%.0f, rolling_peak=%.0f)",
                     dd * 100, _PORTFOLIO_SAFETY_NET_DD * 100,
-                    self._equity, rolling_peak,
+                    realized_eq, rolling_peak,
                 )
         else:
             if dd < _PORTFOLIO_SAFETY_NET_RECOVERY:
                 self._portfolio_safety_net_active = False
                 logger.info(
                     "Portfolio safety net DEACTIVATED: DD=%.1f%% < %.0f%% recovery "
-                    "(equity=%.0f, rolling_peak=%.0f)",
+                    "(realized_eq=%.0f, rolling_peak=%.0f)",
                     dd * 100, _PORTFOLIO_SAFETY_NET_RECOVERY * 100,
-                    self._equity, rolling_peak,
+                    realized_eq, rolling_peak,
                 )
 
     def _calculate_qty(
@@ -1697,6 +1762,14 @@ class BatchBacktester:
                 short_value = (sim_pos.held.entry_price - price) * sim_pos.qty
                 market_value += short_value
         return self._cash + market_value
+
+    def _compute_realized_equity(self) -> float:
+        """Realized equity (cash-based) excluding unrealized MTM.
+
+        Uses initial_capital + cumulative realized PnL to avoid MTM spikes
+        contaminating the peak equity tracker for drawdown calculations.
+        """
+        return self._initial_capital + self._realized_pnl
 
     def _compute_pnl(self, sim_pos: _SimPosition, exit_price: float) -> float:
         """Calculate dollar PnL for a closed position."""
@@ -1798,7 +1871,12 @@ class BatchBacktester:
 
     @staticmethod
     def _has_required_indicators(indicators: dict) -> bool:
-        """Check that the minimum required indicators are available (warmup done)."""
+        """Check that the minimum required indicators are available (warmup done).
+
+        Only checks core indicators shared by all strategies. Strategy-specific
+        indicators (e.g. EMA_10, EMA_21 for ema_cross_trend) are checked within
+        each strategy's _extract_indicators method.
+        """
         required = ["RSI_14", "ADX_14", "ATR_14", "BBANDS_20"]
         return all(indicators.get(k) is not None for k in required)
 
@@ -1835,3 +1913,12 @@ class BatchBacktester:
             return max(0.0, (held.entry_price - current_price) / held.entry_price)
         else:
             return max(0.0, (current_price - held.entry_price) / held.entry_price)
+
+    @staticmethod
+    def _unrealized_loss_dollars(sim_pos: _SimPosition, current_price: float) -> float:
+        """Return unrealized loss in dollars (positive = loss)."""
+        held = sim_pos.held
+        if held.direction == "long":
+            return max(0.0, (held.entry_price - current_price) * sim_pos.qty)
+        else:
+            return max(0.0, (current_price - held.entry_price) * sim_pos.qty)

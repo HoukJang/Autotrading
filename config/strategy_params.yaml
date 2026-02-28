@@ -7,6 +7,7 @@ entry_groups:
     strategies:
       - rsi_mean_reversion
       - consecutive_down
+      - ema_cross_trend
     order_type: market
 
   # Group B: Confirmation window, 9:45-10:00 AM ET
@@ -23,7 +24,11 @@ entry_groups:
 
 # Gap filter: skip signals where overnight gap exceeds threshold
 gap_filter:
-  max_gap_pct: 0.05   # 5% max gap up or down from prev_close
+  max_gap_pct: 0.03   # 3% max gap (tightened from 5%)
+
+# Per-trade loss hard cap (overrides SL if unrealized loss exceeds this)
+max_loss_per_trade:
+  max_loss_pct: 0.03   # 3% of entry price
 
 # Daily entry limits
 entry_limits:
@@ -42,13 +47,15 @@ per_strategy_gdr:
   base_risk:
     rsi_mean_reversion: 0.01   # 1% (reduced from 2% due to higher loss rate)
     consecutive_down: 0.02     # 2%
+    ema_cross_trend: 0.015     # 1.5%
     default: 0.02              # fallback for unknown strategies
 
   # Per-strategy drawdown thresholds: [tier1_dd, tier2_dd]
   # DD is calculated as (peak_cum_pnl - current_cum_pnl) / initial_capital
   thresholds:
-    rsi_mean_reversion: [0.03, 0.06]   # Tier 1 at 3%, Tier 2 (HALT) at 6%
-    consecutive_down: [0.04, 0.08]     # Tier 1 at 4%, Tier 2 (HALT) at 8%
+    rsi_mean_reversion: [0.025, 0.05]   # Tier 1 at 2.5%, Tier 2 (HALT) at 5%
+    consecutive_down: [0.03, 0.06]      # Tier 1 at 3%, Tier 2 (HALT) at 6%
+    ema_cross_trend: [0.04, 0.08]       # Tier 1 at 4%, Tier 2 (HALT) at 8%
 
   # Risk multipliers per GDR tier
   risk_multipliers:
@@ -72,6 +79,7 @@ per_strategy_gdr:
 # Per-strategy SL/TP configuration
 strategies:
   rsi_mean_reversion:
+    adx_max: 23.0              # relaxed to 23.0 for more trades while still filtering trending markets
     sl_atr_mult_long: 1.0
     sl_atr_mult_short: 1.5
     tp_rsi_long: 50.0       # exit long when RSI > 50
@@ -98,6 +106,26 @@ strategies:
     trailing_stop: false
     trailing_atr_mult: 2.0
     trailing_activation_atr: 1.0
+    breakeven_activation_atr: 0.6
+
+  ema_cross_trend:
+    enabled: false                  # disabled after 16th backtest RED LINE fail
+    ema_fast: 10
+    ema_slow: 21
+    adx_min: 28.0
+    adx_rise_threshold: 2.0
+    min_momentum_bars: 2
+    rsi_long_min: 40.0
+    rsi_long_max: 70.0
+    rsi_short_min: 30.0
+    rsi_short_max: 60.0
+    sl_atr_mult_long: 3.0
+    sl_atr_mult_short: 3.0
+    tp_atr_mult: 5.0
+    max_hold_days: 10
+    trailing_stop: true
+    trailing_atr_mult: 2.0
+    trailing_activation_atr: 1.5
     breakeven_activation_atr: 0.6
 
   # volume_divergence: REMOVED (13th backtest P0 decision)

@@ -3,7 +3,7 @@
 Exit hierarchy (evaluated in order, first match wins):
   1. Day 1 emergency stops only (no SL/TP checks on entry day)
   2. Day 2+ SL/TP from actual fill price using strategy ATR multipliers
-  3. Trailing stops (no strategies currently use this)
+  3. Trailing stops (ema_cross_trend uses this)
   4. Time-based exit when max_hold_days reached
   5. (Re-entry blocking is a side effect, not an exit check)
 
@@ -35,26 +35,31 @@ _BREAKEVEN_ACTIVATION_ATR: float = 0.6
 _MAX_HOLD_DAYS: dict[str, int] = {
     "rsi_mean_reversion": 5,
     "consecutive_down": 5,
+    "ema_cross_trend": 10,
 }
 
 # Strategy-specific SL ATR multipliers (by direction)
 _SL_ATR_MULT: dict[str, dict[str, float]] = {
     "rsi_mean_reversion": {"long": 1.0, "short": 1.5},
     "consecutive_down": {"long": 1.0},
+    "ema_cross_trend": {"long": 3.0, "short": 3.0},
 }
 
 # Strategy-specific TP ATR multipliers (None = use indicator-based TP)
 _TP_ATR_MULT: dict[str, float | None] = {
     "rsi_mean_reversion": None,
     "consecutive_down": None,
+    "ema_cross_trend": 5.0,
 }
 
 # Strategies that use trailing stops
-_TRAILING_STRATEGIES: frozenset[str] = frozenset()
+_TRAILING_STRATEGIES: frozenset[str] = frozenset({"ema_cross_trend"})
 _TRAILING_ATR_MULT: float = 2.0
 
 # Per-strategy trailing stop activation thresholds (ATR multiples of favourable move)
-_TRAILING_ACTIVATION_ATR: dict[str, float] = {}
+_TRAILING_ACTIVATION_ATR: dict[str, float] = {
+    "ema_cross_trend": 1.5,
+}
 
 
 @dataclass
@@ -91,6 +96,7 @@ class HeldPosition:
     highest_price: float = 0.0
     lowest_price: float = float("inf")
     consecutive_loss_bars: int = 0
+    entry_adx: float = 0.0
 
     def __post_init__(self) -> None:
         # Initialise price extremes from entry price when not explicitly set.
@@ -417,7 +423,7 @@ class ExitRuleEngine:
     def _evaluate_trailing(
         self, position: HeldPosition, bar_close: float, atr: float,
     ) -> ExitDecision:
-        """Trailing stop for strategies that use them (currently none).
+        """Trailing stop for strategies that use them (ema_cross_trend).
 
         Activation conditions:
         - Price must have moved at least activation ATR in our favour to start trailing.

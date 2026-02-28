@@ -155,9 +155,10 @@ class TestGroupMembership:
         """ema_pullback should NOT be in Group B (strategy disabled)."""
         assert "ema_pullback" not in _GROUP_B_STRATEGIES
 
-    def test_group_a_has_two_strategies(self):
-        """Group A should contain exactly 2 strategies."""
-        assert len(_GROUP_A_STRATEGIES) == 2
+    def test_group_a_has_three_strategies(self):
+        """Group A should contain exactly 3 strategies."""
+        assert len(_GROUP_A_STRATEGIES) == 3
+        assert "ema_cross_trend" in _GROUP_A_STRATEGIES
 
     def test_group_b_is_empty(self):
         """Group B should be empty (no confirmation strategies currently active)."""

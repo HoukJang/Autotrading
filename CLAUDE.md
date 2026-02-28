@@ -26,6 +26,18 @@
 - 작업은 적절한 팀/서브에이전트를 호출해서 위임한다
 - 적절한 팀이 없으면 새로 생성한다
 
+## Strategy Team Rules
+
+- 전략팀 리뷰/분석 수행 시 반드시 `docs/analysis/` 에 문서를 남긴다
+- 파일명 형식: `strategy-panel-discussion-{N}th.md` (N = 백테스트 차수)
+- 문서 포함 내용:
+  - 백테스트 결과 요약 (거래수, WR, PF, MaxDD, Sharpe, Return)
+  - 전략별 성과 분석
+  - 전략팀 진단 및 권고사항
+  - 다음 단계 결정 사항
+  - 시장 레짐 분석 결과 (해당 시)
+- 리뷰 없이 다음 백테스트 차수로 넘어가지 않는다
+
 ## Project Docs
 
 - System design: `docs/plans/2026-02-24-autotrader-v2-design.md`

@@ -50,6 +50,8 @@ _REGIME_COMPAT: dict[tuple[str, str], float] = {
     ("consecutive_down", "long"): 0.80,
     # Trend-continuation
     ("ema_pullback", "long"): 0.90,
+    ("ema_cross_trend", "long"): 0.85,
+    ("ema_cross_trend", "short"): 0.85,
 }
 
 # Default compatibility score for unknown (strategy, direction) combinations
@@ -71,6 +73,13 @@ def _regime_compatibility(scan_result: ScanResult) -> float:
         adx = scan_result.indicators.get("ADX_14")
         if isinstance(adx, (int, float)) and adx > 25:
             boost = min(0.05, (adx - 25) / 200)  # up to +5% boost
+            base = min(1.0, base + boost)
+
+    # Boost ema_cross_trend when ADX is strong (> 30)
+    if scan_result.strategy == "ema_cross_trend":
+        adx = scan_result.indicators.get("ADX_14")
+        if isinstance(adx, (int, float)) and adx > 30:
+            boost = min(0.05, (adx - 30) / 200)
             base = min(1.0, base + boost)
 
     return base

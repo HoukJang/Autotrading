@@ -37,7 +37,7 @@ _ET = ZoneInfo("America/New_York")
 logger = logging.getLogger("autotrader.execution.entry_manager")
 
 # Entry group membership
-_GROUP_A_STRATEGIES: frozenset[str] = frozenset({"rsi_mean_reversion", "consecutive_down"})
+_GROUP_A_STRATEGIES: frozenset[str] = frozenset({"rsi_mean_reversion", "consecutive_down", "ema_cross_trend"})
 _GROUP_B_STRATEGIES: frozenset[str] = frozenset()
 
 # Confirmation window gap tolerance (3 bps)
