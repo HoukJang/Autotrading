@@ -88,10 +88,9 @@ def main() -> None:
     from autotrader.universe.selector import UniverseSelector
     from autotrader.universe.earnings import EarningsCalendar
     from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
-    from autotrader.strategy.bb_squeeze import BbSqueezeBreakout
-    from autotrader.strategy.adx_pullback import AdxPullback
-    from autotrader.strategy.overbought_short import OverboughtShort
-    from autotrader.strategy.regime_momentum import RegimeMomentum
+    from autotrader.strategy.consecutive_down import ConsecutiveDown
+    from autotrader.strategy.ema_pullback import EmaPullback
+    from autotrader.strategy.volume_divergence import VolumeDivergence
 
     tf_map = {
         "1day": TimeFrame.Day,
@@ -113,8 +112,8 @@ def main() -> None:
     bt_timeframe = args.bt_timeframe
 
     strategy_names = [
-        "RsiMeanReversion", "BbSqueezeBreakout", "AdxPullback",
-        "OverboughtShort", "RegimeMomentum",
+        "RsiMeanReversion", "ConsecutiveDown", "EmaPullback",
+        "VolumeDivergence",
     ]
 
     print("=" * 80)
@@ -272,10 +271,9 @@ def main() -> None:
 
         engine = BacktestEngine(args.balance, risk_config)
         engine.add_strategy(RsiMeanReversion())
-        engine.add_strategy(BbSqueezeBreakout())
-        engine.add_strategy(AdxPullback())
-        engine.add_strategy(OverboughtShort())
-        engine.add_strategy(RegimeMomentum())
+        engine.add_strategy(ConsecutiveDown())
+        engine.add_strategy(EmaPullback())
+        engine.add_strategy(VolumeDivergence())
 
         result = engine.run(bars)
         results[sym] = result

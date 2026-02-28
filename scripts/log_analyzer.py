@@ -77,8 +77,8 @@ _SYMBOL_IN_MSG_RE = re.compile(r"\b([A-Z]{1,5})\b")
 
 # Strategy names (from known list; extend as needed)
 _STRATEGY_NAMES = {
-    "rsi_mean_reversion", "overbought_short", "adx_pullback",
-    "bb_squeeze", "regime_momentum",
+    "rsi_mean_reversion", "consecutive_down", "ema_pullback",
+    "volume_divergence",
 }
 
 # Error category keywords

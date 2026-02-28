@@ -11,7 +11,7 @@ Usage examples:
     python scripts/run_batch_backtest.py --start 2024-01-01 --end 2025-12-31 --capital 100000
 
     # Run a single strategy only:
-    python scripts/run_batch_backtest.py --strategy adx_pullback
+    python scripts/run_batch_backtest.py --strategy consecutive_down
 
     # Compare entry day skip ON vs OFF:
     python scripts/run_batch_backtest.py --compare-entry-skip
@@ -24,16 +24,25 @@ Usage examples:
 
     # Save JSON results:
     python scripts/run_batch_backtest.py --output results/backtest.json
+
+    # Real historical data from Alpaca (S&P 500, 1 year):
+    python scripts/run_batch_backtest.py --real-data
+
+    # Real data with custom period and forced refresh:
+    python scripts/run_batch_backtest.py --real-data --data-days 730 --refresh-data
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import math
 import os
+import pickle
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 # Ensure project root is on path when running as a script
@@ -85,6 +94,104 @@ _DEFAULT_SYMBOLS = [
 # ---------------------------------------------------------------------------
 # Helper: data loading / generation
 # ---------------------------------------------------------------------------
+
+_CACHE_PATH = os.path.join(_PROJECT_ROOT, "data", "historical_bars.pkl")
+
+
+def _fetch_real_data(
+    data_days: int = 365,
+    refresh: bool = False,
+    min_bars: int = 60,
+) -> dict:
+    """Fetch real daily bars from Alpaca for all S&P 500 symbols.
+
+    Downloads via AlpacaAdapter.get_historical_bars() and caches the result
+    to data/historical_bars.pkl. Subsequent runs reuse the cache unless
+    --refresh-data is passed.
+    """
+    # Check cache first
+    if not refresh and os.path.exists(_CACHE_PATH):
+        logger.info("Loading cached historical bars from %s", _CACHE_PATH)
+        with open(_CACHE_PATH, "rb") as f:
+            cached = pickle.load(f)
+        # Validate cache has the right data_days (stored as metadata)
+        cached_days = cached.get("_meta_days", 0)
+        bars_by_symbol = cached.get("bars", {})
+        if cached_days == data_days and bars_by_symbol:
+            logger.info(
+                "Cache hit: %d symbols, %d-day data",
+                len(bars_by_symbol), cached_days,
+            )
+            return bars_by_symbol
+        logger.info("Cache stale (days=%d vs requested=%d), re-downloading", cached_days, data_days)
+
+    # Load Alpaca credentials from config/.env
+    env_path = os.path.join(_PROJECT_ROOT, "config", ".env")
+    if not os.path.exists(env_path):
+        logger.error("config/.env not found. Cannot fetch real data.")
+        sys.exit(1)
+
+    api_key = None
+    secret_key = None
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("ALPACA_API_KEY="):
+                api_key = line.split("=", 1)[1]
+            elif line.startswith("ALPACA_SECRET_KEY="):
+                secret_key = line.split("=", 1)[1]
+
+    if not api_key or not secret_key:
+        logger.error("ALPACA_API_KEY or ALPACA_SECRET_KEY not found in config/.env")
+        sys.exit(1)
+
+    # Fetch S&P 500 symbols
+    from autotrader.universe.provider import SP500Provider
+
+    logger.info("Fetching S&P 500 symbol list...")
+    provider = SP500Provider()
+    stocks = provider.fetch()
+    symbols = [s.symbol for s in stocks]
+    logger.info("Got %d S&P 500 symbols", len(symbols))
+
+    # Fetch historical bars via AlpacaAdapter
+    from autotrader.broker.alpaca_adapter import AlpacaAdapter
+
+    adapter = AlpacaAdapter(api_key=api_key, secret_key=secret_key, paper=True, feed="iex")
+
+    async def _do_fetch() -> dict:
+        await adapter.connect()
+        try:
+            return await adapter.get_historical_bars(symbols, days=data_days)
+        finally:
+            await adapter.disconnect()
+
+    logger.info(
+        "Downloading %d-day historical bars for %d symbols (batch_size=50)...",
+        data_days, len(symbols),
+    )
+    bars_by_symbol = asyncio.run(_do_fetch())
+
+    # Filter symbols with insufficient bars for warmup
+    filtered: dict = {}
+    for sym, bars in bars_by_symbol.items():
+        if len(bars) >= min_bars:
+            filtered[sym] = bars
+
+    dropped = len(bars_by_symbol) - len(filtered)
+    if dropped:
+        logger.info("Dropped %d symbols with < %d bars", dropped, min_bars)
+    logger.info("Real data ready: %d symbols", len(filtered))
+
+    # Save to cache
+    os.makedirs(os.path.dirname(_CACHE_PATH), exist_ok=True)
+    cache_data = {"_meta_days": data_days, "bars": filtered}
+    with open(_CACHE_PATH, "wb") as f:
+        pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    cache_size_mb = os.path.getsize(_CACHE_PATH) / (1024 * 1024)
+    logger.info("Cached to %s (%.1f MB)", _CACHE_PATH, cache_size_mb)
+
+    return filtered
 
 
 def _generate_synthetic_data(
@@ -339,8 +446,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--strategy",
-        choices=["adx_pullback", "rsi_mean_reversion", "bb_squeeze",
-                 "overbought_short", "regime_momentum"],
+        choices=["rsi_mean_reversion", "consecutive_down", "ema_pullback",
+                 "volume_divergence"],
         default=None,
         help="Run a single strategy only (default: all strategies)",
     )
@@ -377,6 +484,18 @@ def main() -> None:
         help="Save JSON results to this path",
     )
     parser.add_argument(
+        "--real-data", action="store_true",
+        help="Use real Alpaca historical bars instead of synthetic data",
+    )
+    parser.add_argument(
+        "--data-days", type=int, default=365,
+        help="Number of calendar days of real data to fetch (default: 365)",
+    )
+    parser.add_argument(
+        "--refresh-data", action="store_true",
+        help="Force re-download of real data (ignore cache)",
+    )
+    parser.add_argument(
         "--verbose", action="store_true",
         help="Enable DEBUG logging",
     )
@@ -398,19 +517,25 @@ def main() -> None:
         parser.error("--start must be before --end")
         return
 
-    # Determine symbol universe
-    symbols = args.symbols or _DEFAULT_SYMBOLS[: args.num_symbols]
-
-    # Generate data
-    bars_by_symbol = _generate_synthetic_data(
-        symbols=symbols,
-        start_date=start_date,
-        end_date=end_date,
-        seed=args.seed,
-    )
+    # Load data: real Alpaca bars or synthetic generation
+    if args.real_data:
+        data_source = "real (Alpaca)"
+        bars_by_symbol = _fetch_real_data(
+            data_days=args.data_days,
+            refresh=args.refresh_data,
+        )
+    else:
+        data_source = "synthetic"
+        symbols = args.symbols or _DEFAULT_SYMBOLS[: args.num_symbols]
+        bars_by_symbol = _generate_synthetic_data(
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            seed=args.seed,
+        )
 
     if not bars_by_symbol:
-        logger.error("No data generated. Exiting.")
+        logger.error("No data available. Exiting.")
         sys.exit(1)
 
     strategy_filter = [args.strategy] if args.strategy else None
@@ -421,6 +546,7 @@ def main() -> None:
 
     print(f"\n{'=' * 70}")
     print("  AUTOTRADER V2 - BATCH BACKTEST")
+    print(f"  Data source: {data_source}")
     print(f"  Period: {start_date} to {end_date}")
     print(f"  Capital: ${args.capital:,.0f}")
     print(f"  Symbols: {len(bars_by_symbol)}")
@@ -529,10 +655,11 @@ def main() -> None:
     if args.output:
         output_data = {
             "run_config": {
+                "data_source": data_source,
                 "start_date": str(start_date),
                 "end_date": str(end_date),
                 "capital": args.capital,
-                "symbols": symbols,
+                "num_symbols": len(bars_by_symbol),
                 "strategy_filter": strategy_filter,
             },
             "primary_metrics": primary.metrics,
