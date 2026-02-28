@@ -65,7 +65,10 @@ nul
 # Project specific
 data/*.db
 data/*.jsonl
+data/*.pkl
+data/*.json
 data/archive/
+data/backtest_results/
 *.sqlite
 *.sqlite3
 config/.env
