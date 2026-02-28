@@ -1,0 +1,90 @@
+# Strategy-specific execution parameters for batch+intraday hybrid architecture.
+# These values control entry groups, SL/TP multipliers, and time-based exit windows.
+
+entry_groups:
+  # Group A: Market-on-Open orders submitted at 9:30 AM ET
+  moo:
+    strategies:
+      - rsi_mean_reversion
+      - overbought_short
+    order_type: market
+
+  # Group B: Confirmation window, 9:45-10:00 AM ET
+  confirmation:
+    strategies:
+      - adx_pullback
+      - bb_squeeze
+      - regime_momentum
+    order_type: market
+    # Long confirm: price >= prev_close * (1 - gap_tol)
+    # Short confirm: price <= prev_close * (1 + gap_tol)
+    gap_tolerance: 0.003
+    window_open_hour: 9
+    window_open_minute: 45
+    window_close_hour: 10
+    window_close_minute: 0
+
+# Gap filter: skip signals where overnight gap exceeds threshold
+gap_filter:
+  max_gap_pct: 0.03   # 3% max gap up or down from prev_close
+
+# Daily entry limits
+entry_limits:
+  max_daily_entries: 3    # max new positions per day
+  max_long_positions: 6   # hard cap on concurrent longs
+  max_short_positions: 3  # hard cap on concurrent shorts
+
+# Per-strategy SL/TP configuration
+strategies:
+  rsi_mean_reversion:
+    sl_atr_mult_long: 2.0
+    sl_atr_mult_short: 2.5
+    tp_rsi_long: 50.0       # exit long when RSI > 50
+    tp_rsi_short: 50.0      # exit short when RSI < 50
+    tp_bb_pct_b_long: 0.50  # exit long when pct_b > 0.50
+    tp_bb_pct_b_short: 0.50 # exit short when pct_b < 0.50
+    max_hold_days: 5
+    trailing_stop: false
+
+  overbought_short:
+    sl_atr_mult_long: 2.5   # only short direction used
+    sl_atr_mult_short: 2.5
+    tp_rsi_short: 55.0      # exit short when RSI < 55
+    tp_bb_pct_b_short: 0.50
+    max_hold_days: 5
+    trailing_stop: false
+
+  adx_pullback:
+    sl_atr_mult_long: 1.5
+    sl_atr_mult_short: 1.5  # not used (long-only strategy)
+    tp_atr_mult: 2.5         # take profit at entry + 2.5 * ATR
+    max_hold_days: 7
+    trailing_stop: true
+    trailing_atr_mult: 2.0
+
+  bb_squeeze:
+    sl_atr_mult_long: 1.5
+    sl_atr_mult_short: 1.5
+    tp_rsi_long: 75.0
+    tp_rsi_short: 25.0
+    max_hold_days: 5
+    trailing_stop: false
+
+  regime_momentum:
+    sl_atr_mult_long: 1.5
+    sl_atr_mult_short: 1.5  # not used (long-only strategy)
+    tp_atr_mult: null        # no fixed TP; trailing stop only
+    max_hold_days: 7
+    trailing_stop: true
+    trailing_atr_mult: 2.0
+
+# Emergency exits (override all other rules, Day 1 only)
+emergency_exit:
+  pct_loss_confirm: 0.07    # -7% over 2 consecutive bars triggers exit
+  pct_loss_immediate: 0.10  # -10% single-bar triggers immediate exit
+  bars_for_confirm: 2
+
+# Re-entry block: same symbol blocked for rest of trading day after close
+reentry_block:
+  block_all_strategies: true  # block symbol regardless of which strategy closed it
+  reset_on_new_day: true      # clear block list at market open each day
