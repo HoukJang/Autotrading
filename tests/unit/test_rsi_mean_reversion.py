@@ -124,21 +124,21 @@ class TestNoSignal:
         assert strategy.on_context(ctx) is None
 
     def test_no_signal_when_adx_too_high(self):
-        """ADX >= 23 means trending market -- no mean reversion."""
+        """ADX >= 20 means trending market -- no mean reversion."""
         strategy = RsiMeanReversion()
-        ctx = _make_ctx(indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=23.0))
+        ctx = _make_ctx(indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=20.0))
         assert strategy.on_context(ctx) is None
 
-    def test_no_signal_when_adx_exactly_23(self):
-        """ADX == 23 is the boundary -- should NOT trigger."""
+    def test_no_signal_when_adx_exactly_20(self):
+        """ADX == 20 is the boundary -- should NOT trigger."""
         strategy = RsiMeanReversion()
-        ctx = _make_ctx(indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=23.0))
+        ctx = _make_ctx(indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=20.0))
         assert strategy.on_context(ctx) is None
 
-    def test_signal_when_adx_below_23(self):
-        """ADX just below 23 should allow entry."""
+    def test_signal_when_adx_below_20(self):
+        """ADX just below 20 should allow entry."""
         strategy = RsiMeanReversion()
-        ctx = _make_ctx(indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=22.9))
+        ctx = _make_ctx(indicators=_full_indicators(rsi=20.0, pct_b=0.02, adx=19.9))
         signal = strategy.on_context(ctx)
         assert signal is not None
         assert signal.direction == "long"

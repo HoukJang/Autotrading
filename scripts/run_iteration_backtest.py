@@ -1,10 +1,10 @@
 """Iteration Backtest Runner -- reusable driver for strategy optimization loop.
 
-Runs BatchBacktester on cached historical bars, fetches S&P 500 benchmark via
-yfinance for the same date range, and prints a side-by-side comparison table
-with a PASS/FAIL judgment.
+Runs BatchBacktester on cached historical bars with SPY-based regime detection,
+fetches S&P 500 benchmark via yfinance for the same date range, and prints a
+side-by-side comparison table with a PASS/FAIL judgment.
 
-Success criteria:  Sharpe >= 1.0  OR  Calmar >= 1.0
+Success criteria:  Strategy total return > S&P 500 total return
 
 Usage:
     # Single period run:
@@ -62,9 +62,6 @@ _PERIOD_FILES = {
 
 _OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "data", "backtest_results", "iterations")
 
-_PASS_SHARPE = 1.0
-_PASS_CALMAR = 1.0
-
 _TRADING_DAYS_PER_YEAR = 252
 
 
@@ -113,10 +110,78 @@ def extract_date_range(bars_by_symbol: dict) -> tuple[date, date]:
 
 
 # ---------------------------------------------------------------------------
+# SPY data loading for regime detection
+# ---------------------------------------------------------------------------
+
+def load_spy_bars(start_date: date, end_date: date) -> list:
+    """Load SPY daily bars for regime detection via yfinance.
+
+    Fetches extra warmup days before start_date so the regime classifier
+    has enough history for indicator computation (60+ bars needed).
+
+    Returns:
+        List of Bar objects for SPY, oldest first.
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        logger.warning("yfinance not installed -- regime detection disabled.")
+        return []
+
+    from autotrader.core.types import Bar, Timeframe
+
+    # Need 90 calendar days before start for indicator warmup (~60 trading days)
+    warmup_start = start_date - timedelta(days=90)
+    end_dl = end_date + timedelta(days=1)
+
+    logger.info("Fetching SPY bars from %s to %s (with warmup)", warmup_start, end_dl)
+
+    try:
+        df = yf.download("SPY", start=str(warmup_start), end=str(end_dl), progress=False)
+    except Exception as exc:
+        logger.warning("SPY download failed: %s -- regime detection disabled.", exc)
+        return []
+
+    if df is None or df.empty:
+        logger.warning("No SPY data returned -- regime detection disabled.")
+        return []
+
+    # Handle MultiIndex columns from yfinance
+    def _col(name):
+        col = df[name]
+        if hasattr(col, "columns"):
+            col = col.iloc[:, 0]
+        return col
+
+    spy_bars = []
+    for idx in df.index:
+        bar_date = idx.date() if hasattr(idx, "date") else idx
+        ts = datetime(bar_date.year, bar_date.month, bar_date.day, 9, 30,
+                      tzinfo=__import__("datetime").timezone.utc)
+        spy_bars.append(Bar(
+            symbol="SPY",
+            timestamp=ts,
+            open=float(_col("Open").loc[idx]),
+            high=float(_col("High").loc[idx]),
+            low=float(_col("Low").loc[idx]),
+            close=float(_col("Close").loc[idx]),
+            volume=int(_col("Volume").loc[idx]),
+            timeframe=Timeframe.DAILY,
+        ))
+
+    logger.info("Loaded %d SPY bars for regime detection", len(spy_bars))
+    return spy_bars
+
+
+# ---------------------------------------------------------------------------
 # Backtest execution
 # ---------------------------------------------------------------------------
 
-def run_backtest(bars_by_symbol: dict, capital: float = 100_000.0) -> Any:
+def run_backtest(
+    bars_by_symbol: dict,
+    capital: float = 100_000.0,
+    spy_bars: list | None = None,
+) -> Any:
     """Execute a single BatchBacktester run and return the result."""
     from autotrader.backtest.batch_simulator import BatchBacktester
 
@@ -126,7 +191,7 @@ def run_backtest(bars_by_symbol: dict, capital: float = 100_000.0) -> Any:
     )
 
     t0 = time.time()
-    result = bt.run(bars_by_symbol)
+    result = bt.run(bars_by_symbol, spy_bars=spy_bars)
     elapsed = time.time() - t0
 
     n_trades = result.metrics.get("total_trades", 0)
@@ -321,12 +386,15 @@ def print_per_strategy_metrics(per_strategy: dict) -> None:
             print(f"    Exits: {reasons_str}")
 
 
-def print_judgment(strategy_metrics: dict) -> bool:
-    """Print PASS/FAIL based on success criteria. Returns True if passed."""
-    sharpe = strategy_metrics.get("sharpe_ratio", 0) or 0
-    calmar = strategy_metrics.get("calmar_ratio", 0) or 0
+def print_judgment(strategy_metrics: dict, benchmark: dict) -> bool:
+    """Print PASS/FAIL based on success criteria. Returns True if passed.
 
-    passed = sharpe >= _PASS_SHARPE or calmar >= _PASS_CALMAR
+    Success criteria: Strategy total return > S&P 500 total return.
+    """
+    strat_return = strategy_metrics.get("total_return_pct", 0) or 0
+    sp500_return = benchmark.get("total_return_pct", 0) or 0
+
+    passed = strat_return > sp500_return
 
     print(f"\n  {'=' * 50}")
     if passed:
@@ -334,13 +402,16 @@ def print_judgment(strategy_metrics: dict) -> bool:
     else:
         print(f"  RESULT: FAIL")
     print(f"  {'=' * 50}")
-    print(f"  Criteria:  Sharpe >= {_PASS_SHARPE}  OR  Calmar >= {_PASS_CALMAR}")
-    print(f"  Achieved:  Sharpe = {sharpe:.3f}  |  Calmar = {calmar:.3f}")
+    print(f"  Criteria:  Strategy return > S&P 500 return")
+    print(f"  Strategy:  {strat_return:+.1f}%")
+    print(f"  S&P 500:   {sp500_return:+.1f}%")
 
-    if not passed:
-        sharpe_gap = max(0, _PASS_SHARPE - sharpe)
-        calmar_gap = max(0, _PASS_CALMAR - calmar)
-        print(f"  Gap:       Sharpe needs +{sharpe_gap:.3f}  |  Calmar needs +{calmar_gap:.3f}")
+    if passed:
+        alpha = strat_return - sp500_return
+        print(f"  Alpha:     +{alpha:.1f}%")
+    else:
+        gap = sp500_return - strat_return
+        print(f"  Gap:       {gap:.1f}% behind S&P 500")
 
     return passed
 
@@ -392,9 +463,7 @@ def build_result_json(
         },
         "passed": passed,
         "pass_criteria": {
-            "sharpe_threshold": _PASS_SHARPE,
-            "calmar_threshold": _PASS_CALMAR,
-            "logic": "sharpe >= threshold OR calmar >= threshold",
+            "logic": "strategy total return > S&P 500 total return",
         },
         "strategy_metrics": result.metrics,
         "per_strategy_metrics": result.per_strategy_metrics,
@@ -445,22 +514,25 @@ def run_single_period(
     start_date, end_date = extract_date_range(bars_by_symbol)
     logger.info("Date range: %s to %s", start_date, end_date)
 
-    # 3. Run backtest
+    # 3. Load SPY bars for regime detection
+    spy_bars = load_spy_bars(start_date, end_date)
+
+    # 4. Run backtest with regime-based allocation
     t0 = time.time()
-    result = run_backtest(bars_by_symbol, capital)
+    result = run_backtest(bars_by_symbol, capital, spy_bars=spy_bars)
     elapsed = time.time() - t0
 
-    # 4. Fetch S&P 500 benchmark
+    # 5. Fetch S&P 500 benchmark
     benchmark = fetch_sp500_benchmark(start_date, end_date)
 
-    # 5. Print comparison table
+    # 6. Print comparison table
     print_comparison_table(iteration, period, result.metrics, benchmark, start_date, end_date)
 
-    # 6. Print per-strategy breakdown
+    # 7. Print per-strategy breakdown
     print_per_strategy_metrics(result.per_strategy_metrics)
 
-    # 7. Print PASS/FAIL judgment
-    passed = print_judgment(result.metrics)
+    # 8. Print PASS/FAIL judgment (beat S&P 500)
+    passed = print_judgment(result.metrics, benchmark)
 
     # 8. Build and save JSON
     data = build_result_json(

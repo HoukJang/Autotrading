@@ -52,9 +52,9 @@ from autotrader.execution.exit_rules import (
 )
 from autotrader.indicators.base import IndicatorSpec
 from autotrader.indicators.engine import IndicatorEngine
-from autotrader.strategy.consecutive_down import ConsecutiveDown
-# from autotrader.strategy.ema_cross_trend import EmaCrossTrend  # disabled after backtest RED LINE fail
+from autotrader.strategy.breakout_momentum import BreakoutMomentum
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
+from autotrader.backtest.regime_classifier import RegimeClassifier, Regime
 
 logger = logging.getLogger(__name__)
 
@@ -63,34 +63,32 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Strategies in each entry group
-_GROUP_A: frozenset[str] = frozenset({"rsi_mean_reversion", "consecutive_down"})
+_GROUP_A: frozenset[str] = frozenset({"breakout_momentum", "rsi_mean_reversion"})
 _GROUP_B: frozenset[str] = frozenset()
 
 # Position sizing constants
 _RISK_PER_TRADE_PCT: float = 0.02       # 2% of equity at risk per trade (legacy default)
-_MAX_POSITION_PCT: float = 0.20         # hard cap: max 20% of equity per position
-_MAX_LONG_POSITIONS: int = 4            # hard cap on concurrent long positions
+_MAX_POSITION_PCT: float = 0.25         # hard cap: max 25% of equity per position
+_MAX_LONG_POSITIONS: int = 8            # hard cap on concurrent long positions (Iter 25: reverted to Iter 23)
 _MAX_SHORT_POSITIONS: int = 3           # hard cap on concurrent short positions
-_MAX_TOTAL_POSITIONS: int = 5           # overall position cap
+_MAX_TOTAL_POSITIONS: int = 9           # overall position cap (Iter 25: reverted to Iter 23)
 _MAX_LOSS_PER_TRADE_PCT: float = 0.03   # hard cap: max 3% of equity loss per trade
-_MAX_PORTFOLIO_HEAT_PCT: float = 0.25   # max 25% of equity exposed in open positions
+_MAX_PORTFOLIO_HEAT_PCT: float = 0.35   # max 35% of equity exposed (Iter 26: reverted to Iter 23)
 
 # --- Per-Strategy GDR Configuration ---
 _PER_STRATEGY_GDR: bool = True          # Toggle: True = per-strategy, False = portfolio-level
 
 # Per-strategy base risk (replaces single _RISK_PER_TRADE_PCT for all)
 _STRATEGY_BASE_RISK: dict[str, float] = {
-    "rsi_mean_reversion": 0.01,          # 1% (reduced from 2%)
-    "consecutive_down": 0.015,           # 1.5% (reduced: wider SL compensated by lower risk)
-    "ema_cross_trend": 0.015,            # 1.5%
+    "breakout_momentum": 0.020,          # 2.0% (default, overridden by regime)
+    "rsi_mean_reversion": 0.015,         # 1.5% (default, overridden by regime)
 }
 _DEFAULT_BASE_RISK: float = 0.02        # fallback for unknown strategies
 
 # Per-strategy GDR thresholds: (tier1_dd, tier2_dd)
 _STRATEGY_GDR_THRESHOLDS: dict[str, tuple[float, float]] = {
-    "rsi_mean_reversion": (0.015, 0.035), # Tier 1 at 1.5% DD, Tier 2 at 3.5% DD
-    "consecutive_down": (0.02, 0.04),     # Tier 1 at 2% DD, Tier 2 at 4% DD
-    "ema_cross_trend": (0.04, 0.08),      # Tier 1 at 4% DD, Tier 2 at 8% DD
+    "breakout_momentum": (0.04, 0.08),   # Iter 25: reverted to Iter 23 (was 0.03, 0.06)
+    "rsi_mean_reversion": (0.02, 0.04),  # Iter 25: reverted to Iter 23 (was 0.015, 0.03)
 }
 
 # GDR Risk Multipliers (Tier 2 = HALT, 0 entries)
@@ -107,11 +105,11 @@ _GDR_STRATEGY_ENTRIES: dict[int, int] = {
     2: 0,   # Tier 2: 0 entries (halted)
 }
 
-_MAX_DAILY_ENTRIES: int = 3             # portfolio-level total cap (was 2)
+_MAX_DAILY_ENTRIES: int = 3             # portfolio-level total cap
 
 # Portfolio Safety Net (overrides per-strategy GDR when total DD is extreme)
-_PORTFOLIO_SAFETY_NET_DD: float = 0.12          # 12% total portfolio DD
-_PORTFOLIO_SAFETY_NET_RECOVERY: float = 0.08    # resume per-strategy GDR when DD < 8%
+_PORTFOLIO_SAFETY_NET_DD: float = 0.12          # 12% total portfolio DD (Iter 26: reverted to Iter 23)
+_PORTFOLIO_SAFETY_NET_RECOVERY: float = 0.08    # resume per-strategy GDR when DD < 8% (Iter 26: reverted to Iter 23)
 _PORTFOLIO_SAFETY_NET_ENTRIES: int = 1           # 1 entry total when safety net active
 _PORTFOLIO_SAFETY_NET_RISK: float = 0.005        # 0.5% risk when safety net active
 
@@ -132,10 +130,14 @@ _GDR_MAX_ENTRIES: dict[int, int] = {
     2: 1,   # Tier 2: 1 entry/day
 }
 
-_STRATEGY_NAMES: list[str] = ["rsi_mean_reversion", "consecutive_down"]
+_STRATEGY_NAMES: list[str] = ["breakout_momentum", "rsi_mean_reversion"]
 
 # Soft per-strategy position cap (applied when 2+ strategies have pending signals)
-_SOFT_STRATEGY_CAP: int = 2             # max positions per strategy under multi-strategy competition
+_SOFT_STRATEGY_CAP: dict[str, int] = {
+    "breakout_momentum": 2,      # BM: 2 positions max (LOCKED - do not change)
+    "rsi_mean_reversion": 3,     # MR: 3 positions max (expanded for more deployment)
+}
+_DEFAULT_STRATEGY_CAP: int = 2          # fallback for unknown strategies
 
 # Minimum bars needed before a symbol can generate a valid signal
 _MIN_BARS_WARMUP: int = 60
@@ -154,8 +156,8 @@ _TOP_N_CANDIDATES: int = 12
 
 # Strategies instantiated once per simulator instance
 _STRATEGY_CLASSES = [
+    BreakoutMomentum,
     RsiMeanReversion,
-    ConsecutiveDown,
 ]
 
 
@@ -588,6 +590,8 @@ class BatchBacktester:
         self._portfolio_safety_net_active: bool = False
         # Regime guard: symbols pending forced close on next day
         self._regime_guard_pending: set[str] = set()
+        # Regime classifier state
+        self._regime_classifier = RegimeClassifier()
 
     # ------------------------------------------------------------------
     # Public API
@@ -597,6 +601,7 @@ class BatchBacktester:
         self,
         bars_by_symbol: dict[str, list[Bar]],
         strategy_filter: list[str] | None = None,
+        spy_bars: list[Bar] | None = None,
     ) -> BatchBacktestResult:
         """Execute the full historical simulation.
 
@@ -610,6 +615,18 @@ class BatchBacktester:
         """
         # Reset all state for a fresh run
         self._reset()
+
+        # Initialize regime classifier for SPY-based allocation
+        self._regime_classifier = RegimeClassifier()
+
+        # Build SPY lookup and indicator engine
+        spy_by_date: dict[date, Bar] = {}
+        spy_history: deque[Bar] = deque(maxlen=500)
+        spy_ind_engine: IndicatorEngine | None = None
+        if spy_bars:
+            for bar in spy_bars:
+                spy_by_date[bar.timestamp.date()] = bar
+            spy_ind_engine = self._build_spy_indicator_engine()
 
         # Determine the common date range across all symbols
         all_dates = self._extract_sorted_dates(bars_by_symbol)
@@ -658,6 +675,14 @@ class BatchBacktester:
                     continue
                 day_bars[sym] = bar
                 symbol_histories[sym].append(bar)
+
+            # --- Step 1b: Update regime from SPY data ---
+            spy_bar = spy_by_date.get(trading_date)
+            if spy_bar and spy_ind_engine:
+                spy_history.append(spy_bar)
+                if len(spy_history) >= 60:
+                    spy_indicators = spy_ind_engine.compute(spy_history)
+                    self._update_regime(spy_indicators, spy_bar)
 
             # --- Step 2: Execute pending entries (from last night's scan) ---
             entries_today = 0
@@ -737,6 +762,7 @@ class BatchBacktester:
             "strategy_base_risk": dict(_STRATEGY_BASE_RISK),
             "strategy_gdr_thresholds": dict(_STRATEGY_GDR_THRESHOLDS),
             "portfolio_safety_net_dd": _PORTFOLIO_SAFETY_NET_DD,
+            "regime_allocation": "dynamic (SPY-based)",
         }
 
         logger.info(
@@ -887,10 +913,6 @@ class BatchBacktester:
                     _GDR_LEGACY_RISK_MULT[self._gdr_tier],
                 )
 
-        # Count how many strategies have pending signals (for soft cap logic)
-        strategies_with_signals: set[str] = {sr.strategy for _, sr, _ in pending_signals}
-        multi_strategy_mode = len(strategies_with_signals) >= 2
-
         entries = 0
         total_positions = len(self._positions)
 
@@ -931,6 +953,24 @@ class BatchBacktester:
                     )
                     continue
 
+            # Regime-based entry blocking
+            if hasattr(self, '_regime_classifier'):
+                regime = self._regime_classifier.confirmed_regime
+                alloc = RegimeClassifier.get_allocation(regime)
+                if strategy_name == "breakout_momentum" and alloc.get("breakout_blocked"):
+                    logger.debug(
+                        "Regime %s: breakout entry blocked for %s",
+                        regime.value, sym,
+                    )
+                    continue
+                if (strategy_name == "rsi_mean_reversion"
+                        and scan_result.direction == "short"
+                        and alloc.get("mr_short_blocked")):
+                    logger.debug(
+                        "Regime %s: MR short blocked for %s",
+                        regime.value, sym,
+                    )
+                    continue
             bar = day_bars.get(sym)
             if bar is None:
                 continue
@@ -953,19 +993,19 @@ class BatchBacktester:
             if direction == "short" and shorts >= _MAX_SHORT_POSITIONS:
                 continue
 
-            # Soft per-strategy cap: when 2+ strategies are competing for slots,
-            # limit any single strategy to _SOFT_STRATEGY_CAP open positions.
-            if multi_strategy_mode:
-                strategy_count = sum(
-                    1 for p in self._positions.values()
-                    if p.held.strategy == strategy_name
+            # Per-strategy position cap: always limit each strategy to
+            # its configured cap to prevent signal flooding.
+            strategy_count = sum(
+                1 for p in self._positions.values()
+                if p.held.strategy == strategy_name
+            )
+            cap = _SOFT_STRATEGY_CAP.get(strategy_name, _DEFAULT_STRATEGY_CAP)
+            if strategy_count >= cap:
+                logger.debug(
+                    "Strategy cap: %s already has %d/%d positions, skipping %s",
+                    strategy_name, strategy_count, cap, sym,
                 )
-                if strategy_count >= _SOFT_STRATEGY_CAP:
-                    logger.debug(
-                        "Soft strategy cap: %s already has %d/%d positions, skipping %s",
-                        strategy_name, strategy_count, _SOFT_STRATEGY_CAP, sym,
-                    )
-                    continue
+                continue
 
             # Apply gap filter: compare today's open to yesterday's close
             gap_pct = (bar.open - prev_close) / prev_close if prev_close > 0 else 0.0
@@ -1158,14 +1198,14 @@ class BatchBacktester:
                     )
                     to_close.append((sym, "max_loss_cap", cap_exit_price))
 
-            # Regime guard detection for rsi_mean_reversion (detect today, close tomorrow)
-            if held.strategy == "rsi_mean_reversion" and exit_price is None:
+            # Regime guard detection for mean reversion strategies (detect today, close tomorrow)
+            if held.strategy in ("rsi_mean_reversion",) and exit_price is None:
                 current_adx = indicators.get("ADX_14")
                 if (
                     isinstance(current_adx, (int, float))
                     and held.entry_adx > 0
-                    and current_adx > 23.0
-                    and (current_adx - held.entry_adx) >= 3.0
+                    and current_adx > 25.0
+                    and (current_adx - held.entry_adx) >= 5.0
                 ):
                     self._regime_guard_pending.add(sym)
                     logger.info(
@@ -1329,8 +1369,8 @@ class BatchBacktester:
                         trailing_price = trail_stop
 
         # --- Time-based exit ---
-        max_hold = self._max_hold_days_override or _MAX_HOLD_DAYS.get(strategy, 5)
-        time_hit = held.bars_held >= max_hold
+        max_hold = self._max_hold_days_override or _MAX_HOLD_DAYS.get(strategy)
+        time_hit = max_hold is not None and held.bars_held >= max_hold
 
         # --- Determine which exit fires first ---
         # Priority: SL > TP > Trailing > Time
@@ -1584,6 +1624,8 @@ class BatchBacktester:
         self._portfolio_safety_net_active = False
         # Regime guard state
         self._regime_guard_pending = set()
+        # Regime classifier state
+        self._regime_classifier = RegimeClassifier()
 
     def _update_gdr(self) -> None:
         """Update GDR: dispatches to per-strategy or legacy portfolio-level GDR."""
@@ -1676,8 +1718,8 @@ class BatchBacktester:
         """Check portfolio-level drawdown for safety net activation.
 
         The portfolio safety net overrides per-strategy GDR when the total
-        portfolio drawdown exceeds _PORTFOLIO_SAFETY_NET_DD (12%). It deactivates
-        when DD recovers below _PORTFOLIO_SAFETY_NET_RECOVERY (8%).
+        portfolio drawdown exceeds _PORTFOLIO_SAFETY_NET_DD (8%). It deactivates
+        when DD recovers below _PORTFOLIO_SAFETY_NET_RECOVERY (5%).
         """
         realized_eq = self._compute_realized_equity()
         self._equity_history.append(realized_eq)
@@ -1708,6 +1750,34 @@ class BatchBacktester:
                     dd * 100, _PORTFOLIO_SAFETY_NET_RECOVERY * 100,
                     realized_eq, rolling_peak,
                 )
+
+    def _update_regime(self, spy_indicators: dict, spy_bar: Bar) -> None:
+        """Update regime classification from SPY indicators."""
+        adx = spy_indicators.get("ADX_14")
+        ema_50 = spy_indicators.get("EMA_50")
+        bbands = spy_indicators.get("BBANDS_20")
+
+        if any(v is None for v in [adx, ema_50, bbands]):
+            return
+        if not isinstance(bbands, dict):
+            return
+
+        bb_width = bbands.get("upper", 0) - bbands.get("lower", 0)
+        middle = bbands.get("middle", 1)
+        bb_ratio = bb_width / middle if middle > 0 else 1.0
+
+        self._regime_classifier.update(
+            adx=adx, close=spy_bar.close, ema_50=ema_50, bb_ratio=bb_ratio,
+        )
+
+    @staticmethod
+    def _build_spy_indicator_engine() -> IndicatorEngine:
+        """Build indicator engine for SPY regime detection."""
+        engine = IndicatorEngine()
+        engine.register(IndicatorSpec(name="ADX", params={"period": 14}))
+        engine.register(IndicatorSpec(name="EMA", params={"period": 50}))
+        engine.register(IndicatorSpec(name="BBANDS", params={"period": 20, "num_std": 2.0}))
+        return engine
 
     def _calculate_qty(
         self,
@@ -1744,8 +1814,13 @@ class BatchBacktester:
             # Portfolio safety net overrides everything
             effective_risk_pct = _PORTFOLIO_SAFETY_NET_RISK
         elif self._use_per_strategy_gdr and strategy is not None:
-            # Per-strategy base risk with per-strategy GDR multiplier
-            base_risk = _STRATEGY_BASE_RISK.get(strategy, _DEFAULT_BASE_RISK)
+            # Regime-based risk: dynamic base_risk from allocation table
+            if hasattr(self, '_regime_classifier'):
+                regime = self._regime_classifier.confirmed_regime
+                alloc = RegimeClassifier.get_allocation(regime)
+                base_risk = alloc.get(strategy, _STRATEGY_BASE_RISK.get(strategy, _DEFAULT_BASE_RISK))
+            else:
+                base_risk = _STRATEGY_BASE_RISK.get(strategy, _DEFAULT_BASE_RISK)
             effective_risk_pct = base_risk * gdr_risk_mult
         else:
             # Legacy portfolio-level GDR

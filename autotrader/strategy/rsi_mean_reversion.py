@@ -1,7 +1,7 @@
 """RSI Mean Reversion strategy for non-trending (low ADX) markets.
 
 Enters long when RSI oversold + BB %B near lower band, and enters short when
-RSI overbought + BB %B near upper band.  Only trades when ADX < 23 (non-trending)
+RSI overbought + BB %B near upper band.  Only trades when ADX < 20 (non-trending)
 and ADX slope has not risen by more than 1.5 points over the last 3 bars
 (regime transitioning to trend).
 """
@@ -28,8 +28,8 @@ class RsiMeanReversion(Strategy):
     """Bidirectional mean-reversion strategy using RSI, Bollinger Bands, and ADX.
 
     Entry:
-        Long  -- RSI < 30, BB %B < 0.05, ADX < 23, ADX slope <= 1.5 over 3 bars
-        Short -- RSI > 75, BB %B > 0.95, ADX < 23, ADX slope <= 1.5 over 3 bars
+        Long  -- RSI < 30, BB %B < 0.05, ADX < 20, ADX slope <= 1.5 over 3 bars
+        Short -- RSI > 75, BB %B > 0.95, ADX < 20, ADX slope <= 1.5 over 3 bars
 
     Exit:
         Long target  -- RSI > 50 OR pct_b > 0.50
@@ -53,7 +53,7 @@ class RsiMeanReversion(Strategy):
     RSI_OVERBOUGHT = 75.0
     BB_LONG_ENTRY_PCT_B = 0.05
     BB_SHORT_ENTRY_PCT_B = 0.95
-    ADX_MAX = 23.0
+    ADX_MAX = 20.0
 
     # Exit thresholds
     RSI_LONG_EXIT = 50.0

@@ -376,7 +376,7 @@ class TestTwoStageSLUpgrade:
     """Tests for the 2-stage SL upgrade (breakeven + profit protection)."""
 
     def test_two_stage_constants_match_spec(self):
-        """2-stage SL constants should match Iteration #1 optimization spec."""
+        """2-stage SL constants should match Iteration #26 (Iter 23 revert) spec."""
         assert _STAGE1_BE_ACTIVATION_ATR == 1.5
         assert _STAGE2_PROFIT_ACTIVATION_ATR == 1.2
         assert _STAGE2_PROFIT_LOCK_ATR == 0.4
@@ -441,7 +441,7 @@ class TestTwoStageSLUpgrade:
         assert decision.reason == "stop_loss"
 
     def test_stage2_profit_protection_long(self):
-        """Long: SL moves to entry+0.4ATR when price reaches +1.2 ATR."""
+        """Long: SL moves to entry+0.4ATR when price reaches +1.2 ATR (Iter 26: reverted to Iter 23)."""
         engine = ExitRuleEngine()
         atr = 2.0
         entry_price = 100.0
@@ -461,8 +461,8 @@ class TestTwoStageSLUpgrade:
         decision = engine.evaluate(
             position=pos,
             bar_close=100.79,
-            bar_high=101.0,
-            bar_low=100.5,
+            bar_high=101.2,
+            bar_low=100.6,
             indicators={"ATR_14": atr, "RSI_14": 45.0, "BBANDS_20": {"pct_b": 0.4}},
             current_date_et=date(2026, 2, 25),
         )
@@ -470,7 +470,7 @@ class TestTwoStageSLUpgrade:
         assert decision.reason == "stop_loss"
 
     def test_stage2_profit_protection_short(self):
-        """Short: SL moves to entry-0.4ATR when price drops -1.2 ATR."""
+        """Short: SL moves to entry-0.4ATR when price drops -1.2 ATR (Iter 26: reverted to Iter 23)."""
         engine = ExitRuleEngine()
         atr = 2.0
         entry_price = 100.0
@@ -543,14 +543,14 @@ class TestTwoStageSLUpgrade:
             highest_price=entry_price + 1.5 * atr,  # 103.0, above Stage 2 threshold
             lowest_price=entry_price,
         )
-        # Stage 2 SL = 100 + 0.4*2 = 100.8
+        # Stage 2 SL = 100 + 0.5*2 = 101.0
         # Stage 1 SL would be 100 (entry)
-        # Price at 100.5 should trigger exit (below 100.8)
+        # Price at 100.8 should trigger exit (below 101.0)
         decision = engine.evaluate(
             position=pos,
-            bar_close=100.5,
-            bar_high=101.0,
-            bar_low=100.0,
+            bar_close=100.8,
+            bar_high=101.2,
+            bar_low=100.5,
             indicators={"ATR_14": atr, "RSI_14": 45.0, "BBANDS_20": {"pct_b": 0.4}},
             current_date_et=date(2026, 2, 25),
         )
@@ -813,6 +813,22 @@ class TestTrailingStop:
         """ema_cross_trend trailing activates after 1.5 ATR profit."""
         assert _TRAILING_ACTIVATION_ATR["ema_cross_trend"] == 1.5
 
+    def test_breakout_momentum_trailing_activation_at_1_5_atr(self):
+        """breakout_momentum trailing activates after 1.5 ATR profit (Iter 25 revert)."""
+        assert _TRAILING_ACTIVATION_ATR["breakout_momentum"] == 1.5
+
+    def test_breakout_momentum_uses_trailing_stop(self):
+        """breakout_momentum should be in _TRAILING_STRATEGIES."""
+        assert "breakout_momentum" in _TRAILING_STRATEGIES
+
+    def test_breakout_momentum_tp_at_4_0x_atr(self):
+        """breakout_momentum TP should be 4.0x ATR."""
+        assert _TP_ATR_MULT["breakout_momentum"] == 4.0
+
+    def test_breakout_momentum_sl_at_2_5x_atr(self):
+        """breakout_momentum SL should be 2.5x ATR."""
+        assert _SL_ATR_MULT["breakout_momentum"]["long"] == 2.5
+
     def test_ema_cross_trend_trailing_stop_triggers_long(self):
         """ema_cross_trend long trailing stop should trigger after activation and pullback."""
         engine = ExitRuleEngine()
@@ -833,7 +849,7 @@ class TestTrailingStop:
             lowest_price=entry_price,
         )
         # Trailing stop = max(entry, highest - 2.0*ATR) = max(100, 108-4) = 104.0
-        # Close at 103.9 should trigger trailing stop
+        # Close at 103.9 should trigger trailing stop (Iter 26: reverted to Iter 23)
         bar_close = 103.9
         decision = engine.evaluate(
             position=pos,
@@ -866,7 +882,7 @@ class TestTrailingStop:
             lowest_price=lowest_price,
         )
         # Trailing stop = min(entry, lowest + 2.0*ATR) = min(100, 92+4) = 96.0
-        # Close at 96.1 should trigger trailing stop
+        # Close at 96.1 should trigger trailing stop (Iter 26: reverted to Iter 23)
         bar_close = 96.1
         decision = engine.evaluate(
             position=pos,
@@ -977,10 +993,11 @@ class TestTimeBasedExit:
         assert decision.reason != "time_exit"
 
     def test_max_hold_days_constants_match_spec(self):
-        """MAX_HOLD_DAYS should match the Iteration #3 spec values."""
+        """MAX_HOLD_DAYS should match spec values (no BM time limit)."""
         assert _MAX_HOLD_DAYS["rsi_mean_reversion"] == 5
         assert _MAX_HOLD_DAYS["consecutive_down"] == 5
         assert _MAX_HOLD_DAYS["ema_cross_trend"] == 10
+        assert "breakout_momentum" not in _MAX_HOLD_DAYS
         assert "volume_divergence" not in _MAX_HOLD_DAYS
         assert "ema_pullback" not in _MAX_HOLD_DAYS
         assert "adx_breakout" not in _MAX_HOLD_DAYS

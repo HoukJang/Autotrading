@@ -129,6 +129,7 @@ ALL_STRATEGY_NAMES = {
     "consecutive_down",
     "ema_pullback",
     "volume_divergence",
+    "breakout_momentum",
 }
 
 SWING_RISK_CONFIG = RiskConfig(
@@ -267,15 +268,22 @@ class TestRegimeDetector:
         """Verify that regime weights sum to expected totals."""
         detector = RegimeDetector()
 
+        expected_sums = {
+            MarketRegime.TREND: 1.0,
+            MarketRegime.RANGING: 1.0,
+            MarketRegime.HIGH_VOLATILITY: 1.0,
+            MarketRegime.UNCERTAIN: 0.90,
+        }
         for regime in MarketRegime:
             weights = detector.get_weights(regime)
             total = sum(weights.values())
-            assert abs(total - 1.0) < 1e-9, (
-                f"{regime.value} weights sum to {total}, expected 1.0"
+            expected = expected_sums[regime]
+            assert abs(total - expected) < 1e-9, (
+                f"{regime.value} weights sum to {total}, expected {expected}"
             )
 
     def test_all_strategies_present_in_weights(self) -> None:
-        """Every regime must include weights for all 4 strategies."""
+        """Every regime must include weights for all 5 strategies."""
         detector = RegimeDetector()
         for regime in MarketRegime:
             weights = detector.get_weights(regime)
@@ -289,9 +297,9 @@ class TestAllocationEnginePositionSizing:
     """Verify AllocationEngine computes correct position sizes per regime."""
 
     def test_trend_regime_ema_pullback_sizing(self) -> None:
-        """In TREND regime, ema_pullback gets 40% of equity.
+        """In TREND regime, ema_pullback gets 28% of equity.
 
-        With $3000 equity and price $100, that is $1200 max allocation => 12 shares.
+        With $3000 equity and price $100, that is $840 max allocation => 8 shares.
         """
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
@@ -302,13 +310,13 @@ class TestAllocationEnginePositionSizing:
             equity=3000.0,
             regime=MarketRegime.TREND,
         )
-        # 40% of $3000 = $1200 => $1200 / $100 = 12 shares
-        assert shares == 12
+        # 28% of $3000 = $840 => $840 / $100 = 8 shares
+        assert shares == 8
 
     def test_trend_regime_rsi_mean_reversion_sizing(self) -> None:
-        """In TREND regime, rsi_mean_reversion gets 15% of equity.
+        """In TREND regime, rsi_mean_reversion gets 0% of equity (disabled).
 
-        With $3000 equity and price $100, that is $450 max allocation => 4 shares.
+        With $3000 equity and price $100, that is $0 allocation => 0 shares.
         """
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
@@ -319,12 +327,12 @@ class TestAllocationEnginePositionSizing:
             equity=3000.0,
             regime=MarketRegime.TREND,
         )
-        # 15% of $3000 = $450 => $450 / $100 = 4 shares
-        assert shares == 4
+        # 0% of $3000 = $0 => 0 shares
+        assert shares == 0
 
     def test_ema_pullback_produces_more_shares_than_rsi_mr(self) -> None:
-        """ema_pullback (40%) should get a meaningfully larger position than
-        rsi_mean_reversion (15%) in TREND regime.
+        """ema_pullback (28%) should get a meaningfully larger position than
+        rsi_mean_reversion (0%) in TREND regime.
         """
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
@@ -351,7 +359,7 @@ class TestAllocationEnginePositionSizing:
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
 
-        # In TREND regime, rsi_mean_reversion gets 15% of $1000 = $150 < $200 min
+        # In TREND regime, rsi_mean_reversion gets 0% of $1000 = $0 < $200 min
         shares = allocator.get_position_size(
             strategy_name="rsi_mean_reversion",
             price=100.0,

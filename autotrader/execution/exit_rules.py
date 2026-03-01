@@ -31,13 +31,14 @@ _EMERGENCY_BARS_NEEDED: int = 2             # bars at -7% before triggering
 # 2-stage SL upgrade: protects profits progressively
 _STAGE1_BE_ACTIVATION_ATR: float = 1.5   # Stage 1: move SL to entry (breakeven)
 _STAGE2_PROFIT_ACTIVATION_ATR: float = 1.2  # Stage 2: lock in 0.4 ATR profit
-_STAGE2_PROFIT_LOCK_ATR: float = 0.4      # Stage 2: SL moved to entry + this
+_STAGE2_PROFIT_LOCK_ATR: float = 0.4      # Stage 2: SL moved to entry + this (Iter 26: reverted to Iter 23)
 
 # Strategy-specific max hold days
 _MAX_HOLD_DAYS: dict[str, int] = {
     "rsi_mean_reversion": 5,
     "consecutive_down": 5,
     "ema_cross_trend": 10,
+    "adaptive_mean_reversion": 7,
 }
 
 # Strategy-specific SL ATR multipliers (by direction)
@@ -45,6 +46,8 @@ _SL_ATR_MULT: dict[str, dict[str, float]] = {
     "rsi_mean_reversion": {"long": 1.5, "short": 0.75},
     "consecutive_down": {"long": 2.0},
     "ema_cross_trend": {"long": 3.0, "short": 3.0},
+    "breakout_momentum": {"long": 2.5},
+    "adaptive_mean_reversion": {"long": 2.5, "short": 2.0},
 }
 
 # Strategy-specific TP ATR multipliers (None = use indicator-based TP)
@@ -52,15 +55,18 @@ _TP_ATR_MULT: dict[str, float | None] = {
     "rsi_mean_reversion": None,
     "consecutive_down": None,
     "ema_cross_trend": 5.0,
+    "breakout_momentum": 4.0,      # was 5.0
+    "adaptive_mean_reversion": None,  # direction-specific ATR TP in _evaluate_tp
 }
 
 # Strategies that use trailing stops
-_TRAILING_STRATEGIES: frozenset[str] = frozenset({"ema_cross_trend"})
+_TRAILING_STRATEGIES: frozenset[str] = frozenset({"ema_cross_trend", "breakout_momentum"})
 _TRAILING_ATR_MULT: float = 2.0
 
 # Per-strategy trailing stop activation thresholds (ATR multiples of favourable move)
 _TRAILING_ACTIVATION_ATR: dict[str, float] = {
     "ema_cross_trend": 1.5,
+    "breakout_momentum": 1.5,      # reverted from 1.0 (Iter 25: revert to Iter 23)
 }
 
 
@@ -418,6 +424,23 @@ class ExitRuleEngine:
                     action="exit", reason="tp_ema5", target_price=bar_close,
                 )
 
+        elif strategy == "adaptive_mean_reversion":
+            # Direction-specific ATR-based take profit
+            atr_tp_long = 2.5
+            atr_tp_short = 2.0
+            if position.direction == "long":
+                tp_price = position.entry_price + atr_tp_long * atr
+                if bar_close >= tp_price:
+                    return ExitDecision(
+                        action="exit", reason="take_profit", target_price=tp_price,
+                    )
+            else:
+                tp_price = position.entry_price - atr_tp_short * atr
+                if bar_close <= tp_price:
+                    return ExitDecision(
+                        action="exit", reason="take_profit", target_price=tp_price,
+                    )
+
         # Auxiliary ATR TP for rsi_mean_reversion: cap gains at 2.0 ATR
         # even if indicator-based TP hasn't triggered yet
         if strategy == "rsi_mean_reversion":
@@ -485,8 +508,14 @@ class ExitRuleEngine:
         return _HOLD
 
     def _evaluate_time(self, position: HeldPosition) -> ExitDecision:
-        """Time-based exit when maximum hold period is reached."""
-        max_days = _MAX_HOLD_DAYS.get(position.strategy, 5)
+        """Time-based exit when maximum hold period is reached.
+
+        Strategies not listed in _MAX_HOLD_DAYS have no time limit and
+        rely solely on SL/TP/trailing exits.
+        """
+        max_days = _MAX_HOLD_DAYS.get(position.strategy)
+        if max_days is None:
+            return _HOLD
         if position.bars_held >= max_days:
             logger.info(
                 "Time exit for %s %s after %d bars (max=%d)",

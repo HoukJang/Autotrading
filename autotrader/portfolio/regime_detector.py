@@ -3,9 +3,10 @@
 Classifies the current market environment into one of four regimes
 (TREND, RANGING, HIGH_VOLATILITY, UNCERTAIN) using ADX trend strength,
 Bollinger Band width ratio for volatility state, and ATR/close ratio
-for absolute volatility level. Each regime maps to a set of strategy
-allocation weights that sum to 1.0 (or 0.90 for UNCERTAIN, retaining
-a 10% cash buffer).
+for absolute volatility level. Each regime maps to a set of five strategy
+allocation weights (rsi_mean_reversion, consecutive_down, ema_pullback,
+volume_divergence, breakout_momentum) that sum to 1.0 (or 0.90 for
+UNCERTAIN, retaining a 10% cash buffer).
 """
 from __future__ import annotations
 
@@ -118,22 +119,24 @@ class RegimeDetector:
         if sentiment_level == SentimentLevel.NORMAL:
             return weights
 
-        # Adjustments per sentiment: (consec_down_delta, ema_pullback_delta, vol_div_delta)
-        adjustments: dict[SentimentLevel, tuple[float, float, float]] = {
-            SentimentLevel.LOW: (0.00, -0.03, 0.03),
-            SentimentLevel.ELEVATED: (0.03, -0.03, 0.03),
-            SentimentLevel.HIGH: (0.05, -0.05, 0.05),
-            SentimentLevel.EXTREME: (0.10, -0.10, 0.10),
+        # Adjustments per sentiment:
+        # (consec_down_delta, ema_pullback_delta, vol_div_delta, breakout_delta)
+        adjustments: dict[SentimentLevel, tuple[float, float, float, float]] = {
+            SentimentLevel.LOW: (0.00, -0.03, 0.03, 0.00),
+            SentimentLevel.ELEVATED: (0.03, -0.03, 0.03, -0.03),
+            SentimentLevel.HIGH: (0.05, -0.05, 0.05, -0.05),
+            SentimentLevel.EXTREME: (0.10, -0.10, 0.10, -0.10),
         }
 
         deltas = adjustments.get(sentiment_level)
         if deltas is None:
             return weights
 
-        consec_d, ema_d, vol_d = deltas
+        consec_d, ema_d, vol_d, breakout_d = deltas
         weights["consecutive_down"] = max(0.0, weights["consecutive_down"] + consec_d)
         weights["ema_pullback"] = max(0.0, weights["ema_pullback"] + ema_d)
         weights["volume_divergence"] = max(0.0, weights["volume_divergence"] + vol_d)
+        weights["breakout_momentum"] = max(0.0, weights["breakout_momentum"] + breakout_d)
 
         return weights
 
@@ -141,27 +144,31 @@ class RegimeDetector:
 # Regime -> strategy weight mappings
 _REGIME_WEIGHTS: dict[MarketRegime, dict[str, float]] = {
     MarketRegime.TREND: {
-        "rsi_mean_reversion": 0.15,
-        "consecutive_down": 0.20,
-        "ema_pullback": 0.40,
-        "volume_divergence": 0.25,
+        "rsi_mean_reversion": 0.00,
+        "consecutive_down": 0.17,
+        "ema_pullback": 0.28,
+        "volume_divergence": 0.22,
+        "breakout_momentum": 0.33,
     },
     MarketRegime.RANGING: {
         "rsi_mean_reversion": 0.35,
         "consecutive_down": 0.30,
         "ema_pullback": 0.10,
-        "volume_divergence": 0.25,
+        "volume_divergence": 0.20,
+        "breakout_momentum": 0.05,
     },
     MarketRegime.HIGH_VOLATILITY: {
         "rsi_mean_reversion": 0.25,
-        "consecutive_down": 0.30,
-        "ema_pullback": 0.10,
-        "volume_divergence": 0.35,
+        "consecutive_down": 0.25,
+        "ema_pullback": 0.05,
+        "volume_divergence": 0.30,
+        "breakout_momentum": 0.15,
     },
     MarketRegime.UNCERTAIN: {
-        "rsi_mean_reversion": 0.25,
-        "consecutive_down": 0.25,
-        "ema_pullback": 0.25,
-        "volume_divergence": 0.25,
+        "rsi_mean_reversion": 0.19,
+        "consecutive_down": 0.19,
+        "ema_pullback": 0.19,
+        "volume_divergence": 0.18,
+        "breakout_momentum": 0.15,
     },
 }

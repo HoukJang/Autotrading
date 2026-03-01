@@ -149,10 +149,11 @@ class TestBoundaryConditions:
 class TestTrendWeights:
     def test_trend_weights_values(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.TREND)
-        assert weights["rsi_mean_reversion"] == 0.15
-        assert weights["consecutive_down"] == 0.20
-        assert weights["ema_pullback"] == 0.40
-        assert weights["volume_divergence"] == 0.25
+        assert weights["rsi_mean_reversion"] == 0.00
+        assert weights["consecutive_down"] == 0.17
+        assert weights["ema_pullback"] == 0.28
+        assert weights["volume_divergence"] == 0.22
+        assert weights["breakout_momentum"] == 0.33
 
     def test_trend_weights_sum_to_one(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.TREND)
@@ -165,7 +166,8 @@ class TestRangingWeights:
         assert weights["rsi_mean_reversion"] == 0.35
         assert weights["consecutive_down"] == 0.30
         assert weights["ema_pullback"] == 0.10
-        assert weights["volume_divergence"] == 0.25
+        assert weights["volume_divergence"] == 0.20
+        assert weights["breakout_momentum"] == 0.05
 
     def test_ranging_weights_sum_to_one(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.RANGING)
@@ -176,9 +178,10 @@ class TestHighVolatilityWeights:
     def test_high_volatility_weights_values(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.HIGH_VOLATILITY)
         assert weights["rsi_mean_reversion"] == 0.25
-        assert weights["consecutive_down"] == 0.30
-        assert weights["ema_pullback"] == 0.10
-        assert weights["volume_divergence"] == 0.35
+        assert weights["consecutive_down"] == 0.25
+        assert weights["ema_pullback"] == 0.05
+        assert weights["volume_divergence"] == 0.30
+        assert weights["breakout_momentum"] == 0.15
 
     def test_high_volatility_weights_sum_to_one(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.HIGH_VOLATILITY)
@@ -188,15 +191,16 @@ class TestHighVolatilityWeights:
 class TestUncertainWeights:
     def test_uncertain_weights_values(self, detector: RegimeDetector):
         weights = detector.get_weights(MarketRegime.UNCERTAIN)
-        assert weights["rsi_mean_reversion"] == 0.25
-        assert weights["consecutive_down"] == 0.25
-        assert weights["ema_pullback"] == 0.25
-        assert weights["volume_divergence"] == 0.25
+        assert weights["rsi_mean_reversion"] == 0.19
+        assert weights["consecutive_down"] == 0.19
+        assert weights["ema_pullback"] == 0.19
+        assert weights["volume_divergence"] == 0.18
+        assert weights["breakout_momentum"] == 0.15
 
-    def test_uncertain_weights_sum_to_1_0(self, detector: RegimeDetector):
-        """UNCERTAIN weights sum to 1.0."""
+    def test_uncertain_weights_sum_to_0_9(self, detector: RegimeDetector):
+        """UNCERTAIN weights sum to 0.90 (10% cash buffer)."""
         weights = detector.get_weights(MarketRegime.UNCERTAIN)
-        assert abs(sum(weights.values()) - 1.0) < 1e-9
+        assert abs(sum(weights.values()) - 0.90) < 1e-9
 
 
 class TestAllRegimeWeightSums:
