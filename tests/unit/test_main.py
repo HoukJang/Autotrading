@@ -19,8 +19,6 @@ from autotrader.risk.position_sizer import PositionSizer
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
 from autotrader.strategy.consecutive_down import ConsecutiveDown
-from autotrader.strategy.ema_pullback import EmaPullback
-from autotrader.strategy.volume_divergence import VolumeDivergence
 
 
 def _make_bar(symbol: str = "AAPL", close: float = 150.0, idx: int = 0) -> Bar:
@@ -62,15 +60,13 @@ class TestAutoTrader:
 
 
 class TestRegisterStrategies:
-    def test_register_adds_four_swing_strategies(self):
+    def test_register_adds_active_strategies(self):
         app = AutoTrader(Settings())
         app._register_strategies()
-        assert len(app._strategy_engine._strategies) == 4
+        assert len(app._strategy_engine._strategies) == 2
         types = [type(s) for s in app._strategy_engine._strategies]
         assert RsiMeanReversion in types
         assert ConsecutiveDown in types
-        assert EmaPullback in types
-        assert VolumeDivergence in types
 
     def test_register_registers_indicators(self):
         app = AutoTrader(Settings())
@@ -79,7 +75,6 @@ class TestRegisterStrategies:
         assert "RSI_14" in keys
         assert "ATR_14" in keys
         assert "EMA_50" in keys
-        assert "EMA_21" in keys
 
     def test_register_deduplicates_indicators(self):
         app = AutoTrader(Settings())

@@ -64,8 +64,9 @@ from autotrader.rotation.manager import RotationManager
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
 from autotrader.strategy.consecutive_down import ConsecutiveDown
-from autotrader.strategy.ema_pullback import EmaPullback
-from autotrader.strategy.volume_divergence import VolumeDivergence
+# TODO: re-enable after backtest validation
+# from autotrader.strategy.ema_pullback import EmaPullback
+# from autotrader.strategy.volume_divergence import VolumeDivergence
 
 logger = logging.getLogger("autotrader.main")
 
@@ -1137,12 +1138,14 @@ class AutoTrader:
     # -----------------------------------------------------------------------
 
     def _register_strategies(self) -> None:
-        """Register all 4 strategies and their indicators."""
+        """Register active strategies and their indicators.
+
+        Currently 2-strategy MR portfolio matching 17th backtest config.
+        ema_pullback / volume_divergence disabled until backtest validation.
+        """
         strategies = [
             RsiMeanReversion(),
             ConsecutiveDown(),
-            EmaPullback(),
-            VolumeDivergence(),
         ]
         registered_keys: set[str] = set(self._indicator_engine._indicators.keys())
         for strategy in strategies:
