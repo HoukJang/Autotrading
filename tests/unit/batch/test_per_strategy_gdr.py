@@ -66,18 +66,20 @@ class TestPerStrategyGDRConstants:
         assert _PER_STRATEGY_GDR is True
 
     def test_strategy_names_list(self):
-        """_STRATEGY_NAMES should contain breakout_momentum and rsi_mean_reversion."""
+        """_STRATEGY_NAMES should contain breakout_momentum and rsi_mean_reversion (Iter 29: 2-strategy)."""
         assert "breakout_momentum" in _STRATEGY_NAMES
         assert "rsi_mean_reversion" in _STRATEGY_NAMES
+        assert "trend_pullback" not in _STRATEGY_NAMES
         assert "adaptive_mean_reversion" not in _STRATEGY_NAMES
         assert "consecutive_down" not in _STRATEGY_NAMES
         assert "ema_cross_trend" not in _STRATEGY_NAMES
         assert len(_STRATEGY_NAMES) == 2
 
     def test_strategy_base_risk_values(self):
-        """Per-strategy base risk should match spec values (BM + MR)."""
+        """Per-strategy base risk should match spec values (BM + MR, Iter 29)."""
         assert _STRATEGY_BASE_RISK["breakout_momentum"] == 0.020
         assert _STRATEGY_BASE_RISK["rsi_mean_reversion"] == 0.015
+        assert "trend_pullback" not in _STRATEGY_BASE_RISK
         assert "adaptive_mean_reversion" not in _STRATEGY_BASE_RISK
 
     def test_default_base_risk(self):
@@ -85,9 +87,10 @@ class TestPerStrategyGDRConstants:
         assert _DEFAULT_BASE_RISK == 0.02
 
     def test_strategy_gdr_thresholds(self):
-        """Per-strategy GDR thresholds should match BM + MR spec."""
+        """Per-strategy GDR thresholds should match BM + MR spec (Iter 29)."""
         assert _STRATEGY_GDR_THRESHOLDS["breakout_momentum"] == (0.04, 0.08)
         assert _STRATEGY_GDR_THRESHOLDS["rsi_mean_reversion"] == (0.02, 0.04)
+        assert "trend_pullback" not in _STRATEGY_GDR_THRESHOLDS
         assert "adaptive_mean_reversion" not in _STRATEGY_GDR_THRESHOLDS
 
     def test_gdr_risk_multipliers(self):
@@ -103,7 +106,7 @@ class TestPerStrategyGDRConstants:
         assert _GDR_STRATEGY_ENTRIES[2] == 0
 
     def test_max_daily_entries(self):
-        """Portfolio-level daily cap should be 3 (2-strategy portfolio)."""
+        """Portfolio-level daily cap should be 3 (2-strategy portfolio, Iter 29)."""
         assert _MAX_DAILY_ENTRIES == 3
 
     def test_portfolio_safety_net_thresholds(self):

@@ -18,7 +18,7 @@ import pickle
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Ensure project root is on sys.path
@@ -51,18 +51,23 @@ class PeriodDef:
     output_filename: str
 
 
+# Extra calendar days to prepend for indicator warmup (~80 trading days).
+# The backtest runner uses the first ~80 trading days for warmup only
+# (no trades), so we must download data BEFORE the test period start.
+_WARMUP_CALENDAR_DAYS = 120
+
 PERIODS: dict[int, PeriodDef] = {
     1: PeriodDef(
         period_id=1,
-        label="Period 1 (2024-03 ~ 2025-02)",
-        start=datetime(2024, 3, 1, tzinfo=timezone.utc),
+        label="Period 1 (2024-03 ~ 2025-02, +warmup)",
+        start=datetime(2024, 3, 1, tzinfo=timezone.utc) - timedelta(days=_WARMUP_CALENDAR_DAYS),
         end=datetime(2025, 3, 1, tzinfo=timezone.utc),
         output_filename="historical_bars_period1.pkl",
     ),
     2: PeriodDef(
         period_id=2,
-        label="Period 2 (2025-03 ~ 2026-02)",
-        start=datetime(2025, 2, 28, tzinfo=timezone.utc),
+        label="Period 2 (2025-03 ~ 2026-02, +warmup)",
+        start=datetime(2025, 2, 28, tzinfo=timezone.utc) - timedelta(days=_WARMUP_CALENDAR_DAYS),
         end=datetime(2026, 3, 1, tzinfo=timezone.utc),
         output_filename="historical_bars.pkl",
     ),

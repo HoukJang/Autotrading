@@ -1,7 +1,7 @@
 """BatchBacktester: simulates the nightly batch trading architecture over historical data.
 
 Full simulation cycle per trading day:
-  1. Evening (signal generation): run all 3 strategies against the symbol universe.
+  1. Evening (signal generation): run all 2 strategies against the symbol universe.
   2. Gap filter: discard signals where the next-day open gap exceeds the threshold.
   3. Signal ranking: select top-N candidates by composite score.
   4. Next-day entry: simulate fills at next-day open price.
@@ -73,7 +73,7 @@ _MAX_LONG_POSITIONS: int = 8            # hard cap on concurrent long positions 
 _MAX_SHORT_POSITIONS: int = 3           # hard cap on concurrent short positions
 _MAX_TOTAL_POSITIONS: int = 9           # overall position cap (Iter 25: reverted to Iter 23)
 _MAX_LOSS_PER_TRADE_PCT: float = 0.03   # hard cap: max 3% of equity loss per trade
-_MAX_PORTFOLIO_HEAT_PCT: float = 0.35   # max 35% of equity exposed (Iter 26: reverted to Iter 23)
+_MAX_PORTFOLIO_HEAT_PCT: float = 0.35   # max 35% of equity exposed (Iter 29: reverted to Iter 27)
 
 # --- Per-Strategy GDR Configuration ---
 _PER_STRATEGY_GDR: bool = True          # Toggle: True = per-strategy, False = portfolio-level
@@ -105,7 +105,7 @@ _GDR_STRATEGY_ENTRIES: dict[int, int] = {
     2: 0,   # Tier 2: 0 entries (halted)
 }
 
-_MAX_DAILY_ENTRIES: int = 3             # portfolio-level total cap
+_MAX_DAILY_ENTRIES: int = 3             # portfolio-level total cap (Iter 29: reverted to Iter 27)
 
 # Portfolio Safety Net (overrides per-strategy GDR when total DD is extreme)
 _PORTFOLIO_SAFETY_NET_DD: float = 0.12          # 12% total portfolio DD (Iter 26: reverted to Iter 23)
@@ -134,13 +134,21 @@ _STRATEGY_NAMES: list[str] = ["breakout_momentum", "rsi_mean_reversion"]
 
 # Soft per-strategy position cap (applied when 2+ strategies have pending signals)
 _SOFT_STRATEGY_CAP: dict[str, int] = {
-    "breakout_momentum": 2,      # BM: 2 positions max (LOCKED - do not change)
-    "rsi_mean_reversion": 3,     # MR: 3 positions max (expanded for more deployment)
+    "breakout_momentum": 2,      # BM: 2 positions max (LOCKED - Iter 30 confirmed cap 3 is worse)
+    "rsi_mean_reversion": 4,     # MR: 4 positions max (Panel #31: expanded from 3)
 }
 _DEFAULT_STRATEGY_CAP: int = 2          # fallback for unknown strategies
 
 # Minimum bars needed before a symbol can generate a valid signal
 _MIN_BARS_WARMUP: int = 60
+
+# Warmup preload: number of trading days loaded before the test period
+# so that indicators are already warmed up on day 1 of the real test.
+_WARMUP_PRELOAD_BARS: int = 80
+
+# Money market yield on idle (uninvested) cash
+_CASH_YIELD_ANNUAL: float = 0.0475        # 4.75% annual money market yield
+_CASH_YIELD_DAILY: float = _CASH_YIELD_ANNUAL / 252  # per trading day
 
 # Gap filter threshold (3%, tightened from 5%)
 _DEFAULT_GAP_THRESHOLD: float = 0.03
@@ -602,6 +610,7 @@ class BatchBacktester:
         bars_by_symbol: dict[str, list[Bar]],
         strategy_filter: list[str] | None = None,
         spy_bars: list[Bar] | None = None,
+        trade_start_date: date | None = None,
     ) -> BatchBacktestResult:
         """Execute the full historical simulation.
 
@@ -609,6 +618,11 @@ class BatchBacktester:
             bars_by_symbol: Dict of symbol -> list[Bar] (oldest first, daily bars).
             strategy_filter: If provided, only run the named strategies
                              (subset of the 5 available strategies).
+            spy_bars: Optional SPY bars for regime detection.
+            trade_start_date: If provided, bars before this date are used only
+                for indicator warmup (no trades, no equity recording).  This
+                eliminates the ~60-bar dead zone at the start of the test
+                period by pre-loading historical data.
 
         Returns:
             BatchBacktestResult with trades, equity curve, and metrics.
@@ -663,11 +677,8 @@ class BatchBacktester:
         pending_signals: list[tuple[str, ScanResult, float]] = []  # (symbol, result, prev_close)
 
         for day_idx, trading_date in enumerate(all_dates):
-            # Clear re-entry block at start of each new day
-            self._closed_today.clear()
-            self._exit_engine.on_new_trading_day(trading_date)
-
             # --- Step 1: Update rolling histories for all symbols ---
+            # (Always runs, including during warmup preload.)
             day_bars: dict[str, Bar] = {}
             for sym in bars_by_symbol:
                 bar = bars_by_date[sym].get(trading_date)
@@ -677,12 +688,23 @@ class BatchBacktester:
                 symbol_histories[sym].append(bar)
 
             # --- Step 1b: Update regime from SPY data ---
+            # (Always runs, including during warmup preload.)
             spy_bar = spy_by_date.get(trading_date)
             if spy_bar and spy_ind_engine:
                 spy_history.append(spy_bar)
                 if len(spy_history) >= 60:
                     spy_indicators = spy_ind_engine.compute(spy_history)
                     self._update_regime(spy_indicators, spy_bar)
+
+            # --- Warmup preload gate ---
+            # During the preload period (before trade_start_date), only build
+            # up indicator histories. No trades, no equity recording, no signals.
+            if trade_start_date is not None and trading_date < trade_start_date:
+                continue
+
+            # Clear re-entry block at start of each new trading day
+            self._closed_today.clear()
+            self._exit_engine.on_new_trading_day(trading_date)
 
             # --- Step 2: Execute pending entries (from last night's scan) ---
             entries_today = 0
@@ -713,6 +735,10 @@ class BatchBacktester:
             realized_eq = self._compute_realized_equity()
             self._peak_equity = max(self._peak_equity, realized_eq)
             self._update_gdr()
+
+            # Money market yield on idle cash (after all trades for the day)
+            cash_yield = self._cash * _CASH_YIELD_DAILY
+            self._cash += cash_yield
 
             self._equity_curve.append((trading_date, equity))
             self._daily_snapshots.append(DailySnapshot(
@@ -763,6 +789,10 @@ class BatchBacktester:
             "strategy_gdr_thresholds": dict(_STRATEGY_GDR_THRESHOLDS),
             "portfolio_safety_net_dd": _PORTFOLIO_SAFETY_NET_DD,
             "regime_allocation": "dynamic (SPY-based)",
+            "cash_yield_annual": _CASH_YIELD_ANNUAL,
+            "warmup_preload_bars": _WARMUP_PRELOAD_BARS,
+            "trade_start_date": str(trade_start_date) if trade_start_date else None,
+            "soft_strategy_cap": dict(_SOFT_STRATEGY_CAP),
         }
 
         logger.info(

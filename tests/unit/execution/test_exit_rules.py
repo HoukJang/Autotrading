@@ -329,6 +329,10 @@ class TestDay2StopLoss:
         assert actual_mult == 3.0
         self._test_sl_triggers("ema_cross_trend", "short", actual_mult)
 
+    def test_trend_pullback_removed_from_sl_config(self):
+        """Trend Pullback should NOT be in _SL_ATR_MULT (Iter 29: removed)."""
+        assert "trend_pullback" not in _SL_ATR_MULT
+
     def test_sl_does_not_trigger_above_level_long(self):
         """Long SL should NOT trigger when price is above stop level."""
         actual_mult = _SL_ATR_MULT.get("rsi_mean_reversion", {}).get("long", 2.0)
@@ -627,6 +631,10 @@ class TestDay2TakeProfit:
         assert decision.action == "exit"
         assert "tp_ema5" in decision.reason
 
+    def test_trend_pullback_removed_from_tp_config(self):
+        """Trend Pullback should NOT be in _TP_ATR_MULT (Iter 29: removed)."""
+        assert "trend_pullback" not in _TP_ATR_MULT
+
     def test_ema_cross_trend_long_tp_at_5_0x_atr(self):
         """EMA Cross Trend long: TP triggers when close >= entry + 5.0x ATR."""
         engine = ExitRuleEngine()
@@ -829,6 +837,22 @@ class TestTrailingStop:
         """breakout_momentum SL should be 2.5x ATR."""
         assert _SL_ATR_MULT["breakout_momentum"]["long"] == 2.5
 
+    def test_trend_pullback_removed_from_trailing(self):
+        """trend_pullback should NOT be in _TRAILING_STRATEGIES (Iter 29: removed)."""
+        assert "trend_pullback" not in _TRAILING_STRATEGIES
+
+    def test_trend_pullback_removed_from_trailing_activation(self):
+        """trend_pullback should NOT be in _TRAILING_ACTIVATION_ATR (Iter 29: removed)."""
+        assert "trend_pullback" not in _TRAILING_ACTIVATION_ATR
+
+    def test_trend_pullback_removed_from_tp(self):
+        """trend_pullback should NOT be in _TP_ATR_MULT (Iter 29: removed)."""
+        assert "trend_pullback" not in _TP_ATR_MULT
+
+    def test_trend_pullback_removed_from_sl(self):
+        """trend_pullback should NOT be in _SL_ATR_MULT (Iter 29: removed)."""
+        assert "trend_pullback" not in _SL_ATR_MULT
+
     def test_ema_cross_trend_trailing_stop_triggers_long(self):
         """ema_cross_trend long trailing stop should trigger after activation and pullback."""
         engine = ExitRuleEngine()
@@ -992,11 +1016,16 @@ class TestTimeBasedExit:
         )
         assert decision.reason != "time_exit"
 
+    def test_trend_pullback_removed_from_max_hold(self):
+        """Trend Pullback should NOT be in _MAX_HOLD_DAYS (Iter 29: removed)."""
+        assert "trend_pullback" not in _MAX_HOLD_DAYS
+
     def test_max_hold_days_constants_match_spec(self):
-        """MAX_HOLD_DAYS should match spec values (no BM time limit)."""
+        """MAX_HOLD_DAYS should match spec values (no BM time limit, Iter 29: no TP)."""
         assert _MAX_HOLD_DAYS["rsi_mean_reversion"] == 5
         assert _MAX_HOLD_DAYS["consecutive_down"] == 5
         assert _MAX_HOLD_DAYS["ema_cross_trend"] == 10
+        assert "trend_pullback" not in _MAX_HOLD_DAYS
         assert "breakout_momentum" not in _MAX_HOLD_DAYS
         assert "volume_divergence" not in _MAX_HOLD_DAYS
         assert "ema_pullback" not in _MAX_HOLD_DAYS

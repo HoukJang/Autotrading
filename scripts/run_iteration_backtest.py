@@ -60,6 +60,20 @@ _PERIOD_FILES = {
     2: os.path.join(_PROJECT_ROOT, "data", "historical_bars.pkl"),
 }
 
+# Original test period start dates.
+# Data files now include ~80 trading days of warmup data BEFORE these dates.
+# Bars before _PERIOD_START are used for indicator warmup only (no trades).
+_PERIOD_START = {
+    1: date(2024, 3, 1),
+    2: date(2025, 2, 28),
+}
+
+# Original test period end dates (for benchmark comparison).
+_PERIOD_END = {
+    1: date(2025, 2, 28),
+    2: date(2026, 2, 27),
+}
+
 _OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "data", "backtest_results", "iterations")
 
 _TRADING_DAYS_PER_YEAR = 252
@@ -181,8 +195,17 @@ def run_backtest(
     bars_by_symbol: dict,
     capital: float = 100_000.0,
     spy_bars: list | None = None,
+    trade_start_date: date | None = None,
 ) -> Any:
-    """Execute a single BatchBacktester run and return the result."""
+    """Execute a single BatchBacktester run and return the result.
+
+    Args:
+        bars_by_symbol: Dict of symbol -> list[Bar].
+        capital: Initial portfolio capital.
+        spy_bars: Optional SPY bars for regime detection.
+        trade_start_date: If provided, bars before this date are used
+            only for indicator warmup (no trades executed).
+    """
     from autotrader.backtest.batch_simulator import BatchBacktester
 
     bt = BatchBacktester(
@@ -191,7 +214,11 @@ def run_backtest(
     )
 
     t0 = time.time()
-    result = bt.run(bars_by_symbol, spy_bars=spy_bars)
+    result = bt.run(
+        bars_by_symbol,
+        spy_bars=spy_bars,
+        trade_start_date=trade_start_date,
+    )
     elapsed = time.time() - t0
 
     n_trades = result.metrics.get("total_trades", 0)
@@ -507,26 +534,49 @@ def run_single_period(
     print(f"  ITERATION {iteration} -- PERIOD {period}")
     print(f"{'#' * 75}")
 
-    # 1. Load data
+    # 1. Load data (now includes ~80 trading days of warmup before period start)
     bars_by_symbol = load_bars(period)
 
-    # 2. Determine date range
-    start_date, end_date = extract_date_range(bars_by_symbol)
-    logger.info("Date range: %s to %s", start_date, end_date)
+    # 2. Determine date range from actual data (includes warmup)
+    data_start, data_end = extract_date_range(bars_by_symbol)
+    logger.info("Data date range (with warmup): %s to %s", data_start, data_end)
 
-    # 3. Load SPY bars for regime detection
-    spy_bars = load_spy_bars(start_date, end_date)
+    # 2b. Set trade_start_date to the ORIGINAL period start date.
+    # Bars before this date are used for indicator warmup only (no trades).
+    # This preserves the full test period length (~249/250 trading days).
+    trade_start_date = _PERIOD_START.get(period)
+    period_end = _PERIOD_END.get(period, data_end)
+
+    if trade_start_date is not None:
+        logger.info(
+            "Trade start date: %s (warmup data from %s)",
+            trade_start_date, data_start,
+        )
+    else:
+        logger.warning(
+            "No period start date defined for period %d, running without warmup preload",
+            period,
+        )
+
+    # 3. Load SPY bars for regime detection (cover full range including warmup)
+    spy_bars = load_spy_bars(data_start, data_end)
 
     # 4. Run backtest with regime-based allocation
     t0 = time.time()
-    result = run_backtest(bars_by_symbol, capital, spy_bars=spy_bars)
+    result = run_backtest(
+        bars_by_symbol, capital, spy_bars=spy_bars,
+        trade_start_date=trade_start_date,
+    )
     elapsed = time.time() - t0
 
-    # 5. Fetch S&P 500 benchmark
-    benchmark = fetch_sp500_benchmark(start_date, end_date)
+    # 5. Fetch S&P 500 benchmark for the ORIGINAL test period (fair comparison)
+    benchmark = fetch_sp500_benchmark(trade_start_date or data_start, period_end)
 
-    # 6. Print comparison table
-    print_comparison_table(iteration, period, result.metrics, benchmark, start_date, end_date)
+    # 6. Print comparison table (original test period dates)
+    print_comparison_table(
+        iteration, period, result.metrics, benchmark,
+        trade_start_date or data_start, period_end,
+    )
 
     # 7. Print per-strategy breakdown
     print_per_strategy_metrics(result.per_strategy_metrics)
@@ -534,14 +584,14 @@ def run_single_period(
     # 8. Print PASS/FAIL judgment (beat S&P 500)
     passed = print_judgment(result.metrics, benchmark)
 
-    # 8. Build and save JSON
+    # 9. Build and save JSON
     data = build_result_json(
         iteration=iteration,
         period=period,
         result=result,
         benchmark=benchmark,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=trade_start_date or data_start,
+        end_date=period_end,
         passed=passed,
         elapsed_sec=elapsed,
     )

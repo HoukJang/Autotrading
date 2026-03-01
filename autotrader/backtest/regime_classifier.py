@@ -18,7 +18,7 @@ class Regime(Enum):
 
 
 # Allocation table: regime -> {strategy: risk, blocks}
-# BM + rsi_mean_reversion 2-strategy portfolio with complementary balancing
+# BM + MR 2-strategy portfolio (Iter 29: trend_pullback removed, reverted to Iter 27)
 _ALLOCATION_TABLE: dict[Regime, dict] = {
     Regime.TREND_UP: {
         "breakout_momentum": 0.040,     # BM dominant (unchanged)
