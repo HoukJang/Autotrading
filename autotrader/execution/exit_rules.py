@@ -29,7 +29,7 @@ _EMERGENCY_LOSS_IMMEDIATE_PCT: float = 0.10  # -10%: immediate single-bar exit
 _EMERGENCY_BARS_NEEDED: int = 2             # bars at -7% before triggering
 
 # 2-stage SL upgrade: protects profits progressively
-_STAGE1_BE_ACTIVATION_ATR: float = 0.7   # Stage 1: move SL to entry (breakeven)
+_STAGE1_BE_ACTIVATION_ATR: float = 1.5   # Stage 1: move SL to entry (breakeven)
 _STAGE2_PROFIT_ACTIVATION_ATR: float = 1.2  # Stage 2: lock in 0.4 ATR profit
 _STAGE2_PROFIT_LOCK_ATR: float = 0.4      # Stage 2: SL moved to entry + this
 
@@ -42,8 +42,8 @@ _MAX_HOLD_DAYS: dict[str, int] = {
 
 # Strategy-specific SL ATR multipliers (by direction)
 _SL_ATR_MULT: dict[str, dict[str, float]] = {
-    "rsi_mean_reversion": {"long": 1.0, "short": 0.75},
-    "consecutive_down": {"long": 1.2},
+    "rsi_mean_reversion": {"long": 1.5, "short": 0.75},
+    "consecutive_down": {"long": 2.0},
     "ema_cross_trend": {"long": 3.0, "short": 3.0},
 }
 

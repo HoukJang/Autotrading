@@ -302,8 +302,8 @@ class TestDay2StopLoss:
         if decision.action == "exit":
             assert decision.reason != "stop_loss"
 
-    def test_rsi_mr_long_sl_at_1x_atr(self):
-        """RSI MR long: SL should trigger at 1.0x ATR below entry."""
+    def test_rsi_mr_long_sl_at_1_5x_atr(self):
+        """RSI MR long: SL should trigger at 1.5x ATR below entry."""
         actual_mult = _SL_ATR_MULT.get("rsi_mean_reversion", {}).get("long", 2.0)
         self._test_sl_triggers("rsi_mean_reversion", "long", actual_mult)
 
@@ -312,8 +312,8 @@ class TestDay2StopLoss:
         actual_mult = _SL_ATR_MULT.get("rsi_mean_reversion", {}).get("short", 2.0)
         self._test_sl_triggers("rsi_mean_reversion", "short", actual_mult)
 
-    def test_consecutive_down_long_sl_at_1_2x_atr(self):
-        """Consecutive Down long: SL should trigger at 1.2x ATR below entry."""
+    def test_consecutive_down_long_sl_at_2_0x_atr(self):
+        """Consecutive Down long: SL should trigger at 2.0x ATR below entry."""
         actual_mult = _SL_ATR_MULT.get("consecutive_down", {}).get("long", 2.0)
         self._test_sl_triggers("consecutive_down", "long", actual_mult)
 
@@ -376,13 +376,13 @@ class TestTwoStageSLUpgrade:
     """Tests for the 2-stage SL upgrade (breakeven + profit protection)."""
 
     def test_two_stage_constants_match_spec(self):
-        """2-stage SL constants should match P0 optimization spec."""
-        assert _STAGE1_BE_ACTIVATION_ATR == 0.7
+        """2-stage SL constants should match Iteration #1 optimization spec."""
+        assert _STAGE1_BE_ACTIVATION_ATR == 1.5
         assert _STAGE2_PROFIT_ACTIVATION_ATR == 1.2
         assert _STAGE2_PROFIT_LOCK_ATR == 0.4
 
     def test_stage1_breakeven_activation_long(self):
-        """Long: SL moves to entry when price reaches +0.7 ATR."""
+        """Long: SL moves to entry when price reaches +1.5 ATR."""
         engine = ExitRuleEngine()
         atr = 2.0
         entry_price = 100.0
@@ -395,10 +395,10 @@ class TestTwoStageSLUpgrade:
             entry_date_et=date(2026, 2, 24),
             bars_held=1,
             qty=10.0,
-            highest_price=entry_price + _STAGE1_BE_ACTIVATION_ATR * atr,  # 101.4
+            highest_price=entry_price + _STAGE1_BE_ACTIVATION_ATR * atr,  # 103.0
             lowest_price=entry_price,
         )
-        # Close at entry price exactly: original SL would be 100-1.0*2=98,
+        # Close at entry price exactly: original SL would be 100-1.5*2=97,
         # but Stage 1 raises SL to 100 (entry). Close at 99.99 triggers.
         decision = engine.evaluate(
             position=pos,
@@ -412,7 +412,7 @@ class TestTwoStageSLUpgrade:
         assert decision.reason == "stop_loss"
 
     def test_stage1_breakeven_activation_short(self):
-        """Short: SL moves to entry when price drops -0.7 ATR."""
+        """Short: SL moves to entry when price drops -1.5 ATR."""
         engine = ExitRuleEngine()
         atr = 2.0
         entry_price = 100.0
@@ -426,7 +426,7 @@ class TestTwoStageSLUpgrade:
             bars_held=1,
             qty=10.0,
             highest_price=entry_price,
-            lowest_price=entry_price - _STAGE1_BE_ACTIVATION_ATR * atr,  # 98.6
+            lowest_price=entry_price - _STAGE1_BE_ACTIVATION_ATR * atr,  # 97.0
         )
         # SL moves from 100+0.75*2=101.5 down to 100 (entry). Close at 100.01 triggers.
         decision = engine.evaluate(
@@ -499,7 +499,7 @@ class TestTwoStageSLUpgrade:
         assert decision.reason == "stop_loss"
 
     def test_no_upgrade_below_stage1_threshold(self):
-        """SL should NOT upgrade if price hasn't reached +0.7 ATR."""
+        """SL should NOT upgrade if price hasn't reached +1.5 ATR."""
         engine = ExitRuleEngine()
         atr = 2.0
         entry_price = 100.0
@@ -512,10 +512,10 @@ class TestTwoStageSLUpgrade:
             entry_date_et=date(2026, 2, 24),
             bars_held=1,
             qty=10.0,
-            highest_price=entry_price + 0.5 * atr,  # 101.0, below 0.7 ATR threshold
+            highest_price=entry_price + 0.5 * atr,  # 101.0, below 1.5 ATR threshold
             lowest_price=entry_price,
         )
-        # Original SL = 100 - 1.0*2 = 98. Price at 98.5 should HOLD (above 98).
+        # Original SL = 100 - 1.5*2 = 97. Price at 98.5 should HOLD (above 97).
         decision = engine.evaluate(
             position=pos,
             bar_close=98.5,
@@ -888,7 +888,7 @@ class TestTimeBasedExit:
     """Time-based forced exits when max hold days reached."""
 
     def test_rsi_mr_exits_at_5_bars(self):
-        """RSI MR: exit when bars_held >= 5."""
+        """RSI MR: exit when bars_held >= 5 (Iteration #3: reverted from 3 back to 5)."""
         engine = ExitRuleEngine()
         pos = _make_position(strategy="rsi_mean_reversion", bars_held=5)
         # RSI neutral; well above SL -> should trigger time exit
@@ -927,7 +927,7 @@ class TestTimeBasedExit:
         engine = ExitRuleEngine()
         pos = _make_position(
             strategy="rsi_mean_reversion",
-            bars_held=3,  # Max is 5, so 3 bars should hold
+            bars_held=4,  # Max is 5, so 4 bars should hold
         )
         decision = engine.evaluate(
             position=pos,
@@ -977,7 +977,7 @@ class TestTimeBasedExit:
         assert decision.reason != "time_exit"
 
     def test_max_hold_days_constants_match_spec(self):
-        """MAX_HOLD_DAYS should match the spec values."""
+        """MAX_HOLD_DAYS should match the Iteration #3 spec values."""
         assert _MAX_HOLD_DAYS["rsi_mean_reversion"] == 5
         assert _MAX_HOLD_DAYS["consecutive_down"] == 5
         assert _MAX_HOLD_DAYS["ema_cross_trend"] == 10

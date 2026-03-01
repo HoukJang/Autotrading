@@ -73,6 +73,7 @@ _MAX_LONG_POSITIONS: int = 4            # hard cap on concurrent long positions
 _MAX_SHORT_POSITIONS: int = 3           # hard cap on concurrent short positions
 _MAX_TOTAL_POSITIONS: int = 5           # overall position cap
 _MAX_LOSS_PER_TRADE_PCT: float = 0.03   # hard cap: max 3% of equity loss per trade
+_MAX_PORTFOLIO_HEAT_PCT: float = 0.25   # max 25% of equity exposed in open positions
 
 # --- Per-Strategy GDR Configuration ---
 _PER_STRATEGY_GDR: bool = True          # Toggle: True = per-strategy, False = portfolio-level
@@ -87,8 +88,8 @@ _DEFAULT_BASE_RISK: float = 0.02        # fallback for unknown strategies
 
 # Per-strategy GDR thresholds: (tier1_dd, tier2_dd)
 _STRATEGY_GDR_THRESHOLDS: dict[str, tuple[float, float]] = {
-    "rsi_mean_reversion": (0.025, 0.05),  # Tier 1 at 2.5% DD, Tier 2 at 5% DD
-    "consecutive_down": (0.03, 0.06),     # Tier 1 at 3% DD, Tier 2 at 6% DD
+    "rsi_mean_reversion": (0.015, 0.035), # Tier 1 at 1.5% DD, Tier 2 at 3.5% DD
+    "consecutive_down": (0.02, 0.04),     # Tier 1 at 2% DD, Tier 2 at 4% DD
     "ema_cross_trend": (0.04, 0.08),      # Tier 1 at 4% DD, Tier 2 at 8% DD
 }
 
@@ -109,8 +110,8 @@ _GDR_STRATEGY_ENTRIES: dict[int, int] = {
 _MAX_DAILY_ENTRIES: int = 3             # portfolio-level total cap (was 2)
 
 # Portfolio Safety Net (overrides per-strategy GDR when total DD is extreme)
-_PORTFOLIO_SAFETY_NET_DD: float = 0.20          # 20% total portfolio DD
-_PORTFOLIO_SAFETY_NET_RECOVERY: float = 0.15    # resume per-strategy GDR when DD < 15%
+_PORTFOLIO_SAFETY_NET_DD: float = 0.12          # 12% total portfolio DD
+_PORTFOLIO_SAFETY_NET_RECOVERY: float = 0.08    # resume per-strategy GDR when DD < 8%
 _PORTFOLIO_SAFETY_NET_ENTRIES: int = 1           # 1 entry total when safety net active
 _PORTFOLIO_SAFETY_NET_RISK: float = 0.005        # 0.5% risk when safety net active
 
@@ -896,6 +897,22 @@ class BatchBacktester:
         for sym, scan_result, prev_close in pending_signals:
             strategy_name = scan_result.strategy
 
+            # Portfolio heat check: block new entries when total open position
+            # exposure exceeds _MAX_PORTFOLIO_HEAT_PCT of current equity.
+            current_equity = self._compute_equity(day_bars)
+            if current_equity > 0 and self._positions:
+                portfolio_heat = 0.0
+                for _sym, _pos in self._positions.items():
+                    _bar = day_bars.get(_sym)
+                    _price = _bar.close if _bar else _pos.held.entry_price
+                    portfolio_heat += abs(_pos.qty * _price) / current_equity
+                if portfolio_heat >= _MAX_PORTFOLIO_HEAT_PCT:
+                    logger.debug(
+                        "Portfolio heat %.2f%% >= limit %.2f%%, blocking new entry for %s",
+                        portfolio_heat * 100, _MAX_PORTFOLIO_HEAT_PCT * 100, sym,
+                    )
+                    continue
+
             # Enforce overall portfolio-level daily entry limit
             if entries >= effective_daily_entries:
                 break
@@ -1659,8 +1676,8 @@ class BatchBacktester:
         """Check portfolio-level drawdown for safety net activation.
 
         The portfolio safety net overrides per-strategy GDR when the total
-        portfolio drawdown exceeds _PORTFOLIO_SAFETY_NET_DD (20%). It deactivates
-        when DD recovers below _PORTFOLIO_SAFETY_NET_RECOVERY (15%).
+        portfolio drawdown exceeds _PORTFOLIO_SAFETY_NET_DD (12%). It deactivates
+        when DD recovers below _PORTFOLIO_SAFETY_NET_RECOVERY (8%).
         """
         realized_eq = self._compute_realized_equity()
         self._equity_history.append(realized_eq)

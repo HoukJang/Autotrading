@@ -84,9 +84,9 @@ class TestPerStrategyGDRConstants:
         assert _DEFAULT_BASE_RISK == 0.02
 
     def test_strategy_gdr_thresholds(self):
-        """Per-strategy GDR thresholds should match tightened spec."""
-        assert _STRATEGY_GDR_THRESHOLDS["rsi_mean_reversion"] == (0.025, 0.05)
-        assert _STRATEGY_GDR_THRESHOLDS["consecutive_down"] == (0.03, 0.06)
+        """Per-strategy GDR thresholds should match Iteration #2 tightened spec."""
+        assert _STRATEGY_GDR_THRESHOLDS["rsi_mean_reversion"] == (0.015, 0.035)
+        assert _STRATEGY_GDR_THRESHOLDS["consecutive_down"] == (0.02, 0.04)
         assert "volume_divergence" not in _STRATEGY_GDR_THRESHOLDS
 
     def test_gdr_risk_multipliers(self):
@@ -106,9 +106,9 @@ class TestPerStrategyGDRConstants:
         assert _MAX_DAILY_ENTRIES == 3
 
     def test_portfolio_safety_net_thresholds(self):
-        """Portfolio safety net config values."""
-        assert _PORTFOLIO_SAFETY_NET_DD == 0.20
-        assert _PORTFOLIO_SAFETY_NET_RECOVERY == 0.15
+        """Portfolio safety net config values (Iteration #2: 12% / 8%)."""
+        assert _PORTFOLIO_SAFETY_NET_DD == 0.12
+        assert _PORTFOLIO_SAFETY_NET_RECOVERY == 0.08
         assert _PORTFOLIO_SAFETY_NET_ENTRIES == 1
         assert _PORTFOLIO_SAFETY_NET_RISK == 0.005
 
@@ -198,35 +198,35 @@ class TestUpdatePerStrategyGDR:
     def test_small_loss_stays_tier0(self):
         """Small loss within Tier 1 threshold stays Tier 0."""
         bt = _make_backtester(initial_capital=100_000)
-        # RSI MR: Tier 1 threshold is 3% of 100K = $3000 DD
-        bt._update_per_strategy_gdr("rsi_mean_reversion", -2000.0)
-        # DD = (0 - (-2000)) / 100K = 2% < 3% -> Tier 0
+        # RSI MR: Tier 1 threshold is 1.5% of 100K = $1500 DD
+        bt._update_per_strategy_gdr("rsi_mean_reversion", -1000.0)
+        # DD = (0 - (-1000)) / 100K = 1% < 1.5% -> Tier 0
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 0
 
-    def test_rsi_mr_tier1_at_3pct_dd(self):
-        """RSI MR should reach Tier 1 when DD > 3% of initial capital."""
+    def test_rsi_mr_tier1_at_1_5pct_dd(self):
+        """RSI MR should reach Tier 1 when DD > 1.5% of initial capital."""
         bt = _make_backtester(initial_capital=100_000)
-        # Lose $3100 -> DD = 3.1% > 3% threshold
-        bt._update_per_strategy_gdr("rsi_mean_reversion", -3100.0)
+        # Lose $1600 -> DD = 1.6% > 1.5% threshold
+        bt._update_per_strategy_gdr("rsi_mean_reversion", -1600.0)
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 1
 
-    def test_rsi_mr_tier2_at_6pct_dd(self):
-        """RSI MR should reach Tier 2 (HALT) when DD > 6% of initial capital."""
+    def test_rsi_mr_tier2_at_3_5pct_dd(self):
+        """RSI MR should reach Tier 2 (HALT) when DD > 3.5% of initial capital."""
         bt = _make_backtester(initial_capital=100_000)
-        # Lose $6100 -> DD = 6.1% > 6% threshold
-        bt._update_per_strategy_gdr("rsi_mean_reversion", -6100.0)
+        # Lose $3600 -> DD = 3.6% > 3.5% threshold
+        bt._update_per_strategy_gdr("rsi_mean_reversion", -3600.0)
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 2
 
-    def test_consecutive_down_tier1_at_4pct_dd(self):
-        """Consecutive Down: Tier 1 at 4% DD."""
+    def test_consecutive_down_tier1_at_2pct_dd(self):
+        """Consecutive Down: Tier 1 at 2% DD."""
         bt = _make_backtester(initial_capital=100_000)
-        bt._update_per_strategy_gdr("consecutive_down", -4100.0)
+        bt._update_per_strategy_gdr("consecutive_down", -2100.0)
         assert bt._strategy_gdr_tier["consecutive_down"] == 1
 
-    def test_consecutive_down_tier2_at_8pct_dd(self):
-        """Consecutive Down: Tier 2 (HALT) at 8% DD."""
+    def test_consecutive_down_tier2_at_4pct_dd(self):
+        """Consecutive Down: Tier 2 (HALT) at 4% DD."""
         bt = _make_backtester(initial_capital=100_000)
-        bt._update_per_strategy_gdr("consecutive_down", -8100.0)
+        bt._update_per_strategy_gdr("consecutive_down", -4100.0)
         assert bt._strategy_gdr_tier["consecutive_down"] == 2
 
     def test_dd_from_peak_not_from_zero(self):
@@ -237,29 +237,29 @@ class TestUpdatePerStrategyGDR:
         assert bt._strategy_peak_pnl["rsi_mean_reversion"] == 5000.0
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 0
 
-        # Now lose $8100: cum_pnl = -3100, peak = 5000, DD = 8100/100K = 8.1%
-        bt._update_per_strategy_gdr("rsi_mean_reversion", -8100.0)
-        # DD = (5000 - (-3100)) / 100K = 8.1% > 6% -> Tier 2
-        assert bt._strategy_cumulative_pnl["rsi_mean_reversion"] == -3100.0
+        # Now lose $8600: cum_pnl = -3600, peak = 5000, DD = 8600/100K = 8.6%
+        bt._update_per_strategy_gdr("rsi_mean_reversion", -8600.0)
+        # DD = (5000 - (-3600)) / 100K = 8.6% > 3.5% -> Tier 2
+        assert bt._strategy_cumulative_pnl["rsi_mean_reversion"] == -3600.0
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 2
 
     def test_recovery_back_to_tier0(self):
         """Strategy should recover to Tier 0 when losses are recouped."""
         bt = _make_backtester(initial_capital=100_000)
-        # Drop to Tier 1
-        bt._update_per_strategy_gdr("rsi_mean_reversion", -3500.0)
+        # Drop to Tier 1 (loss $1600 = 1.6% DD > 1.5% threshold)
+        bt._update_per_strategy_gdr("rsi_mean_reversion", -1600.0)
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 1
 
-        # Win enough to recover: cum_pnl = -3500 + 3500 = 0, peak stays at 0
+        # Win enough to recover: cum_pnl = -1600 + 1600 = 0, peak stays at 0
         # DD = (0 - 0) / 100K = 0% -> Tier 0
-        bt._update_per_strategy_gdr("rsi_mean_reversion", 3500.0)
+        bt._update_per_strategy_gdr("rsi_mean_reversion", 1600.0)
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 0
 
     def test_independent_strategy_tracking(self):
         """Each strategy tracks GDR independently; one halted doesn't affect others."""
         bt = _make_backtester(initial_capital=100_000)
-        # Halt rsi_mr (Tier 2)
-        bt._update_per_strategy_gdr("rsi_mean_reversion", -7000.0)
+        # Halt rsi_mr (Tier 2): loss $4000 = 4% DD > 3.5% threshold
+        bt._update_per_strategy_gdr("rsi_mean_reversion", -4000.0)
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 2
 
         # consecutive_down should still be Tier 0
@@ -286,6 +286,7 @@ class TestPortfolioSafetyNet:
 
     NOTE: PSN now uses realized equity (initial_capital + realized_pnl) instead
     of MTM equity. Tests set _realized_pnl to simulate realized drawdowns.
+    Safety net activates at 12% DD and deactivates when DD recovers below 8%.
     """
 
     @staticmethod
@@ -297,48 +298,48 @@ class TestPortfolioSafetyNet:
         bt._realized_pnl = peak - bt._initial_capital
         bt._update_portfolio_safety_net()  # records peak in history
 
-    def test_safety_net_activates_at_20pct_dd(self):
-        """Safety net should activate when realized DD exceeds 20%."""
+    def test_safety_net_activates_at_12pct_dd(self):
+        """Safety net should activate when realized DD exceeds 12%."""
         bt = _make_backtester(initial_capital=100_000, use_per_strategy_gdr=True)
         self._seed_equity_history(bt, 100_000.0)
-        # Simulate realized equity dropping to 79000 (21% below peak of 100K)
-        bt._realized_pnl = -21_000.0  # realized_eq = 100K - 21K = 79K
+        # Simulate realized equity dropping to 87000 (13% below peak of 100K)
+        bt._realized_pnl = -13_000.0  # realized_eq = 100K - 13K = 87K
         bt._update_portfolio_safety_net()
         assert bt._portfolio_safety_net_active is True
 
     def test_safety_net_not_active_below_threshold(self):
-        """Safety net should NOT activate below 20% DD."""
+        """Safety net should NOT activate below 12% DD."""
         bt = _make_backtester(initial_capital=100_000, use_per_strategy_gdr=True)
         self._seed_equity_history(bt, 100_000.0)
-        bt._realized_pnl = -19_000.0  # realized_eq = 81K, 19% DD
+        bt._realized_pnl = -11_000.0  # realized_eq = 89K, 11% DD < 12%
         bt._update_portfolio_safety_net()
         assert bt._portfolio_safety_net_active is False
 
     def test_safety_net_deactivates_on_recovery(self):
-        """Safety net should deactivate when realized DD recovers below 15%."""
+        """Safety net should deactivate when realized DD recovers below 8%."""
         bt = _make_backtester(initial_capital=100_000, use_per_strategy_gdr=True)
         self._seed_equity_history(bt, 100_000.0)
         # First activate it
-        bt._realized_pnl = -21_000.0  # realized_eq = 79K, 21% DD
+        bt._realized_pnl = -13_000.0  # realized_eq = 87K, 13% DD > 12%
         bt._update_portfolio_safety_net()
         assert bt._portfolio_safety_net_active is True
 
-        # Recover to 14% DD (realized_eq = 86000, rolling peak is 100K)
-        bt._realized_pnl = -14_000.0  # realized_eq = 86K
+        # Recover to 7% DD (realized_eq = 93000, rolling peak is 100K)
+        bt._realized_pnl = -7_000.0  # realized_eq = 93K
         bt._update_portfolio_safety_net()
         assert bt._portfolio_safety_net_active is False
 
     def test_safety_net_stays_active_between_thresholds(self):
-        """Safety net should stay active between 15% and 20% DD (hysteresis)."""
+        """Safety net should stay active between 8% and 12% DD (hysteresis)."""
         bt = _make_backtester(initial_capital=100_000, use_per_strategy_gdr=True)
         self._seed_equity_history(bt, 100_000.0)
-        # Activate at 21% DD
-        bt._realized_pnl = -21_000.0  # realized_eq = 79K
+        # Activate at 13% DD
+        bt._realized_pnl = -13_000.0  # realized_eq = 87K
         bt._update_portfolio_safety_net()
         assert bt._portfolio_safety_net_active is True
 
-        # Partially recover to 17% DD -- still above recovery threshold
-        bt._realized_pnl = -17_000.0  # realized_eq = 83K
+        # Partially recover to 10% DD -- still above 8% recovery threshold
+        bt._realized_pnl = -10_000.0  # realized_eq = 90K
         bt._update_portfolio_safety_net()
         assert bt._portfolio_safety_net_active is True
 
@@ -546,8 +547,8 @@ class TestUpdateGDRDispatch:
         # Seed history with peak (realized_pnl=0 -> realized_eq=100K)
         bt._realized_pnl = 0.0
         bt._update_gdr()
-        # Now simulate realized loss that drops below safety net threshold
-        bt._realized_pnl = -21_000.0  # realized_eq = 79K, 21% DD
+        # Now simulate realized loss that drops below safety net threshold (12%)
+        bt._realized_pnl = -13_000.0  # realized_eq = 87K, 13% DD > 12%
         bt._update_gdr()
         # Should activate safety net (per-strategy mode checks portfolio DD)
         assert bt._portfolio_safety_net_active is True
@@ -588,15 +589,15 @@ class TestPerStrategyGDREdgeCases:
     def test_exact_threshold_boundary_tier1(self):
         """Exactly at the Tier 1 boundary should NOT trigger Tier 1 (strict >)."""
         bt = _make_backtester(initial_capital=100_000)
-        # RSI MR Tier 1 threshold = 2.5% of 100K = $2500 DD exactly
-        bt._update_per_strategy_gdr("rsi_mean_reversion", -2500.0)
-        # DD = 2500/100K = 0.025, threshold is > 0.025 -> Tier 0
+        # RSI MR Tier 1 threshold = 1.5% of 100K = $1500 DD exactly
+        bt._update_per_strategy_gdr("rsi_mean_reversion", -1500.0)
+        # DD = 1500/100K = 0.015, threshold is > 0.015 -> Tier 0
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 0
 
     def test_just_above_threshold_triggers_tier1(self):
         """Just above Tier 1 threshold should trigger Tier 1."""
         bt = _make_backtester(initial_capital=100_000)
-        bt._update_per_strategy_gdr("rsi_mean_reversion", -2501.0)
+        bt._update_per_strategy_gdr("rsi_mean_reversion", -1501.0)
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 1
 
     def test_calculate_qty_zero_stop_distance(self):
@@ -626,19 +627,19 @@ class TestPerStrategyGDREdgeCases:
     def test_multiple_losses_accumulate(self):
         """Multiple losses should accumulate in cumulative PnL."""
         bt = _make_backtester(initial_capital=100_000)
-        bt._update_per_strategy_gdr("rsi_mean_reversion", -1500.0)
-        bt._update_per_strategy_gdr("rsi_mean_reversion", -1600.0)
-        # Total: -3100, DD = 3.1% > 3% -> Tier 1
-        assert bt._strategy_cumulative_pnl["rsi_mean_reversion"] == -3100.0
+        bt._update_per_strategy_gdr("rsi_mean_reversion", -800.0)
+        bt._update_per_strategy_gdr("rsi_mean_reversion", -800.0)
+        # Total: -1600, DD = 1.6% > 1.5% -> Tier 1
+        assert bt._strategy_cumulative_pnl["rsi_mean_reversion"] == -1600.0
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 1
 
     def test_win_after_loss_reduces_dd(self):
         """A win after losses should reduce the drawdown."""
         bt = _make_backtester(initial_capital=100_000)
-        bt._update_per_strategy_gdr("rsi_mean_reversion", -3500.0)
-        assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 1  # 3.5% DD
+        bt._update_per_strategy_gdr("rsi_mean_reversion", -1600.0)
+        assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 1  # 1.6% DD > 1.5%
 
-        bt._update_per_strategy_gdr("rsi_mean_reversion", 3000.0)
+        bt._update_per_strategy_gdr("rsi_mean_reversion", 1100.0)
         # cum_pnl = -500, peak = 0, DD = 500/100K = 0.5% -> Tier 0
         assert bt._strategy_cumulative_pnl["rsi_mean_reversion"] == -500.0
         assert bt._strategy_gdr_tier["rsi_mean_reversion"] == 0
