@@ -175,11 +175,13 @@ class AlpacaAdapter(BrokerAdapter):
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i : i + batch_size]
             try:
+                feed_enum = DataFeed.IEX if self._feed == "iex" else DataFeed.SIP
                 request = StockBarsRequest(
                     symbol_or_symbols=batch,
                     timeframe=TimeFrame.Day,
                     start=start_date,
                     end=end_date,
+                    feed=feed_enum,
                 )
                 raw = client.get_stock_bars(request)
                 for sym in batch:
