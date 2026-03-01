@@ -97,7 +97,7 @@ def check_clean_worktree() -> None:
     """Ensure no uncommitted changes (excluding .claude/ directory)."""
     result = run_git("status", "--porcelain")
     dirty_files = []
-    for line in result.stdout.strip().splitlines():
+    for line in result.stdout.rstrip().splitlines():
         if not line:
             continue
         # Extract file path from status line (skip the 2-char status + space)
