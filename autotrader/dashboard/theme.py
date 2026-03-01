@@ -35,7 +35,8 @@ COLORS = {
 # Regime colors (solid)
 # ---------------------------------------------------------------------------
 REGIME_COLORS = {
-    "TREND": "#00D26A",
+    "TREND_UP": "#00D26A",
+    "TREND_DOWN": "#FF4757",
     "RANGING": "#3B82F6",
     "HIGH_VOLATILITY": "#FFA502",
     "UNCERTAIN": "#6B7280",
@@ -53,19 +54,15 @@ REGIME_TINTS = {
 # Strategy colors
 # ---------------------------------------------------------------------------
 STRATEGY_COLORS = {
+    "breakout_momentum": "#F59E0B",
     "rsi_mean_reversion": "#8B5CF6",
-    "consecutive_down": "#F59E0B",
-    "ema_pullback": "#10B981",
-    "volume_divergence": "#06B6D4",
 }
 
 # ---------------------------------------------------------------------------
 # Strategy display names
 # ---------------------------------------------------------------------------
 STRATEGY_NAMES = {
+    "breakout_momentum": "Breakout Momentum",
     "rsi_mean_reversion": "RSI Mean Reversion",
-    "consecutive_down": "Consecutive Down",
-    "ema_pullback": "EMA Pullback",
-    "volume_divergence": "Volume Divergence",
     "rotation_manager": "Rotation Manager",
 }

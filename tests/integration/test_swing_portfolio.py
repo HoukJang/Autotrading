@@ -207,116 +207,79 @@ class TestStrategiesDifferentiation:
 
 
 class TestRegimeDetector:
-    """Verify RegimeDetector classifies all 4 regimes correctly."""
+    """Verify RegimeDetector classifies all 5 regimes correctly."""
 
-    def test_trend_regime(self) -> None:
-        """ADX >= 25 and BB width ratio >= 1.3 => TREND."""
+    def test_trend_up_regime(self) -> None:
+        """ADX >= 25 and close > ema_50 => TREND_UP."""
         detector = RegimeDetector()
-        regime = detector.classify(
-            adx=30.0,
-            bb_width=0.065,
-            bb_width_avg=0.05,  # ratio = 1.3
-            atr_ratio=0.02,
-        )
-        assert regime == MarketRegime.TREND
+        regime = detector.classify(adx=30.0, close=460.0, ema_50=450.0, bb_ratio=0.5)
+        assert regime == MarketRegime.TREND_UP
+
+    def test_trend_down_regime(self) -> None:
+        """ADX >= 25 and close < ema_50 => TREND_DOWN."""
+        detector = RegimeDetector()
+        regime = detector.classify(adx=30.0, close=440.0, ema_50=450.0, bb_ratio=0.5)
+        assert regime == MarketRegime.TREND_DOWN
 
     def test_ranging_regime(self) -> None:
-        """ADX < 20 and BB width ratio <= 0.8 => RANGING."""
+        """ADX < 20 and bb_ratio < 0.8 => RANGING."""
         detector = RegimeDetector()
-        regime = detector.classify(
-            adx=15.0,
-            bb_width=0.04,
-            bb_width_avg=0.05,  # ratio = 0.8
-            atr_ratio=0.01,
-        )
+        regime = detector.classify(adx=15.0, close=450.0, ema_50=450.0, bb_ratio=0.5)
         assert regime == MarketRegime.RANGING
 
     def test_high_volatility_regime(self) -> None:
-        """ADX < 20, BB width ratio >= 1.3, ATR ratio > 0.03 => HIGH_VOLATILITY."""
+        """bb_ratio > 1.2 and adx < 25 => HIGH_VOLATILITY."""
         detector = RegimeDetector()
-        regime = detector.classify(
-            adx=15.0,
-            bb_width=0.065,
-            bb_width_avg=0.05,  # ratio = 1.3
-            atr_ratio=0.04,
-        )
+        regime = detector.classify(adx=15.0, close=450.0, ema_50=450.0, bb_ratio=1.5)
         assert regime == MarketRegime.HIGH_VOLATILITY
 
     def test_uncertain_regime(self) -> None:
         """Indicators in ambiguous zone => UNCERTAIN."""
         detector = RegimeDetector()
-        regime = detector.classify(
-            adx=22.0,  # between 20 and 25
-            bb_width=0.05,
-            bb_width_avg=0.05,  # ratio = 1.0
-            atr_ratio=0.02,
-        )
+        regime = detector.classify(adx=22.0, close=450.0, ema_50=450.0, bb_ratio=0.9)
         assert regime == MarketRegime.UNCERTAIN
-
-    def test_uncertain_on_zero_bb_avg(self) -> None:
-        """Edge case: zero bb_width_avg always returns UNCERTAIN."""
-        detector = RegimeDetector()
-        regime = detector.classify(
-            adx=30.0,
-            bb_width=0.05,
-            bb_width_avg=0.0,
-            atr_ratio=0.02,
-        )
-        assert regime == MarketRegime.UNCERTAIN
-
-    def test_weights_sum_correctly(self) -> None:
-        """Verify that regime weights sum to expected totals."""
-        detector = RegimeDetector()
-
-        expected_sums = {
-            MarketRegime.TREND: 1.0,
-            MarketRegime.RANGING: 1.0,
-            MarketRegime.HIGH_VOLATILITY: 1.0,
-            MarketRegime.UNCERTAIN: 0.90,
-        }
-        for regime in MarketRegime:
-            weights = detector.get_weights(regime)
-            total = sum(weights.values())
-            expected = expected_sums[regime]
-            assert abs(total - expected) < 1e-9, (
-                f"{regime.value} weights sum to {total}, expected {expected}"
-            )
 
     def test_all_strategies_present_in_weights(self) -> None:
-        """Every regime must include weights for all 5 strategies."""
+        """Every regime must include weights for BM and MR strategies."""
         detector = RegimeDetector()
+        expected = {"breakout_momentum", "rsi_mean_reversion"}
         for regime in MarketRegime:
             weights = detector.get_weights(regime)
-            assert set(weights.keys()) == ALL_STRATEGY_NAMES, (
+            assert set(weights.keys()) == expected, (
                 f"{regime.value} missing strategies: "
-                f"{ALL_STRATEGY_NAMES - set(weights.keys())}"
+                f"{expected - set(weights.keys())}"
             )
 
 
 class TestAllocationEnginePositionSizing:
     """Verify AllocationEngine computes correct position sizes per regime."""
 
-    def test_trend_regime_ema_pullback_sizing(self) -> None:
-        """In TREND regime, ema_pullback gets 28% of equity.
+    def test_trend_up_breakout_momentum_sizing(self) -> None:
+        """In TREND_UP regime, breakout_momentum risk = 4.0%.
 
-        With $3000 equity and price $100, that is $840 max allocation => 8 shares.
+        Risk-based fallback (no ATR): qty = int(equity * risk * 5 / price)
+        = int(50000 * 0.040 * 5 / 100) = 100 shares.
+        max_by_position = int(50000 * 0.25 / 100) = 125.
+        result = min(100, 125) = 100.
         """
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
 
         shares = allocator.get_position_size(
-            strategy_name="ema_pullback",
+            strategy_name="breakout_momentum",
             price=100.0,
-            equity=3000.0,
-            regime=MarketRegime.TREND,
+            equity=50000.0,
+            regime=MarketRegime.TREND_UP,
         )
-        # 28% of $3000 = $840 => $840 / $100 = 8 shares
-        assert shares == 8
+        assert shares == 100
 
-    def test_trend_regime_rsi_mean_reversion_sizing(self) -> None:
-        """In TREND regime, rsi_mean_reversion gets 0% of equity (disabled).
+    def test_trend_up_rsi_mean_reversion_sizing(self) -> None:
+        """In TREND_UP regime, rsi_mean_reversion risk = 1.2%.
 
-        With $3000 equity and price $100, that is $0 allocation => 0 shares.
+        Risk-based fallback (no ATR): qty = int(equity * risk * 5 / price)
+        = int(50000 * 0.012 * 5 / 100) = 30 shares.
+        max_by_position = int(50000 * 0.25 / 100) = 125.
+        result = min(30, 125) = 30.
         """
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
@@ -324,47 +287,40 @@ class TestAllocationEnginePositionSizing:
         shares = allocator.get_position_size(
             strategy_name="rsi_mean_reversion",
             price=100.0,
-            equity=3000.0,
-            regime=MarketRegime.TREND,
+            equity=50000.0,
+            regime=MarketRegime.TREND_UP,
         )
-        # 0% of $3000 = $0 => 0 shares
-        assert shares == 0
+        assert shares == 30
 
-    def test_ema_pullback_produces_more_shares_than_rsi_mr(self) -> None:
-        """ema_pullback (28%) should get a meaningfully larger position than
-        rsi_mean_reversion (0%) in TREND regime.
-        """
+    def test_breakout_produces_more_shares_in_trend_up(self) -> None:
+        """breakout_momentum (4.0%) > rsi_mean_reversion (1.2%) in TREND_UP."""
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
 
-        ema_shares = allocator.get_position_size(
-            strategy_name="ema_pullback",
+        bm = allocator.get_position_size(
+            strategy_name="breakout_momentum",
             price=100.0,
-            equity=3000.0,
-            regime=MarketRegime.TREND,
+            equity=50000.0,
+            regime=MarketRegime.TREND_UP,
         )
-        rsi_shares = allocator.get_position_size(
+        rsi = allocator.get_position_size(
             strategy_name="rsi_mean_reversion",
             price=100.0,
-            equity=3000.0,
-            regime=MarketRegime.TREND,
+            equity=50000.0,
+            regime=MarketRegime.TREND_UP,
         )
-        assert ema_shares > rsi_shares, (
-            f"ema_pullback ({ema_shares}) should have more shares "
-            f"than rsi_mean_reversion ({rsi_shares})"
-        )
+        assert bm > rsi
 
-    def test_below_minimum_position_returns_zero(self) -> None:
-        """When allocation value < $200 minimum, position size should be 0."""
+    def test_below_minimum_returns_zero(self) -> None:
+        """When allocation < $200 minimum, position size should be 0."""
         detector = RegimeDetector()
         allocator = AllocationEngine(detector)
 
-        # In TREND regime, rsi_mean_reversion gets 0% of $1000 = $0 < $200 min
         shares = allocator.get_position_size(
-            strategy_name="rsi_mean_reversion",
+            strategy_name="breakout_momentum",
             price=100.0,
             equity=1000.0,
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_DOWN,
         )
         assert shares == 0
 
@@ -374,10 +330,10 @@ class TestAllocationEnginePositionSizing:
         allocator = AllocationEngine(detector)
 
         shares = allocator.get_position_size(
-            strategy_name="ema_pullback",
+            strategy_name="breakout_momentum",
             price=0.0,
-            equity=3000.0,
-            regime=MarketRegime.TREND,
+            equity=50000.0,
+            regime=MarketRegime.TREND_UP,
         )
         assert shares == 0
 

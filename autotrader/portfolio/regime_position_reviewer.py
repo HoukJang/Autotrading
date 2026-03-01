@@ -2,9 +2,8 @@
 
 When the market regime changes, existing positions from strategies that are
 incompatible with the new regime should be reviewed and potentially closed.
-Compatibility is determined by the strategy's allocation weight in the new
-regime -- a weight of 10% or below signals the strategy is a poor fit and
-positions should be unwound.
+Compatibility is determined by the strategy's entry-blocking flags in the
+new regime -- a blocked strategy signals positions should be unwound.
 """
 from __future__ import annotations
 
@@ -33,41 +32,30 @@ class PositionReview:
 # ---------------------------------------------------------------------------
 # Strategy-regime compatibility matrix
 #
-# A strategy is *compatible* with a regime when its allocation weight in
-# ``_REGIME_WEIGHTS`` exceeds 10%.  Weight <= 10% means the strategy is a
-# poor fit and open positions should be closed on regime transition.
+# A strategy is *compatible* with a regime when it is NOT blocked
+# from entering in that regime.  Blocked strategies indicate the
+# strategy is a poor fit and open positions should be closed on
+# regime transition.
 #
-# Reference weights (from regime_detector._REGIME_WEIGHTS):
-#
-#   rsi_mean_reversion : TREND 15% | RANGING 35% | HIGH_VOL 25% | UNCERTAIN 25%
-#   consecutive_down   : TREND 20% | RANGING 30% | HIGH_VOL 30% | UNCERTAIN 25%
-#   ema_pullback       : TREND 40% | RANGING 10% | HIGH_VOL 10% | UNCERTAIN 25%
-#   volume_divergence  : TREND 25% | RANGING 25% | HIGH_VOL 35% | UNCERTAIN 25%
+# Reference (from _ALLOCATION_TABLE):
+#   breakout_momentum: TREND_DOWN -> breakout_blocked=True
+#   rsi_mean_reversion: compatible in all regimes
 # ---------------------------------------------------------------------------
 
 STRATEGY_REGIME_COMPATIBLE: dict[str, set[MarketRegime]] = {
+    "breakout_momentum": {
+        MarketRegime.TREND_UP,
+        MarketRegime.RANGING,
+        MarketRegime.HIGH_VOLATILITY,
+        MarketRegime.UNCERTAIN,
+        # NOT TREND_DOWN (breakout_blocked=True)
+    },
     "rsi_mean_reversion": {
-        MarketRegime.TREND,            # 15%
-        MarketRegime.RANGING,          # 35%
-        MarketRegime.HIGH_VOLATILITY,  # 25%
-        MarketRegime.UNCERTAIN,        # 25%
-    },
-    "consecutive_down": {
-        MarketRegime.RANGING,          # 30%
-        MarketRegime.HIGH_VOLATILITY,  # 30%
-        MarketRegime.UNCERTAIN,        # 25%
-        # TREND 20% -- compatible but reduced
-    },
-    "ema_pullback": {
-        MarketRegime.TREND,            # 40%
-        MarketRegime.UNCERTAIN,        # 25%
-        # RANGING 10%, HIGH_VOL 10% -- incompatible
-    },
-    "volume_divergence": {
-        MarketRegime.TREND,            # 25%
-        MarketRegime.RANGING,          # 25%
-        MarketRegime.HIGH_VOLATILITY,  # 35%
-        MarketRegime.UNCERTAIN,        # 25%
+        MarketRegime.TREND_UP,
+        MarketRegime.TREND_DOWN,
+        MarketRegime.RANGING,
+        MarketRegime.HIGH_VOLATILITY,
+        MarketRegime.UNCERTAIN,
     },
 }
 
@@ -76,8 +64,8 @@ class RegimePositionReviewer:
     """Reviews open positions when regime changes and recommends closures.
 
     The reviewer compares each open position's originating strategy against
-    a compatibility matrix.  Strategies whose allocation weight drops to 10%
-    or below in the new regime receive a ``"close"`` recommendation.
+    a compatibility matrix.  Strategies blocked in the new regime receive
+    a ``"close"`` recommendation.
     """
 
     def review(

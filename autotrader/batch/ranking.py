@@ -44,14 +44,11 @@ _SECTOR_PENALTY_STEP = 0.25
 # Regime compatibility scores per strategy/direction combination
 # (strategy, direction) -> float in [0.0, 1.0]
 _REGIME_COMPAT: dict[tuple[str, str], float] = {
+    # Momentum strategy
+    ("breakout_momentum", "long"): 0.85,
     # Mean-reversion strategies
     ("rsi_mean_reversion", "long"): 0.80,
     ("rsi_mean_reversion", "short"): 0.80,
-    ("consecutive_down", "long"): 0.80,
-    # Trend-continuation
-    ("ema_pullback", "long"): 0.90,
-    ("ema_cross_trend", "long"): 0.85,
-    ("ema_cross_trend", "short"): 0.85,
 }
 
 # Default compatibility score for unknown (strategy, direction) combinations
@@ -68,18 +65,11 @@ def _regime_compatibility(scan_result: ScanResult) -> float:
         (scan_result.strategy, scan_result.direction), _DEFAULT_COMPAT
     )
 
-    # Boost ema_pullback when ADX is strong (> 25) -- trend continuation
-    if scan_result.direction == "long" and scan_result.strategy == "ema_pullback":
-        adx = scan_result.indicators.get("ADX_14")
-        if isinstance(adx, (int, float)) and adx > 25:
-            boost = min(0.05, (adx - 25) / 200)  # up to +5% boost
-            base = min(1.0, base + boost)
-
-    # Boost ema_cross_trend when ADX is strong (> 30)
-    if scan_result.strategy == "ema_cross_trend":
+    # Boost breakout_momentum when ADX is strong (> 30)
+    if scan_result.strategy == "breakout_momentum" and scan_result.direction == "long":
         adx = scan_result.indicators.get("ADX_14")
         if isinstance(adx, (int, float)) and adx > 30:
-            boost = min(0.05, (adx - 30) / 200)
+            boost = min(0.05, (adx - 30) / 200)  # up to +5% boost
             base = min(1.0, base + boost)
 
     return base

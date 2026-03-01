@@ -3,6 +3,9 @@
 Validates that the system prevents multiple strategies from opening
 positions on the same symbol simultaneously, while still allowing
 the owning strategy to manage its own position.
+
+Updated for the 5-regime system with only BM and MR strategies in
+the allocation table.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -42,7 +45,7 @@ class TestDuplicateSignalPrevention:
 
     @pytest.mark.asyncio
     async def test_blocks_different_strategy_same_symbol(self, app):
-        """AAPL has position from rsi_mean_reversion; consecutive_down signal for AAPL returns None."""
+        """AAPL has position from rsi_mean_reversion; breakout_momentum signal for AAPL returns None."""
         await app._broker.connect()
         account = await app._broker.get_account()
 
@@ -53,7 +56,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="consecutive_down",
+            strategy="breakout_momentum",
             symbol="AAPL",
             direction="long",
             strength=0.8,
@@ -63,7 +66,7 @@ class TestDuplicateSignalPrevention:
 
     @pytest.mark.asyncio
     async def test_blocks_short_from_different_strategy(self, app):
-        """AAPL has long from rsi_mean_reversion; ema_pullback signal for AAPL returns None."""
+        """AAPL has long from rsi_mean_reversion; breakout_momentum signal for AAPL returns None."""
         await app._broker.connect()
         account = await app._broker.get_account()
 
@@ -73,7 +76,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="ema_pullback",
+            strategy="breakout_momentum",
             symbol="AAPL",
             direction="long",
             strength=0.9,
@@ -119,7 +122,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["MSFT"].append(bar)
 
         signal = Signal(
-            strategy="consecutive_down",
+            strategy="breakout_momentum",
             symbol="MSFT",
             direction="long",
             strength=0.8,
@@ -128,8 +131,7 @@ class TestDuplicateSignalPrevention:
         # Should not be blocked by duplicate check (may be blocked by other checks)
         # The key assertion: it must NOT be None due to duplicate prevention
         # It could still be None if allocation engine blocks it, so we verify
-        # by checking that the position_strategy_map check did NOT block it.
-        # We do this by confirming that MSFT is not in position_strategy_map
+        # by checking that MSFT is not in position_strategy_map
         assert "MSFT" not in app._position_strategy_map
         # If allocation allows, order should be created
         if order is not None:
@@ -137,7 +139,11 @@ class TestDuplicateSignalPrevention:
 
     @pytest.mark.asyncio
     async def test_allows_new_symbol_creates_order(self, app):
-        """AAPL has position; MSFT signal passes and creates a valid order."""
+        """AAPL has position; MSFT signal passes and creates a valid order.
+
+        With 100K equity and breakout_momentum weight 0.040:
+        100000 * 0.040 / 100 = 40 shares => position value $4000 > $200 min
+        """
         await app._broker.connect()
         account = await app._broker.get_account()
 
@@ -147,7 +153,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["MSFT"].append(bar)
 
         signal = Signal(
-            strategy="consecutive_down",
+            strategy="breakout_momentum",
             symbol="MSFT",
             direction="long",
             strength=0.8,
@@ -175,7 +181,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="consecutive_down",
+            strategy="breakout_momentum",
             symbol="AAPL",
             direction="long",
             strength=0.8,
@@ -200,7 +206,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="ema_pullback",
+            strategy="breakout_momentum",
             symbol="AAPL",
             direction="long",
             strength=0.9,
@@ -233,7 +239,11 @@ class TestDuplicateSignalPrevention:
 
     @pytest.mark.asyncio
     async def test_no_position_no_map_allows_entry(self, app):
-        """With empty map and no broker positions, entry signal passes normally."""
+        """With empty map and no broker positions, entry signal passes normally.
+
+        breakout_momentum weight in UNCERTAIN = 0.008
+        100000 * 0.008 / 100 = 8 shares => $800 > $200 min
+        """
         await app._broker.connect()
         account = await app._broker.get_account()
 
@@ -241,7 +251,7 @@ class TestDuplicateSignalPrevention:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="consecutive_down",
+            strategy="breakout_momentum",
             symbol="AAPL",
             direction="long",
             strength=0.8,

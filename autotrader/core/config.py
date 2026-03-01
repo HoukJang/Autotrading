@@ -123,7 +123,8 @@ class EventDrivenRotationConfig(BaseModel):
     cooldown_hours: int = 48
     vix_spike_trigger: float = 30.0
     regime_triggers: list[str] = [
-        "TREND->HIGH_VOLATILITY",
+        "TREND_UP->HIGH_VOLATILITY",
+        "TREND_UP->TREND_DOWN",
         "RANGING->HIGH_VOLATILITY",
         "*->UNCERTAIN",
     ]

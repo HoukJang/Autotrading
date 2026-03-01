@@ -1,7 +1,7 @@
 """EntryManager: orchestrates Group A (MOO) and Group B (confirmation) entries.
 
 Entry architecture:
-  - Group A (rsi_mean_reversion, consecutive_down):
+  - Group A (breakout_momentum, rsi_mean_reversion):
       Market-on-Open orders submitted at 9:30 AM ET.
       SL/TP anchored to actual fill price.
   - Group B (currently empty):
@@ -10,10 +10,13 @@ Entry architecture:
       Unconfirmed candidates are DISCARDED at 10:00 AM.
 
 Daily constraints enforced here:
-  - Max 2 new entries per day.
-  - Max 5 concurrent long positions.
+  - Max 3 new entries per day.
+  - Max 8 concurrent long positions.
   - Max 3 concurrent short positions.
+  - Max 9 total positions.
+  - Per-strategy caps: BM=2, MR=4.
   - Re-entry block checked via ExitRuleEngine.is_reentry_blocked().
+  - Regime-based entry blocking (breakout blocked, MR short blocked).
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ from autotrader.execution.exit_rules import ExitRuleEngine, HeldPosition
 from autotrader.execution.order_manager import OrderManager
 from autotrader.portfolio.allocation_engine import AllocationEngine
 from autotrader.portfolio.regime_detector import MarketRegime
+from autotrader.risk.gdr_manager import GDRManager
 from autotrader.risk.manager import RiskManager
 
 _ET = ZoneInfo("America/New_York")
@@ -37,7 +41,7 @@ _ET = ZoneInfo("America/New_York")
 logger = logging.getLogger("autotrader.execution.entry_manager")
 
 # Entry group membership
-_GROUP_A_STRATEGIES: frozenset[str] = frozenset({"rsi_mean_reversion", "consecutive_down", "ema_cross_trend"})
+_GROUP_A_STRATEGIES: frozenset[str] = frozenset({"breakout_momentum", "rsi_mean_reversion"})
 _GROUP_B_STRATEGIES: frozenset[str] = frozenset()
 
 # Confirmation window gap tolerance (3 bps)
@@ -45,11 +49,16 @@ _GAP_TOLERANCE: float = 0.003
 
 # Daily limits
 _MAX_DAILY_ENTRIES: int = 3
-_MAX_LONG_POSITIONS: int = 6
+_MAX_LONG_POSITIONS: int = 8             # Iter 29: increased from 6
 _MAX_SHORT_POSITIONS: int = 3
+_MAX_TOTAL_POSITIONS: int = 9            # Overall position cap
 
 # Per-strategy position caps (prevents single strategy from dominating)
-_MAX_STRATEGY_POSITIONS: dict[str, int] = {}
+_MAX_STRATEGY_POSITIONS: dict[str, int] = {
+    "breakout_momentum": 2,              # BM: max 2 concurrent (LOCKED)
+    "rsi_mean_reversion": 4,             # MR: max 4 concurrent
+}
+_DEFAULT_STRATEGY_CAP: int = 2           # Fallback for unknown strategies
 
 
 @dataclass
@@ -98,11 +107,13 @@ class EntryManager:
         allocation_engine: AllocationEngine,
         risk_manager: RiskManager,
         exit_rule_engine: ExitRuleEngine,
+        gdr_manager: GDRManager | None = None,
     ) -> None:
         self._order_manager = order_manager
         self._allocation_engine = allocation_engine
         self._risk_manager = risk_manager
         self._exit_rule_engine = exit_rule_engine
+        self._gdr_manager = gdr_manager
 
         # Pending candidates by group
         self._group_a: list[Candidate] = []
@@ -197,6 +208,10 @@ class EntryManager:
             self._new_positions.append(held)
             self._daily_entry_count += 1
 
+            # Record entry in GDR manager
+            if self._gdr_manager is not None:
+                self._gdr_manager.record_entry(candidate.signal.strategy)
+
             # Submit broker-side stop-loss order for safety
             await self._submit_broker_sl(candidate.signal, result.fill_price, result.filled_qty, result.order_id)
 
@@ -276,6 +291,10 @@ class EntryManager:
             self._new_positions.append(held)
             self._daily_entry_count += 1
 
+            # Record entry in GDR manager
+            if self._gdr_manager is not None:
+                self._gdr_manager.record_entry(candidate.signal.strategy)
+
             await self._submit_broker_sl(candidate.signal, result.fill_price, result.filled_qty, result.order_id)
 
             logger.info(
@@ -331,9 +350,19 @@ class EntryManager:
         """Check all pre-entry constraints.
 
         Returns False (and logs the reason) if any constraint is violated.
+        Checks are ordered: re-entry -> daily limit -> total cap ->
+        direction caps -> duplicate -> per-strategy cap -> regime block ->
+        risk manager -> allocation engine.
         """
         symbol = signal.symbol
         direction = signal.direction
+        strategy_name = signal.strategy
+
+        # GDR entry limit check (per-strategy drawdown response)
+        if self._gdr_manager is not None:
+            if not self._gdr_manager.can_enter_strategy(strategy_name):
+                logger.info("GDR blocked entry for %s (%s)", symbol, strategy_name)
+                return False
 
         # Re-entry block
         if self._exit_rule_engine.is_reentry_blocked(symbol):
@@ -343,6 +372,15 @@ class EntryManager:
         # Daily entry limit
         if self._daily_entry_count >= _MAX_DAILY_ENTRIES:
             logger.info("Daily entry limit reached (%d)", _MAX_DAILY_ENTRIES)
+            return False
+
+        # Total position cap (before direction caps)
+        total_count = len(positions)
+        if total_count >= _MAX_TOTAL_POSITIONS:
+            logger.info(
+                "Total position cap reached (%d/%d)",
+                total_count, _MAX_TOTAL_POSITIONS,
+            )
             return False
 
         # Direction position caps
@@ -360,30 +398,37 @@ class EntryManager:
             logger.debug("Skipping %s: position already open", symbol)
             return False
 
-        # Per-strategy position cap (e.g., ema_pullback max 3)
-        strategy_cap = _MAX_STRATEGY_POSITIONS.get(signal.strategy)
-        if strategy_cap is not None:
-            strategy_count = sum(
-                1 for p in positions
-                if getattr(p, "_strategy", None) == signal.strategy
+        # Per-strategy position cap
+        strategy_count = sum(
+            1 for p in positions
+            if getattr(p, "_strategy", None) == strategy_name
+        )
+        cap = _MAX_STRATEGY_POSITIONS.get(strategy_name, _DEFAULT_STRATEGY_CAP)
+        if strategy_count >= cap:
+            logger.info(
+                "Strategy %s cap reached (%d/%d)",
+                strategy_name, strategy_count, cap,
             )
-            if strategy_count >= strategy_cap:
-                logger.info(
-                    "Strategy position cap reached for %s (%d/%d)",
-                    signal.strategy, strategy_count, strategy_cap,
-                )
-                return False
+            return False
+
+        # Regime-based entry blocking
+        from autotrader.portfolio.regime_detector import RegimeDetector
+        alloc = RegimeDetector.get_allocation(regime)
+        if strategy_name == "breakout_momentum" and alloc.get("breakout_blocked"):
+            logger.info("Regime %s: breakout entry blocked", regime.value)
+            return False
+        if (strategy_name == "rsi_mean_reversion"
+                and direction == "short"
+                and alloc.get("mr_short_blocked")):
+            logger.info("Regime %s: MR short entry blocked", regime.value)
+            return False
 
         # RiskManager validation (max positions, daily loss, drawdown)
         if not self._risk_manager.validate(signal, account, positions):
             logger.info("Risk rejected entry: %s %s", direction, symbol)
             return False
 
-        # AllocationEngine: strategy weight and per-strategy cap
-        strategy_count = sum(
-            1 for p in positions
-            if getattr(p, "_strategy", None) == signal.strategy
-        )
+        # AllocationEngine: strategy weight check
         if not self._allocation_engine.should_enter(signal.strategy, regime, strategy_count):
             logger.debug(
                 "AllocationEngine blocked entry: strategy=%s, regime=%s",
@@ -412,6 +457,13 @@ class EntryManager:
         # Fetch latest price for sizing (use prev_close as proxy if needed)
         price = candidate.prev_close  # Will be replaced by fill price
 
+        # GDR risk adjustment
+        gdr_mult = 1.0
+        safety_net = False
+        if self._gdr_manager is not None:
+            gdr_mult = self._gdr_manager.get_risk_multiplier(signal.strategy)
+            safety_net = self._gdr_manager.is_safety_net_active
+
         qty = self._allocation_engine.get_position_size(
             strategy_name=signal.strategy,
             price=price,
@@ -420,6 +472,8 @@ class EntryManager:
             atr=atr,                         # Raw ATR for weight-only fallback
             direction=direction,
             stop_distance=actual_stop_distance,  # Strategy-specific SL distance
+            gdr_risk_mult=gdr_mult,
+            safety_net_active=safety_net,
         )
         if qty <= 0:
             logger.debug(

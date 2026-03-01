@@ -228,7 +228,7 @@ def _render_cumulative_pnl(close_df: pd.DataFrame) -> None:
 # Section 4: Regime-Strategy Heatmap
 # ------------------------------------------------------------------
 
-_REGIME_ORDER = ["TREND", "RANGING", "HIGH_VOLATILITY", "UNCERTAIN"]
+_REGIME_ORDER = ["TREND_UP", "TREND_DOWN", "RANGING", "HIGH_VOLATILITY", "UNCERTAIN"]
 
 
 def _render_regime_heatmap(close_df: pd.DataFrame) -> None:

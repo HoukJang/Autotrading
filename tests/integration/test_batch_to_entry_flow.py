@@ -244,7 +244,7 @@ class TestEntryManagerFromBatch:
             ),
             EntryCandiate(
                 signal=Signal(
-                    strategy="consecutive_down",
+                    strategy="breakout_momentum",
                     symbol="MSFT",
                     direction="long",
                     strength=0.75,
@@ -263,7 +263,7 @@ class TestEntryManagerFromBatch:
         result = await em.execute_moo(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
         )
 
@@ -298,7 +298,7 @@ class TestEntryManagerFromBatch:
         result = await em.execute_confirmation(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
             current_prices=current_prices,
         )
@@ -332,7 +332,7 @@ class TestEntryManagerFromBatch:
         result = await em.execute_moo(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
         )
 

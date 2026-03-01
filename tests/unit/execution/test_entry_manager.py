@@ -1,13 +1,16 @@
 """Unit tests for EntryManager (autotrader/execution/entry_manager.py).
 
 Tests cover:
-- Group A (MOO): RSI MR, Consecutive Down, Volume Divergence at 9:30
-- Group B (Confirm): EMA Pullback at 9:45-10:00
+- Group A (MOO): Breakout Momentum, RSI MR at 9:30
+- Group B (Confirm): currently empty
 - Confirmation condition: long price >= prev_close * 0.997
 - Confirmation condition: short price <= prev_close * 1.003
 - Signal discarded if confirmation fails by 10:00
 - Daily entry limit: max 3 new entries
-- Direction limits: max 6 long, max 3 short
+- Direction limits: max 8 long, max 3 short
+- Total position cap: max 9
+- Per-strategy caps: BM=2, MR=4
+- Regime-based entry blocking
 - Entry window: no entries after 10:00 AM
 """
 from __future__ import annotations
@@ -21,12 +24,15 @@ from autotrader.core.types import AccountInfo, OrderResult, Position, Signal
 from autotrader.execution.entry_manager import (
     Candidate,
     EntryManager,
+    _DEFAULT_STRATEGY_CAP,
     _GROUP_A_STRATEGIES,
     _GROUP_B_STRATEGIES,
     _GAP_TOLERANCE,
     _MAX_DAILY_ENTRIES,
     _MAX_LONG_POSITIONS,
     _MAX_SHORT_POSITIONS,
+    _MAX_STRATEGY_POSITIONS,
+    _MAX_TOTAL_POSITIONS,
 )
 from autotrader.execution.exit_rules import ExitRuleEngine, HeldPosition
 from autotrader.portfolio.regime_detector import MarketRegime
@@ -143,9 +149,9 @@ class TestGroupMembership:
         """rsi_mean_reversion should be in Group A (MOO)."""
         assert "rsi_mean_reversion" in _GROUP_A_STRATEGIES
 
-    def test_consecutive_down_is_group_a(self):
-        """consecutive_down should be in Group A (MOO)."""
-        assert "consecutive_down" in _GROUP_A_STRATEGIES
+    def test_breakout_momentum_is_group_a(self):
+        """breakout_momentum should be in Group A (MOO)."""
+        assert "breakout_momentum" in _GROUP_A_STRATEGIES
 
     def test_volume_divergence_not_in_group_a(self):
         """volume_divergence should NOT be in Group A (removed in 13th backtest)."""
@@ -155,10 +161,9 @@ class TestGroupMembership:
         """ema_pullback should NOT be in Group B (strategy disabled)."""
         assert "ema_pullback" not in _GROUP_B_STRATEGIES
 
-    def test_group_a_has_three_strategies(self):
-        """Group A should contain exactly 3 strategies."""
-        assert len(_GROUP_A_STRATEGIES) == 3
-        assert "ema_cross_trend" in _GROUP_A_STRATEGIES
+    def test_group_a_has_two_strategies(self):
+        """Group A should contain exactly 2 strategies."""
+        assert len(_GROUP_A_STRATEGIES) == 2
 
     def test_group_b_is_empty(self):
         """Group B should be empty (no confirmation strategies currently active)."""
@@ -169,7 +174,7 @@ class TestGroupMembership:
         em = _make_entry_manager()
         candidates = [
             _make_candidate(strategy="rsi_mean_reversion", symbol="AAPL"),
-            _make_candidate(strategy="consecutive_down", symbol="MSFT"),
+            _make_candidate(strategy="breakout_momentum", symbol="MSFT"),
         ]
         em.load_candidates(candidates)
         assert len(em._group_a) == 2
@@ -246,7 +251,7 @@ class TestExecuteMoo:
         result = await em.execute_moo(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
         )
 
@@ -263,7 +268,7 @@ class TestExecuteMoo:
         result = await em.execute_moo(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
         )
 
@@ -283,7 +288,7 @@ class TestExecuteMoo:
         await em.execute_moo(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
         )
 
@@ -302,7 +307,7 @@ class TestExecuteMoo:
         await em.execute_moo(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
         )
 
@@ -319,7 +324,7 @@ class TestExecuteMoo:
         result = await em.execute_moo(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
         )
 
@@ -336,7 +341,7 @@ class TestExecuteMoo:
         await em.execute_moo(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
         )
 
@@ -362,7 +367,7 @@ class TestDailyEntryLimit:
         result = await em.execute_moo(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
         )
 
@@ -386,28 +391,32 @@ class TestDailyEntryLimit:
 # ---------------------------------------------------------------------------
 
 class TestDirectionPositionLimits:
-    """Max 6 long, max 3 short concurrent positions."""
+    """Max 8 long, max 3 short, max 9 total concurrent positions."""
 
-    def test_max_long_constant_is_6(self):
-        """_MAX_LONG_POSITIONS should be 6."""
-        assert _MAX_LONG_POSITIONS == 6
+    def test_max_long_constant_is_8(self):
+        """_MAX_LONG_POSITIONS should be 8 (Iter 29)."""
+        assert _MAX_LONG_POSITIONS == 8
 
     def test_max_short_constant_is_3(self):
         """_MAX_SHORT_POSITIONS should be 3."""
         assert _MAX_SHORT_POSITIONS == 3
 
+    def test_max_total_constant_is_9(self):
+        """_MAX_TOTAL_POSITIONS should be 9."""
+        assert _MAX_TOTAL_POSITIONS == 9
+
     @pytest.mark.asyncio
     async def test_blocked_when_max_longs_reached(self):
-        """New long entry should be rejected when 6 long positions already open."""
+        """New long entry should be rejected when 8 long positions already open."""
         em = _make_entry_manager(order_result=_make_order_result())
-        # 6 long positions already open
-        long_positions = [_make_position(symbol=f"SYM{i}", side="long") for i in range(6)]
+        # 8 long positions already open
+        long_positions = [_make_position(symbol=f"SYM{i}", side="long") for i in range(8)]
         em.load_candidates([_make_candidate(strategy="rsi_mean_reversion", direction="long")])
 
         result = await em.execute_moo(
             account=_make_account(),
             positions=long_positions,
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
         )
 
@@ -427,11 +436,54 @@ class TestDirectionPositionLimits:
         result = await em.execute_moo(
             account=_make_account(),
             positions=short_positions,
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
         )
 
         assert result == []
+
+    @pytest.mark.asyncio
+    async def test_blocked_when_total_cap_reached(self):
+        """New entry should be rejected when 9 total positions already open."""
+        em = _make_entry_manager(order_result=_make_order_result())
+        # Mix of long and short = 9 total
+        positions = (
+            [_make_position(symbol=f"LONG{i}", side="long") for i in range(7)]
+            + [_make_position(symbol=f"SHORT{i}", side="short") for i in range(2)]
+        )
+        assert len(positions) == 9
+        em.load_candidates([_make_candidate(
+            strategy="rsi_mean_reversion", direction="long", symbol="NEW",
+        )])
+
+        result = await em.execute_moo(
+            account=_make_account(),
+            positions=positions,
+            regime=MarketRegime.TREND_UP,
+            current_date_et=TRADE_DATE,
+        )
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_allowed_when_below_total_cap(self):
+        """Entry should be allowed when total positions < 9."""
+        fill_result = _make_order_result(status="filled")
+        em = _make_entry_manager(order_result=fill_result)
+        # 7 total positions (below cap)
+        positions = [_make_position(symbol=f"SYM{i}", side="long") for i in range(7)]
+        em.load_candidates([_make_candidate(
+            strategy="rsi_mean_reversion", direction="long", symbol="NEW",
+        )])
+
+        result = await em.execute_moo(
+            account=_make_account(),
+            positions=positions,
+            regime=MarketRegime.TREND_UP,
+            current_date_et=TRADE_DATE,
+        )
+
+        assert len(result) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +503,7 @@ class TestExecuteConfirmation:
         result = await em.execute_confirmation(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
             current_prices={"AAPL": 100.5},
         )
@@ -471,12 +523,12 @@ class TestExecuteConfirmation:
     async def test_missing_price_does_not_affect_group_b(self):
         """Group B is empty; missing prices result in empty confirmation result."""
         em = _make_entry_manager(order_result=_make_order_result())
-        em.load_candidates([_make_candidate(strategy="consecutive_down", symbol="AAPL")])
+        em.load_candidates([_make_candidate(strategy="breakout_momentum", symbol="AAPL")])
 
         await em.execute_confirmation(
             account=_make_account(),
             positions=[],
-            regime=MarketRegime.TREND,
+            regime=MarketRegime.TREND_UP,
             current_date_et=TRADE_DATE,
             current_prices={},
         )
@@ -489,7 +541,7 @@ class TestExecuteConfirmation:
         em = _make_entry_manager()
         em.load_candidates([
             _make_candidate(strategy="rsi_mean_reversion", symbol="AAPL"),
-            _make_candidate(strategy="consecutive_down", symbol="MSFT"),
+            _make_candidate(strategy="breakout_momentum", symbol="MSFT"),
         ])
 
         discarded = em.close_entry_window()
@@ -506,3 +558,123 @@ class TestExecuteConfirmation:
         discarded = em.close_entry_window()
 
         assert discarded == 0
+
+
+# ---------------------------------------------------------------------------
+# Test class: per-strategy position caps
+# ---------------------------------------------------------------------------
+
+class TestPerStrategyPositionCaps:
+    """Per-strategy caps: BM=2, MR=4, default=2."""
+
+    def test_strategy_cap_constants(self):
+        """Verify per-strategy cap configuration."""
+        assert _MAX_STRATEGY_POSITIONS["breakout_momentum"] == 2
+        assert _MAX_STRATEGY_POSITIONS["rsi_mean_reversion"] == 4
+        assert _DEFAULT_STRATEGY_CAP == 2
+
+    def test_bm_cap_is_locked_at_2(self):
+        """breakout_momentum should have a cap of 2."""
+        assert _MAX_STRATEGY_POSITIONS.get("breakout_momentum") == 2
+
+    def test_mr_cap_is_4(self):
+        """rsi_mean_reversion should have a cap of 4."""
+        assert _MAX_STRATEGY_POSITIONS.get("rsi_mean_reversion") == 4
+
+
+# ---------------------------------------------------------------------------
+# Test class: regime-based entry blocking
+# ---------------------------------------------------------------------------
+
+class TestRegimeEntryBlocking:
+    """Regime allocation table controls entry blocking for specific strategies."""
+
+    @pytest.mark.asyncio
+    async def test_breakout_blocked_in_trend_down(self):
+        """breakout_momentum should be blocked in TREND_DOWN regime."""
+        fill_result = _make_order_result(status="filled")
+        em = _make_entry_manager(order_result=fill_result)
+        em.load_candidates([_make_candidate(
+            strategy="breakout_momentum", symbol="AAPL", direction="long",
+        )])
+
+        result = await em.execute_moo(
+            account=_make_account(),
+            positions=[],
+            regime=MarketRegime.TREND_DOWN,
+            current_date_et=TRADE_DATE,
+        )
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_breakout_allowed_in_trend_up(self):
+        """breakout_momentum should be allowed in TREND_UP regime."""
+        fill_result = _make_order_result(status="filled")
+        em = _make_entry_manager(order_result=fill_result)
+        em.load_candidates([_make_candidate(
+            strategy="breakout_momentum", symbol="AAPL", direction="long",
+        )])
+
+        result = await em.execute_moo(
+            account=_make_account(),
+            positions=[],
+            regime=MarketRegime.TREND_UP,
+            current_date_et=TRADE_DATE,
+        )
+
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_mr_short_blocked_in_trend_up(self):
+        """rsi_mean_reversion short should be blocked in TREND_UP regime."""
+        fill_result = _make_order_result(status="filled")
+        em = _make_entry_manager(order_result=fill_result)
+        em.load_candidates([_make_candidate(
+            strategy="rsi_mean_reversion", symbol="AAPL", direction="short",
+        )])
+
+        result = await em.execute_moo(
+            account=_make_account(),
+            positions=[],
+            regime=MarketRegime.TREND_UP,
+            current_date_et=TRADE_DATE,
+        )
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_mr_short_allowed_in_trend_down(self):
+        """rsi_mean_reversion short should be allowed in TREND_DOWN regime."""
+        fill_result = _make_order_result(status="filled")
+        em = _make_entry_manager(order_result=fill_result)
+        em.load_candidates([_make_candidate(
+            strategy="rsi_mean_reversion", symbol="AAPL", direction="short",
+        )])
+
+        result = await em.execute_moo(
+            account=_make_account(),
+            positions=[],
+            regime=MarketRegime.TREND_DOWN,
+            current_date_et=TRADE_DATE,
+        )
+
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_mr_long_allowed_in_trend_up(self):
+        """rsi_mean_reversion long should be allowed in TREND_UP (only short blocked)."""
+        fill_result = _make_order_result(status="filled")
+        em = _make_entry_manager(order_result=fill_result)
+        em.load_candidates([_make_candidate(
+            strategy="rsi_mean_reversion", symbol="AAPL", direction="long",
+        )])
+
+        result = await em.execute_moo(
+            account=_make_account(),
+            positions=[],
+            regime=MarketRegime.TREND_UP,
+            current_date_et=TRADE_DATE,
+        )
+
+        assert len(result) == 1

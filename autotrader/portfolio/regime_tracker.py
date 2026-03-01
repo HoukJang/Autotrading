@@ -3,6 +3,9 @@
 Wraps raw MarketRegime classification with a confirmation counter
 to prevent regime flickering from triggering premature strategy changes.
 A regime change must persist for N consecutive bars before being confirmed.
+
+Note: RegimeDetector now has built-in 2-day confirmation, so the default
+confirmation_bars is 1 (passthrough mode).
 """
 from __future__ import annotations
 
@@ -29,7 +32,7 @@ class RegimeTracker:
     :meth:`update` calls before being confirmed as a transition.
     """
 
-    def __init__(self, confirmation_bars: int = 3) -> None:
+    def __init__(self, confirmation_bars: int = 1) -> None:
         self._confirmation_bars = confirmation_bars
         self._confirmed_regime: MarketRegime = MarketRegime.UNCERTAIN
         self._pending_regime: MarketRegime | None = None

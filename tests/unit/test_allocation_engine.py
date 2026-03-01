@@ -1,15 +1,18 @@
 """Tests for AllocationEngine.
 
-Covers position sizing, entry gating, weight retrieval,
-regime-based variation, risk-based ATR sizing, short direction
-reduction, and edge cases.
+Covers risk-based position sizing (primary), MAX_POSITION_PCT hard cap,
+entry gating, weight retrieval, regime-based variation, ATR-based sizing,
+short direction reduction, GDR/safety-net hooks, and edge cases.
+
+Updated for the risk-based primary sizing model where the regime
+allocation table provides per-trade risk percentages, and
+MAX_POSITION_PCT (25%) is the hard cap.
 """
 from __future__ import annotations
 
 import pytest
 
 from autotrader.portfolio.allocation_engine import (
-    RISK_PER_TRADE_PCT,
     SHORT_SIZE_RATIO,
     AllocationEngine,
 )
@@ -26,296 +29,331 @@ def engine(detector: RegimeDetector) -> AllocationEngine:
     return AllocationEngine(regime_detector=detector)
 
 
-# ── Position size calculation tests ──────────────────────────────────
+# -- Position size calculation tests ----------------------------------------
 
 
 class TestGetPositionSize:
-    def test_basic_position_size(self, engine: AllocationEngine):
-        """equity * weight / price = shares (truncated to int)."""
-        # TREND: ema_pullback weight = 0.28
-        # 10000 * 0.28 / 150.0 = 18.666 -> 18 shares
+    def test_basic_position_size_fallback(self, engine: AllocationEngine):
+        """Fallback sizing (no ATR/stop): qty = equity * risk * 5 / price.
+
+        TREND_UP: breakout_momentum risk = 0.040
+        qty = int(10000 * 0.040 * 5 / 150.0) = int(13.33) = 13
+        max_by_position = int(10000 * 0.25 / 150) = 16
+        result = min(13, 16) = 13
+        """
         size = engine.get_position_size(
-            strategy_name="ema_pullback", price=150.0,
-            equity=10000.0, regime=MarketRegime.TREND,
+            strategy_name="breakout_momentum", price=150.0,
+            equity=10000.0, regime=MarketRegime.TREND_UP,
         )
-        assert size == 18
+        assert size == 13
 
     def test_position_size_truncates_to_int(self, engine: AllocationEngine):
-        """Fractional shares truncated, not rounded."""
-        # TREND: volume_divergence weight = 0.22
-        # 10000 * 0.22 / 300.0 = 7.333... -> 7
+        """Fractional shares truncated, not rounded.
+
+        TREND_UP: breakout_momentum risk = 0.040
+        qty = int(10000 * 0.040 * 5 / 130.0) = int(15.38) = 15
+        max_by_position = int(10000 * 0.25 / 130) = 19
+        result = min(15, 19) = 15
+        """
         size = engine.get_position_size(
-            strategy_name="volume_divergence", price=300.0,
-            equity=10000.0, regime=MarketRegime.TREND,
+            strategy_name="breakout_momentum", price=130.0,
+            equity=10000.0, regime=MarketRegime.TREND_UP,
         )
-        assert size == 7
+        assert size == 15
 
     def test_position_size_zero_when_price_zero(self, engine: AllocationEngine):
         size = engine.get_position_size(
-            strategy_name="ema_pullback", price=0.0,
-            equity=10000.0, regime=MarketRegime.TREND,
+            strategy_name="breakout_momentum", price=0.0,
+            equity=10000.0, regime=MarketRegime.TREND_UP,
         )
         assert size == 0
 
     def test_position_size_zero_when_price_negative(self, engine: AllocationEngine):
         size = engine.get_position_size(
-            strategy_name="ema_pullback", price=-50.0,
-            equity=10000.0, regime=MarketRegime.TREND,
+            strategy_name="breakout_momentum", price=-50.0,
+            equity=10000.0, regime=MarketRegime.TREND_UP,
         )
         assert size == 0
 
     def test_position_size_zero_when_below_minimum(self, engine: AllocationEngine):
-        """max_value < MIN_POSITION_VALUE ($200) -> 0 shares."""
-        # TREND: rsi_mean_reversion weight = 0.00
-        # 1000 * 0.00 = $0 < $200 minimum
+        """Small equity + low risk -> qty * price < $200 minimum.
+
+        TREND_DOWN: breakout_momentum risk = 0.005
+        qty = int(1000 * 0.005 * 5 / 50.0) = int(0.5) = 0
+        0 * 50 < 200 -> 0
+        """
         size = engine.get_position_size(
-            strategy_name="rsi_mean_reversion", price=50.0,
-            equity=1000.0, regime=MarketRegime.TREND,
+            strategy_name="breakout_momentum", price=50.0,
+            equity=1000.0, regime=MarketRegime.TREND_DOWN,
         )
         assert size == 0
 
-    def test_position_size_unknown_strategy_returns_zero(self, engine: AllocationEngine):
-        """Strategy not in weight dict -> weight 0.0 -> 0 shares."""
+    def test_position_size_unknown_strategy_uses_default_risk(self, engine: AllocationEngine):
+        """Unknown strategy gets default base_risk of 0.02.
+
+        qty = int(5000 * 0.02 * 5 / 100) = int(5.0) = 5
+        max_by_position = int(5000 * 0.25 / 100) = 12
+        result = min(5, 12) = 5
+        5 * 100 = 500 >= 200 -> 5
+        """
         size = engine.get_position_size(
             strategy_name="nonexistent_strategy", price=100.0,
-            equity=50000.0, regime=MarketRegime.TREND,
+            equity=5000.0, regime=MarketRegime.TREND_UP,
         )
-        assert size == 0
+        assert size == 5
 
 
-# ── should_enter tests ───────────────────────────────────────────────
+# -- should_enter tests -----------------------------------------------------
 
 
 class TestShouldEnter:
-    def test_allowed_when_weight_sufficient_and_below_max(self, engine: AllocationEngine):
-        """Weight >= 0.05 and position_count < 2 -> True."""
+    def test_allowed_when_weight_nonzero(self, engine: AllocationEngine):
+        """Weight >= 0.001 -> True (position caps moved to EntryManager)."""
         assert engine.should_enter(
-            strategy_name="ema_pullback", regime=MarketRegime.TREND,
+            strategy_name="breakout_momentum", regime=MarketRegime.TREND_UP,
             strategy_position_count=0,
         ) is True
 
-    def test_allowed_with_one_existing_position(self, engine: AllocationEngine):
+    def test_allowed_regardless_of_position_count(self, engine: AllocationEngine):
+        """Position cap enforcement is in EntryManager now, not here."""
         assert engine.should_enter(
-            strategy_name="ema_pullback", regime=MarketRegime.TREND,
-            strategy_position_count=1,
-        ) is True
-
-    def test_blocked_when_weight_below_threshold(self, engine: AllocationEngine):
-        """Weight < 0.05 -> entry denied.
-
-        No strategy in the current weight tables has weight < 0.05,
-        so we test with a nonexistent strategy (weight = 0.0).
-        """
-        assert engine.should_enter(
-            strategy_name="nonexistent_strategy", regime=MarketRegime.TREND,
-            strategy_position_count=0,
-        ) is False
-
-    def test_blocked_when_max_positions_reached(self, engine: AllocationEngine):
-        """position_count >= MAX_POSITIONS_PER_STRATEGY (2) -> entry denied."""
-        assert engine.should_enter(
-            strategy_name="ema_pullback", regime=MarketRegime.TREND,
-            strategy_position_count=2,
-        ) is False
-
-    def test_blocked_when_positions_exceed_max(self, engine: AllocationEngine):
-        assert engine.should_enter(
-            strategy_name="ema_pullback", regime=MarketRegime.TREND,
+            strategy_name="breakout_momentum", regime=MarketRegime.TREND_UP,
             strategy_position_count=5,
+        ) is True
+
+    def test_blocked_when_weight_zero(self, engine: AllocationEngine):
+        """Weight 0.0 -> entry denied (unknown strategy)."""
+        assert engine.should_enter(
+            strategy_name="nonexistent_strategy", regime=MarketRegime.TREND_UP,
+            strategy_position_count=0,
         ) is False
 
 
-# ── get_all_weights tests ────────────────────────────────────────────
+# -- get_all_weights tests --------------------------------------------------
 
 
 class TestGetAllWeights:
-    def test_returns_correct_weights_for_trend(self, engine: AllocationEngine):
-        weights = engine.get_all_weights(MarketRegime.TREND)
-        assert weights["ema_pullback"] == 0.28
-        assert weights["volume_divergence"] == 0.22
-        assert weights["breakout_momentum"] == 0.33
-        assert len(weights) == 5
+    def test_returns_correct_weights_for_trend_up(self, engine: AllocationEngine):
+        weights = engine.get_all_weights(MarketRegime.TREND_UP)
+        assert weights["breakout_momentum"] == 0.040
+        assert weights["rsi_mean_reversion"] == 0.012
+        assert len(weights) == 2
 
     def test_returns_correct_weights_for_ranging(self, engine: AllocationEngine):
         weights = engine.get_all_weights(MarketRegime.RANGING)
-        assert weights["rsi_mean_reversion"] == 0.35
-        assert weights["breakout_momentum"] == 0.05
-        assert len(weights) == 5
+        assert weights["rsi_mean_reversion"] == 0.040
+        assert weights["breakout_momentum"] == 0.005
+        assert len(weights) == 2
 
 
-# ── Regime-based variation tests ─────────────────────────────────────
+# -- Regime-based variation tests -------------------------------------------
 
 
 class TestRegimeVariation:
-    def test_trend_gives_more_to_pullback_than_ranging(self, engine: AllocationEngine):
-        """TREND allocates more to ema_pullback (0.28) than RANGING (0.10)."""
+    def test_trend_up_gives_more_to_breakout_than_ranging(self, engine: AllocationEngine):
+        """TREND_UP allocates more risk to breakout_momentum (0.040) than RANGING (0.005)."""
         trend_size = engine.get_position_size(
-            strategy_name="ema_pullback", price=100.0,
-            equity=10000.0, regime=MarketRegime.TREND,
+            strategy_name="breakout_momentum", price=10.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
         )
         ranging_size = engine.get_position_size(
-            strategy_name="ema_pullback", price=100.0,
-            equity=10000.0, regime=MarketRegime.RANGING,
+            strategy_name="breakout_momentum", price=10.0,
+            equity=50000.0, regime=MarketRegime.RANGING,
         )
         assert trend_size > ranging_size
 
-    def test_ranging_gives_more_to_rsi_than_trend(self, engine: AllocationEngine):
-        """RANGING allocates more to rsi_mean_reversion (0.35) than TREND (0.00)."""
+    def test_ranging_gives_more_to_rsi_than_trend_up(self, engine: AllocationEngine):
+        """RANGING allocates more risk to rsi_mean_reversion (0.040) than TREND_UP (0.012)."""
         ranging_size = engine.get_position_size(
-            strategy_name="rsi_mean_reversion", price=100.0,
-            equity=10000.0, regime=MarketRegime.RANGING,
+            strategy_name="rsi_mean_reversion", price=10.0,
+            equity=50000.0, regime=MarketRegime.RANGING,
         )
         trend_size = engine.get_position_size(
-            strategy_name="rsi_mean_reversion", price=100.0,
-            equity=10000.0, regime=MarketRegime.TREND,
+            strategy_name="rsi_mean_reversion", price=10.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
         )
         assert ranging_size > trend_size
 
 
-# ── Small account tests ─────────────────────────────────────────────
-
-
-class TestSmallAccount:
-    def test_1000_equity_realistic_sizes(self, engine: AllocationEngine):
-        """$1000 equity: only strategies with weight >= 0.20 can allocate ($200 min)."""
-        # TREND weights: breakout=0.33 -> $330 OK, ema_pullback=0.28 -> $280 OK,
-        # vol_div=0.22 -> $220 OK, consec_down=0.17 -> $170 SKIP, rsi_mr=0.00 -> $0 SKIP
-        breakout = engine.get_position_size("breakout_momentum", 50.0, 1000.0, MarketRegime.TREND)
-        ema_pb = engine.get_position_size("ema_pullback", 50.0, 1000.0, MarketRegime.TREND)
-        vol_div = engine.get_position_size("volume_divergence", 50.0, 1000.0, MarketRegime.TREND)
-        consec = engine.get_position_size("consecutive_down", 50.0, 1000.0, MarketRegime.TREND)
-        rsi_mr = engine.get_position_size("rsi_mean_reversion", 50.0, 1000.0, MarketRegime.TREND)
-
-        assert breakout == 6   # 330 / 50 = 6
-        assert ema_pb == 5     # 280 / 50 = 5
-        assert vol_div == 4    # 220 / 50 = 4
-        assert consec == 0     # 170 < 200 minimum
-        assert rsi_mr == 0     # 0 < 200 minimum
-
-
-# -- Risk-based sizing tests -----------------------------------------------
+# -- Risk-based sizing tests ------------------------------------------------
 
 
 class TestRiskBasedSizing:
     """Tests for ATR-based risk sizing and short direction reduction."""
 
-    def test_risk_based_sizing_limits_position(self, engine: AllocationEngine):
-        """High ATR makes risk-based qty the binding constraint."""
-        # TREND: ema_pullback weight = 0.28
-        # weight_qty = int(10000 * 0.28 / 100) = 28
-        # risk_per_trade = 10000 * 0.02 = 200
-        # stop_distance = 2.0 * 8.0 = 16.0
-        # risk_qty = int(200 / 16) = 12
-        # qty = min(28, 12) = 12
+    def test_risk_based_sizing_with_atr(self, engine: AllocationEngine):
+        """ATR-based sizing: qty = risk_per_trade / (2 * ATR).
+
+        TREND_UP: breakout_momentum risk = 0.040
+        risk_per_trade = 50000 * 0.040 = 2000
+        qty = int(2000 / (2 * 80)) = int(12.5) = 12
+        max_by_position = int(50000 * 0.25 / 100) = 125
+        result = min(12, 125) = 12
+        """
         size = engine.get_position_size(
-            strategy_name="ema_pullback", price=100.0,
-            equity=10000.0, regime=MarketRegime.TREND,
-            atr=8.0, direction="long",
+            strategy_name="breakout_momentum", price=100.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
+            atr=80.0, direction="long",
         )
         assert size == 12
 
     def test_risk_based_sizing_with_low_atr(self, engine: AllocationEngine):
-        """Low ATR means weight-based qty is the binding constraint."""
-        # TREND: ema_pullback weight = 0.28
-        # weight_qty = int(10000 * 0.28 / 100) = 28
-        # risk_per_trade = 10000 * 0.02 = 200
-        # stop_distance = 2.0 * 0.5 = 1.0
-        # risk_qty = int(200 / 1.0) = 200
-        # qty = min(28, 200) = 28
+        """Low ATR gives large qty, capped by MAX_POSITION_PCT.
+
+        TREND_UP: breakout_momentum risk = 0.040
+        risk_per_trade = 50000 * 0.040 = 2000
+        qty = int(2000 / (2 * 0.5)) = int(2000) = 2000
+        max_by_position = int(50000 * 0.25 / 100) = 125
+        result = min(2000, 125) = 125
+        """
         size = engine.get_position_size(
-            strategy_name="ema_pullback", price=100.0,
-            equity=10000.0, regime=MarketRegime.TREND,
+            strategy_name="breakout_momentum", price=100.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
             atr=0.5, direction="long",
         )
-        assert size == 28
+        assert size == 125
 
     def test_short_direction_reduces_size(self, engine: AllocationEngine):
-        """Short position sized at 65% of equivalent long position."""
-        # TREND: ema_pullback weight = 0.28
-        # weight_qty = int(10000 * 0.28 / 100) = 28
-        # No ATR -> qty stays at weight_qty = 28
-        # short reduction: int(28 * 0.65) = 18
+        """Short position sized at 65% of equivalent long position.
+
+        TREND_UP: breakout_momentum risk = 0.040
+        Fallback: qty = int(50000 * 0.040 * 5 / 100) = 100
+        max_by_position = int(50000 * 0.25 / 100) = 125
+        long_qty = min(100, 125) = 100
+        short_qty = int(100 * 0.65) = 65
+        """
         long_size = engine.get_position_size(
-            strategy_name="ema_pullback", price=100.0,
-            equity=10000.0, regime=MarketRegime.TREND,
+            strategy_name="breakout_momentum", price=100.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
             direction="long",
         )
         short_size = engine.get_position_size(
-            strategy_name="ema_pullback", price=100.0,
-            equity=10000.0, regime=MarketRegime.TREND,
+            strategy_name="breakout_momentum", price=100.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
             direction="short",
         )
-        assert long_size == 28
-        assert short_size == 18
+        assert long_size == 100
+        assert short_size == 65
         assert short_size == int(long_size * SHORT_SIZE_RATIO)
 
-    def test_short_with_risk_based_sizing(self, engine: AllocationEngine):
-        """Both risk cap and short reduction applied together."""
-        # TREND: ema_pullback weight = 0.28
-        # weight_qty = int(10000 * 0.28 / 100) = 28
-        # risk_per_trade = 10000 * 0.02 = 200
-        # stop_distance = 2.0 * 8.0 = 16.0
-        # risk_qty = int(200 / 16) = 12
-        # qty = min(28, 12) = 12
-        # short reduction: int(12 * 0.65) = 7
-        size = engine.get_position_size(
-            strategy_name="ema_pullback", price=100.0,
-            equity=10000.0, regime=MarketRegime.TREND,
-            atr=8.0, direction="short",
-        )
-        assert size == 7
-
     def test_backward_compatibility_no_atr(self, engine: AllocationEngine):
-        """When atr=None, behaves identically to the original weight-only logic."""
-        # TREND: ema_pullback weight = 0.28
-        # 10000 * 0.28 / 150.0 = 18.666 -> 18 shares
-        size = engine.get_position_size(
-            strategy_name="ema_pullback", price=150.0,
-            equity=10000.0, regime=MarketRegime.TREND,
-        )
-        assert size == 18
+        """No ATR -> fallback sizing.
 
-    def test_risk_per_trade_2pct(self, engine: AllocationEngine):
-        """Verify exact risk calculation: $3000 * 2% = $60, ATR=$2, stop=$4, max=15."""
-        # RANGING: consecutive_down weight = 0.30
-        # weight_qty = int(3000 * 0.30 / 20) = 45
-        # risk_per_trade = 3000 * 0.02 = 60
-        # stop_distance = 2.0 * 2.0 = 4.0
-        # risk_qty = int(60 / 4.0) = 15
-        # qty = min(45, 15) = 15
-        # 15 * 20 = 300 >= 200 minimum -> OK
+        TREND_UP: breakout_momentum risk = 0.040
+        qty = int(50000 * 0.040 * 5 / 150) = int(66.66) = 66
+        max_by_position = int(50000 * 0.25 / 150) = 83
+        result = min(66, 83) = 66
+        """
         size = engine.get_position_size(
-            strategy_name="consecutive_down", price=20.0,
-            equity=3000.0, regime=MarketRegime.RANGING,
+            strategy_name="breakout_momentum", price=150.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
+        )
+        assert size == 66
+
+    def test_risk_sizing_with_atr_rsi_ranging(self, engine: AllocationEngine):
+        """Verify ATR-based risk calculation for MR in RANGING.
+
+        RANGING: rsi_mean_reversion risk = 0.040
+        risk_per_trade = 30000 * 0.040 = 1200
+        qty = int(1200 / (2 * 2.0)) = int(300) = 300
+        max_by_position = int(30000 * 0.25 / 20) = 375
+        result = min(300, 375) = 300
+        """
+        size = engine.get_position_size(
+            strategy_name="rsi_mean_reversion", price=20.0,
+            equity=30000.0, regime=MarketRegime.RANGING,
             atr=2.0, direction="long",
         )
-        assert size == 15
+        assert size == 300
 
-        # Confirm the risk math independently
-        risk_amount = 3000.0 * RISK_PER_TRADE_PCT
-        assert risk_amount == 60.0
-        stop = 2.0 * 2.0
-        assert stop == 4.0
-        assert int(risk_amount / stop) == 15
+    def test_stop_distance_overrides_atr(self, engine: AllocationEngine):
+        """Explicit stop_distance takes priority over 2*ATR.
 
-    def test_short_minimum_position_check(self, engine: AllocationEngine):
-        """Short reduction that drops qty*price below $200 returns 0."""
-        # TREND: consecutive_down weight = 0.17
-        # weight_qty = int(2000 * 0.17 / 150) = int(2.266) = 2
-        # No ATR -> qty = 2
-        # short reduction: int(2 * 0.65) = 1
-        # 1 * 150 = 150 < 200 minimum -> 0
+        TREND_UP: breakout_momentum risk = 0.040
+        risk_per_trade = 50000 * 0.040 = 2000
+        qty = int(2000 / 10.0) = 200
+        max_by_position = int(50000 * 0.25 / 100) = 125
+        result = min(200, 125) = 125
+        """
         size = engine.get_position_size(
-            strategy_name="consecutive_down", price=150.0,
-            equity=2000.0, regime=MarketRegime.TREND,
-            direction="short",
+            strategy_name="breakout_momentum", price=100.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
+            atr=80.0, direction="long",
+            stop_distance=10.0,
         )
-        assert size == 0
+        assert size == 125
 
-        # Verify that the long version would have passed
-        long_size = engine.get_position_size(
-            strategy_name="consecutive_down", price=150.0,
-            equity=2000.0, regime=MarketRegime.TREND,
-            direction="long",
+
+# -- MAX_POSITION_PCT hard cap tests ----------------------------------------
+
+
+class TestMaxPositionCap:
+    def test_hard_cap_limits_large_positions(self, engine: AllocationEngine):
+        """MAX_POSITION_PCT (25%) caps position value.
+
+        Low-priced stock with high risk -> uncapped qty would be huge.
+        equity=10000, price=1.0, risk=0.040
+        fallback: qty = int(10000 * 0.040 * 5 / 1.0) = 2000
+        max_by_position = int(10000 * 0.25 / 1.0) = 2500
+        result = min(2000, 2500) = 2000
+        """
+        size = engine.get_position_size(
+            strategy_name="breakout_momentum", price=1.0,
+            equity=10000.0, regime=MarketRegime.TREND_UP,
         )
-        assert long_size == 2  # 2 * 150 = 300 >= 200
+        assert size == 2000
+
+    def test_max_position_pct_is_25_percent(self, engine: AllocationEngine):
+        assert engine.MAX_POSITION_PCT == 0.25
+
+
+# -- GDR and safety net tests (Phase 4 hooks) --------------------------------
+
+
+class TestGDRAndSafetyNet:
+    def test_gdr_risk_mult_reduces_size(self, engine: AllocationEngine):
+        """gdr_risk_mult=0.5 halves the effective risk.
+
+        TREND_UP: breakout_momentum risk = 0.040
+        effective_risk = 0.040 * 0.5 = 0.020
+        fallback: qty = int(50000 * 0.020 * 5 / 100) = 50
+        max_by_position = 125
+        result = min(50, 125) = 50
+        """
+        size = engine.get_position_size(
+            strategy_name="breakout_momentum", price=100.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
+            gdr_risk_mult=0.5,
+        )
+        assert size == 50
+
+    def test_safety_net_forces_half_percent_risk(self, engine: AllocationEngine):
+        """safety_net_active=True forces 0.5% risk regardless of regime.
+
+        effective_risk = 0.005
+        fallback: qty = int(50000 * 0.005 * 5 / 100) = 12
+        max_by_position = 125
+        result = min(12, 125) = 12
+        """
+        size = engine.get_position_size(
+            strategy_name="breakout_momentum", price=100.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
+            safety_net_active=True,
+        )
+        assert size == 12
+
+    def test_safety_net_overrides_gdr_mult(self, engine: AllocationEngine):
+        """safety_net_active takes precedence over gdr_risk_mult."""
+        size_safety = engine.get_position_size(
+            strategy_name="breakout_momentum", price=100.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
+            gdr_risk_mult=2.0,
+            safety_net_active=True,
+        )
+        size_no_safety = engine.get_position_size(
+            strategy_name="breakout_momentum", price=100.0,
+            equity=50000.0, regime=MarketRegime.TREND_UP,
+            gdr_risk_mult=2.0,
+            safety_net_active=False,
+        )
+        assert size_safety < size_no_safety

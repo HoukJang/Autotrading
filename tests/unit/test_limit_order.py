@@ -5,6 +5,9 @@ Validates that:
 - Entry signals with limit_price produce limit orders
 - Entry signals without limit_price produce market orders
 - Close signals always produce market orders regardless of limit_price
+
+Updated for the 5-regime system with only BM and MR strategies in
+the allocation table.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -76,7 +79,7 @@ class TestLimitOrderFlow:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="consecutive_down",
+            strategy="breakout_momentum",
             symbol="AAPL",
             direction="long",
             strength=0.8,
@@ -98,7 +101,7 @@ class TestLimitOrderFlow:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="consecutive_down",
+            strategy="breakout_momentum",
             symbol="AAPL",
             direction="long",
             strength=0.8,
@@ -141,7 +144,7 @@ class TestLimitOrderFlow:
 
     @pytest.mark.asyncio
     async def test_long_signal_with_limit_different_strategy(self, app):
-        """Long signal with limit_price from ema_pullback produces a limit buy order."""
+        """Long signal with limit_price from rsi_mean_reversion produces a limit buy order."""
         await app._broker.connect()
         account = await app._broker.get_account()
 
@@ -149,7 +152,7 @@ class TestLimitOrderFlow:
         app._bar_history["AAPL"].append(bar)
 
         signal = Signal(
-            strategy="ema_pullback",
+            strategy="rsi_mean_reversion",
             symbol="AAPL",
             direction="long",
             strength=0.9,

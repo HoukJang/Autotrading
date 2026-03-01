@@ -57,13 +57,14 @@ from autotrader.portfolio.regime_position_reviewer import RegimePositionReviewer
 from autotrader.portfolio.regime_tracker import RegimeTracker
 from autotrader.portfolio.tracker import PortfolioTracker
 from autotrader.portfolio.trade_logger import EquitySnapshot, LiveTradeRecord, TradeLogger
+from autotrader.risk.gdr_manager import GDRManager
 from autotrader.risk.manager import RiskManager
 from autotrader.risk.position_sizer import PositionSizer
 from autotrader.rotation.event_driven import EventDrivenRotation
 from autotrader.rotation.manager import RotationManager
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
-from autotrader.strategy.consecutive_down import ConsecutiveDown
+from autotrader.strategy.breakout_momentum import BreakoutMomentum
 # TODO: re-enable after backtest validation
 # from autotrader.strategy.ema_pullback import EmaPullback
 # from autotrader.strategy.volume_divergence import VolumeDivergence
@@ -201,8 +202,11 @@ class AutoTrader:
         self._current_regime: MarketRegime = MarketRegime.UNCERTAIN
         self._spy_bb_width_history: deque[float] = deque(maxlen=20)
         self._regime_proxy_symbol: str = settings.scheduler.regime_proxy_symbol
-        self._regime_tracker = RegimeTracker(confirmation_bars=3)
+        self._regime_tracker = RegimeTracker(confirmation_bars=1)
         self._regime_reviewer = RegimePositionReviewer()
+
+        # --- GDR Manager (initialised with placeholder; reset in start()) ---
+        self._gdr_manager: GDRManager | None = None
 
         # --- Bar history ---
         self._bar_history: dict[str, deque[Bar]] = defaultdict(
@@ -286,6 +290,13 @@ class AutoTrader:
         logger.info("Account equity: %.2f", account.equity)
 
         self._portfolio_tracker = PortfolioTracker(account.equity)
+
+        # GDR Manager: per-strategy drawdown response for live trading
+        self._gdr_manager = GDRManager(
+            strategy_names=["breakout_momentum", "rsi_mean_reversion"],
+            initial_capital=account.equity,
+        )
+
         self._register_strategies()
         self._running = True
 
@@ -385,6 +396,7 @@ class AutoTrader:
             allocation_engine=self._allocation_engine,
             risk_manager=self._risk_manager,
             exit_rule_engine=self._exit_rule_engine,
+            gdr_manager=self._gdr_manager,
         )
 
         self._position_monitor = PositionMonitor(
@@ -512,6 +524,8 @@ class AutoTrader:
         self._exit_rule_engine.on_new_trading_day(today_et)
         if self._entry_manager is not None:
             self._entry_manager.on_new_trading_day(today_et)
+        if self._gdr_manager is not None:
+            self._gdr_manager.reset_daily_entries()
 
     async def _on_gap_filter(self) -> None:
         """Apply gap filter to last batch result at 9:25 AM ET."""
@@ -663,6 +677,10 @@ class AutoTrader:
 
         # Update risk manager
         self._risk_manager.record_pnl(pnl)
+
+        # Update GDR manager (per-strategy drawdown tracking)
+        if self._gdr_manager is not None and held is not None:
+            self._gdr_manager.record_trade_pnl(held.strategy, pnl)
 
         # Update portfolio tracker
         if self._portfolio_tracker is not None and held is not None:
@@ -978,26 +996,25 @@ class AutoTrader:
     # -----------------------------------------------------------------------
 
     def _update_regime(self, indicators: dict) -> None:
-        """Update market regime from proxy symbol indicators."""
+        """Update market regime from proxy symbol SPY indicators."""
         adx = indicators.get("ADX_14")
+        ema_50 = indicators.get("EMA_50")
         bbands = indicators.get("BBANDS_20")
-        atr = indicators.get("ATR_14")
-        if any(v is None for v in [adx, bbands, atr]):
+        if any(v is None for v in [adx, ema_50, bbands]):
             return
-        bb_width = bbands["width"]
-        self._spy_bb_width_history.append(bb_width)
-        bb_width_avg = sum(self._spy_bb_width_history) / len(self._spy_bb_width_history)
         history = self._bar_history.get(self._regime_proxy_symbol)
         if not history:
             return
         close = history[-1].close
-        atr_ratio = atr / close if close > 0 else 0.0
+        bb_upper = bbands.get("upper", 0)
+        bb_lower = bbands.get("lower", 0)
+        bb_middle = bbands.get("middle", 1.0)
+        if bb_middle <= 0:
+            bb_middle = 1.0
+        bb_ratio = (bb_upper - bb_lower) / bb_middle
 
         raw_regime = self._regime_detector.classify(
-            adx=adx,
-            bb_width=bb_width,
-            bb_width_avg=bb_width_avg,
-            atr_ratio=atr_ratio,
+            adx=adx, close=close, ema_50=ema_50, bb_ratio=bb_ratio,
         )
 
         timestamp = history[-1].timestamp
@@ -1091,46 +1108,41 @@ class AutoTrader:
         self._initialize_regime_from_daily()
 
     def _initialize_regime_from_daily(self) -> None:
-        """Walk SPY daily bars to build bb_width_history and classify regime."""
+        """Walk SPY daily bars to classify regime using SPY-based 5-regime system."""
         proxy = self._regime_proxy_symbol
         spy_history = self._daily_bar_history.get(proxy)
-        if not spy_history or len(spy_history) < 30:
+        if not spy_history or len(spy_history) < 50:
             logger.warning(
                 "Insufficient %s daily bars for regime init (%d bars)",
                 proxy, len(spy_history) if spy_history else 0,
             )
             return
 
-        self._spy_bb_width_history.clear()
-        temp: deque[Bar] = deque(maxlen=self._settings.data.bar_history_size)
-        for bar in spy_history:
-            temp.append(bar)
-            indicators = self._indicator_engine.compute(temp)
-            bbands = indicators.get("BBANDS_20")
-            if bbands is not None:
-                self._spy_bb_width_history.append(bbands["width"])
-
-        indicators = self._indicator_engine.compute(spy_history)
+        indicators = self._indicator_engine.compute(list(spy_history))
         adx = indicators.get("ADX_14")
+        ema_50 = indicators.get("EMA_50")
         bbands = indicators.get("BBANDS_20")
-        atr = indicators.get("ATR_14")
-        if any(v is None for v in [adx, bbands, atr]):
+
+        if any(v is None for v in [adx, ema_50, bbands]):
             logger.warning("Indicators still None after warmup")
             return
 
-        bb_width_avg = sum(self._spy_bb_width_history) / len(self._spy_bb_width_history)
         close = list(spy_history)[-1].close
-        atr_ratio = atr / close if close > 0 else 0.0
+        bb_upper = bbands.get("upper", 0)
+        bb_lower = bbands.get("lower", 0)
+        bb_middle = bbands.get("middle", 1.0)
+        if bb_middle <= 0:
+            bb_middle = 1.0
+        bb_ratio = (bb_upper - bb_lower) / bb_middle
 
-        regime = self._regime_detector.classify(
-            adx=adx, bb_width=bbands["width"],
-            bb_width_avg=bb_width_avg, atr_ratio=atr_ratio,
+        regime = self._regime_detector.update(
+            adx=adx, close=close, ema_50=ema_50, bb_ratio=bb_ratio,
         )
         self._current_regime = regime
         self._regime_tracker._confirmed_regime = regime
         logger.info(
-            "Regime initialised: %s (ADX=%.1f, BB_ratio=%.2f, ATR_ratio=%.3f, %d bars)",
-            regime.value, adx, bbands["width"] / bb_width_avg, atr_ratio, len(spy_history),
+            "Regime initialised: %s (ADX=%.1f, BB_ratio=%.2f, %d bars)",
+            regime.value, adx, bb_ratio, len(spy_history),
         )
 
     # -----------------------------------------------------------------------
@@ -1140,12 +1152,12 @@ class AutoTrader:
     def _register_strategies(self) -> None:
         """Register active strategies and their indicators.
 
-        Currently 2-strategy MR portfolio matching 17th backtest config.
+        Currently 2-strategy BM+MR portfolio matching Iter 29 config.
         ema_pullback / volume_divergence disabled until backtest validation.
         """
         strategies = [
+            BreakoutMomentum(),
             RsiMeanReversion(),
-            ConsecutiveDown(),
         ]
         registered_keys: set[str] = set(self._indicator_engine._indicators.keys())
         for strategy in strategies:
@@ -1154,6 +1166,12 @@ class AutoTrader:
                 if spec.key not in registered_keys:
                     self._indicator_engine.register(spec)
                     registered_keys.add(spec.key)
+
+        # Ensure EMA_50 is registered for SPY regime classification
+        ema50_spec = IndicatorSpec(name="EMA", params={"period": 50})
+        if ema50_spec.key not in registered_keys:
+            self._indicator_engine.register(ema50_spec)
+            registered_keys.add(ema50_spec.key)
 
     async def _fetch_current_prices(self) -> dict[str, float]:
         """Fetch latest prices for all pending Group B symbols.

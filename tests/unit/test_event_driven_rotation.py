@@ -20,26 +20,26 @@ def _make_transition(prev: MarketRegime, curr: MarketRegime, ts=None):
 class TestEventDrivenRotation:
     """Tests for EventDrivenRotation trigger logic."""
 
-    def test_trigger_on_trend_to_high_vol(self):
-        """Regime transition TREND->HIGH_VOLATILITY should trigger rotation."""
+    def test_trigger_on_trend_up_to_high_vol(self):
+        """Regime transition TREND_UP->HIGH_VOLATILITY should trigger rotation."""
         edr = EventDrivenRotation(
             cooldown_hours=48,
             vix_spike_trigger=30.0,
-            regime_triggers=["TREND->HIGH_VOLATILITY"],
+            regime_triggers=["TREND_UP->HIGH_VOLATILITY"],
         )
-        transition = _make_transition(MarketRegime.TREND, MarketRegime.HIGH_VOLATILITY)
+        transition = _make_transition(MarketRegime.TREND_UP, MarketRegime.HIGH_VOLATILITY)
         should, reason = edr.should_trigger_rotation(transition=transition)
         assert should is True
-        assert "TREND->HIGH_VOLATILITY" in reason
+        assert "TREND_UP->HIGH_VOLATILITY" in reason
 
     def test_no_trigger_on_unmatched_transition(self):
         """Transition not in regime_triggers should not trigger."""
         edr = EventDrivenRotation(
             cooldown_hours=48,
             vix_spike_trigger=30.0,
-            regime_triggers=["TREND->HIGH_VOLATILITY"],
+            regime_triggers=["TREND_UP->HIGH_VOLATILITY"],
         )
-        transition = _make_transition(MarketRegime.UNCERTAIN, MarketRegime.TREND)
+        transition = _make_transition(MarketRegime.UNCERTAIN, MarketRegime.TREND_UP)
         should, reason = edr.should_trigger_rotation(transition=transition)
         assert should is False
 
@@ -50,7 +50,7 @@ class TestEventDrivenRotation:
             vix_spike_trigger=30.0,
             regime_triggers=["*->UNCERTAIN"],
         )
-        transition = _make_transition(MarketRegime.TREND, MarketRegime.UNCERTAIN)
+        transition = _make_transition(MarketRegime.TREND_UP, MarketRegime.UNCERTAIN)
         should, reason = edr.should_trigger_rotation(transition=transition)
         assert should is True
         assert "*->UNCERTAIN" in reason
@@ -67,27 +67,27 @@ class TestEventDrivenRotation:
         assert should is True
 
     def test_wildcard_target(self):
-        """'TREND->*' should match any target regime."""
+        """'TREND_UP->*' should match any target regime."""
         edr = EventDrivenRotation(
             cooldown_hours=48,
             vix_spike_trigger=30.0,
-            regime_triggers=["TREND->*"],
+            regime_triggers=["TREND_UP->*"],
         )
-        transition = _make_transition(MarketRegime.TREND, MarketRegime.RANGING)
+        transition = _make_transition(MarketRegime.TREND_UP, MarketRegime.RANGING)
         should, reason = edr.should_trigger_rotation(transition=transition)
         assert should is True
-        assert "TREND->*" in reason
+        assert "TREND_UP->*" in reason
 
     def test_cooldown_blocks_trigger(self):
         """Trigger within cooldown period should be blocked."""
         edr = EventDrivenRotation(
             cooldown_hours=48,
             vix_spike_trigger=30.0,
-            regime_triggers=["TREND->HIGH_VOLATILITY"],
+            regime_triggers=["TREND_UP->HIGH_VOLATILITY"],
         )
         # Mark as recently triggered
         edr.mark_triggered()
-        transition = _make_transition(MarketRegime.TREND, MarketRegime.HIGH_VOLATILITY)
+        transition = _make_transition(MarketRegime.TREND_UP, MarketRegime.HIGH_VOLATILITY)
         should, reason = edr.should_trigger_rotation(transition=transition)
         assert should is False
         assert "cooldown" in reason.lower()
@@ -97,11 +97,11 @@ class TestEventDrivenRotation:
         edr = EventDrivenRotation(
             cooldown_hours=48,
             vix_spike_trigger=30.0,
-            regime_triggers=["TREND->HIGH_VOLATILITY"],
+            regime_triggers=["TREND_UP->HIGH_VOLATILITY"],
         )
         # Set triggered long ago
         edr._last_triggered = datetime.now(timezone.utc) - timedelta(hours=49)
-        transition = _make_transition(MarketRegime.TREND, MarketRegime.HIGH_VOLATILITY)
+        transition = _make_transition(MarketRegime.TREND_UP, MarketRegime.HIGH_VOLATILITY)
         should, reason = edr.should_trigger_rotation(transition=transition)
         assert should is True
 
@@ -141,10 +141,10 @@ class TestEventDrivenRotation:
         edr = EventDrivenRotation(
             cooldown_hours=48,
             vix_spike_trigger=30.0,
-            regime_triggers=["TREND->HIGH_VOLATILITY"],
+            regime_triggers=["TREND_UP->HIGH_VOLATILITY"],
             enabled=False,
         )
-        transition = _make_transition(MarketRegime.TREND, MarketRegime.HIGH_VOLATILITY)
+        transition = _make_transition(MarketRegime.TREND_UP, MarketRegime.HIGH_VOLATILITY)
         should, reason = edr.should_trigger_rotation(transition=transition)
         assert should is False
         assert "disabled" in reason.lower()
@@ -165,7 +165,7 @@ class TestEventDrivenRotation:
         edr = EventDrivenRotation(
             cooldown_hours=48,
             vix_spike_trigger=30.0,
-            regime_triggers=["TREND->HIGH_VOLATILITY"],
+            regime_triggers=["TREND_UP->HIGH_VOLATILITY"],
         )
         should, reason = edr.should_trigger_rotation()
         assert should is False
@@ -190,16 +190,16 @@ class TestEventDrivenRotation:
             cooldown_hours=48,
             vix_spike_trigger=30.0,
             regime_triggers=[
-                "TREND->HIGH_VOLATILITY",
+                "TREND_UP->HIGH_VOLATILITY",
                 "RANGING->HIGH_VOLATILITY",
                 "*->UNCERTAIN",
             ],
         )
         # First trigger
-        t1 = _make_transition(MarketRegime.TREND, MarketRegime.HIGH_VOLATILITY)
+        t1 = _make_transition(MarketRegime.TREND_UP, MarketRegime.HIGH_VOLATILITY)
         should1, reason1 = edr.should_trigger_rotation(transition=t1)
         assert should1 is True
-        assert "TREND->HIGH_VOLATILITY" in reason1
+        assert "TREND_UP->HIGH_VOLATILITY" in reason1
 
         # Second trigger
         t2 = _make_transition(MarketRegime.RANGING, MarketRegime.HIGH_VOLATILITY)
@@ -218,37 +218,37 @@ class TestEventDrivenRotation:
         edr = EventDrivenRotation(
             cooldown_hours=48,
             vix_spike_trigger=30.0,
-            regime_triggers=["TREND->HIGH_VOLATILITY"],
+            regime_triggers=["TREND_UP->HIGH_VOLATILITY"],
         )
-        transition = _make_transition(MarketRegime.TREND, MarketRegime.HIGH_VOLATILITY)
+        transition = _make_transition(MarketRegime.TREND_UP, MarketRegime.HIGH_VOLATILITY)
         should, reason = edr.should_trigger_rotation(
             transition=transition, vix_value=35.0
         )
         assert should is True
         # Regime transition is checked first
-        assert "TREND->HIGH_VOLATILITY" in reason
+        assert "TREND_UP->HIGH_VOLATILITY" in reason
 
     def test_malformed_trigger_pattern_skipped(self):
         """Trigger patterns without '->' delimiter should be safely skipped."""
         edr = EventDrivenRotation(
             cooldown_hours=48,
             vix_spike_trigger=30.0,
-            regime_triggers=["INVALID_PATTERN", "TREND->HIGH_VOLATILITY"],
+            regime_triggers=["INVALID_PATTERN", "TREND_UP->HIGH_VOLATILITY"],
         )
-        transition = _make_transition(MarketRegime.TREND, MarketRegime.HIGH_VOLATILITY)
+        transition = _make_transition(MarketRegime.TREND_UP, MarketRegime.HIGH_VOLATILITY)
         should, reason = edr.should_trigger_rotation(transition=transition)
         assert should is True
-        assert "TREND->HIGH_VOLATILITY" in reason
+        assert "TREND_UP->HIGH_VOLATILITY" in reason
 
     def test_cooldown_zero_hours(self):
         """With zero cooldown, repeated triggers should always work."""
         edr = EventDrivenRotation(
             cooldown_hours=0,
             vix_spike_trigger=30.0,
-            regime_triggers=["TREND->HIGH_VOLATILITY"],
+            regime_triggers=["TREND_UP->HIGH_VOLATILITY"],
         )
         edr.mark_triggered()
-        transition = _make_transition(MarketRegime.TREND, MarketRegime.HIGH_VOLATILITY)
+        transition = _make_transition(MarketRegime.TREND_UP, MarketRegime.HIGH_VOLATILITY)
         should, reason = edr.should_trigger_rotation(transition=transition)
         assert should is True
 
@@ -263,13 +263,14 @@ class TestEventDrivenRotationConfig:
         assert cfg.enable_event_driven is True
         assert cfg.cooldown_hours == 48
         assert cfg.vix_spike_trigger == 30.0
-        assert len(cfg.regime_triggers) == 3
+        assert len(cfg.regime_triggers) == 4
 
     def test_default_trigger_values(self):
         from autotrader.core.config import EventDrivenRotationConfig
 
         cfg = EventDrivenRotationConfig()
-        assert "TREND->HIGH_VOLATILITY" in cfg.regime_triggers
+        assert "TREND_UP->HIGH_VOLATILITY" in cfg.regime_triggers
+        assert "TREND_UP->TREND_DOWN" in cfg.regime_triggers
         assert "RANGING->HIGH_VOLATILITY" in cfg.regime_triggers
         assert "*->UNCERTAIN" in cfg.regime_triggers
 
@@ -279,7 +280,7 @@ class TestEventDrivenRotationConfig:
         cfg = EventDrivenRotationConfig(
             enable_event_driven=False,
             cooldown_hours=24,
-            regime_triggers=["TREND->RANGING"],
+            regime_triggers=["TREND_UP->RANGING"],
         )
         assert cfg.enable_event_driven is False
         assert cfg.cooldown_hours == 24

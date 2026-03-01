@@ -18,7 +18,7 @@ from autotrader.risk.manager import RiskManager
 from autotrader.risk.position_sizer import PositionSizer
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
-from autotrader.strategy.consecutive_down import ConsecutiveDown
+from autotrader.strategy.breakout_momentum import BreakoutMomentum
 
 
 def _make_bar(symbol: str = "AAPL", close: float = 150.0, idx: int = 0) -> Bar:
@@ -66,7 +66,7 @@ class TestRegisterStrategies:
         assert len(app._strategy_engine._strategies) == 2
         types = [type(s) for s in app._strategy_engine._strategies]
         assert RsiMeanReversion in types
-        assert ConsecutiveDown in types
+        assert BreakoutMomentum in types
 
     def test_register_registers_indicators(self):
         app = AutoTrader(Settings())
@@ -74,7 +74,7 @@ class TestRegisterStrategies:
         keys = set(app._indicator_engine._indicators.keys())
         assert "RSI_14" in keys
         assert "ATR_14" in keys
-        assert "EMA_50" in keys
+        assert "EMA_21" in keys
 
     def test_register_deduplicates_indicators(self):
         app = AutoTrader(Settings())
@@ -97,7 +97,7 @@ class TestSignalToOrder:
         bar = _make_bar("AAPL", 150.0)
         app._bar_history["AAPL"].append(bar)
         signal = Signal(
-            strategy="consecutive_down", symbol="AAPL",
+            strategy="breakout_momentum", symbol="AAPL",
             direction="long", strength=0.8,
         )
         order = app._signal_to_order(signal, account, [])
@@ -247,7 +247,7 @@ class TestAutoTraderTradingLoop:
         account = await app._broker.get_account()
         positions = await app._broker.get_positions()
         signal = Signal(
-            strategy="consecutive_down", symbol="AAPL",
+            strategy="breakout_momentum", symbol="AAPL",
             direction="long", strength=0.8,
         )
         result = await app._process_signal(signal, account, positions)
@@ -429,7 +429,7 @@ class TestAllocationIntegration:
     @pytest.fixture()
     def app(self):
         settings = Settings()
-        settings.broker.paper_balance = 5000.0
+        settings.broker.paper_balance = 50_000.0
         return AutoTrader(settings)
 
     def test_has_position_strategy_map(self):
@@ -470,21 +470,23 @@ class TestAllocationIntegration:
         assert order.quantity == 10
 
     @pytest.mark.asyncio
-    async def test_allocation_engine_gates_entry(self, app):
-        """Strategy at max positions should be blocked."""
+    async def test_allocation_engine_gates_entry_zero_weight(self, app):
+        """Strategy with zero weight in current regime should be blocked.
+
+        Per-strategy position caps are now enforced by EntryManager,
+        not AllocationEngine.should_enter(). This test verifies that
+        the allocation engine still blocks unknown (zero-weight) strategies.
+        """
         await app._broker.connect()
         account = await app._broker.get_account()
-        # Mark strategy as already having MAX positions
-        app._position_strategy_map["SYM1"] = "rsi_mean_reversion"
-        app._position_strategy_map["SYM2"] = "rsi_mean_reversion"
         bar = _make_bar("AAPL", 100.0)
         app._bar_history["AAPL"].append(bar)
         signal = Signal(
-            strategy="rsi_mean_reversion", symbol="AAPL",
+            strategy="nonexistent_strategy", symbol="AAPL",
             direction="long", strength=0.8,
         )
         order = app._signal_to_order(signal, account, [])
-        # AllocationEngine.MAX_POSITIONS_PER_STRATEGY = 2, already at 2
+        # Unknown strategy has weight 0.0 -> blocked by should_enter()
         assert order is None
 
     @pytest.mark.asyncio
@@ -494,23 +496,23 @@ class TestAllocationIntegration:
         app._broker.set_price("AAPL", 100.0)
         bar = _make_bar("AAPL", 100.0)
         app._bar_history["AAPL"].append(bar)
-        app._portfolio_tracker = PortfolioTracker(5000.0)
+        app._portfolio_tracker = PortfolioTracker(50_000.0)
         account = await app._broker.get_account()
         positions = await app._broker.get_positions()
         signal = Signal(
-            strategy="consecutive_down", symbol="AAPL",
+            strategy="breakout_momentum", symbol="AAPL",
             direction="long", strength=0.8,
         )
         result = await app._process_signal(signal, account, positions)
         if result and result.status == "filled":
-            assert app._position_strategy_map.get("AAPL") == "consecutive_down"
+            assert app._position_strategy_map.get("AAPL") == "breakout_momentum"
 
     @pytest.mark.asyncio
     async def test_close_removes_from_strategy_map(self, app):
         """After closing a position, symbol is removed from strategy map."""
         await app._broker.connect()
         app._broker.set_price("AAPL", 100.0)
-        app._portfolio_tracker = PortfolioTracker(5000.0)
+        app._portfolio_tracker = PortfolioTracker(50_000.0)
         # Buy first
         buy = Order(symbol="AAPL", side="buy", quantity=10, order_type="market")
         await app._broker.submit_order(buy)
@@ -567,7 +569,7 @@ class TestRegimeTrackerIntegration:
 
     def test_regime_tracker_confirmation_default(self):
         app = AutoTrader(Settings())
-        assert app._regime_tracker._confirmation_bars == 3
+        assert app._regime_tracker._confirmation_bars == 1
 
 
 class TestEventDrivenRotationIntegration:
@@ -617,7 +619,7 @@ class TestTradeLoggerIntegration:
         settings = Settings()
         settings.performance.trade_log_path = str(tmp_path / "trades.jsonl")
         settings.performance.equity_snapshot_path = str(tmp_path / "equity.jsonl")
-        settings.broker.paper_balance = 5000.0
+        settings.broker.paper_balance = 50_000.0
         app = AutoTrader(settings)
         await app.start()
         app._broker.set_price("AAPL", 100.0)
@@ -625,14 +627,14 @@ class TestTradeLoggerIntegration:
         app._bar_history["AAPL"].append(bar)
         account = await app._broker.get_account()
         positions = await app._broker.get_positions()
-        signal = Signal(strategy="consecutive_down", symbol="AAPL",
+        signal = Signal(strategy="breakout_momentum", symbol="AAPL",
                         direction="long", strength=0.8)
         result = await app._process_signal(signal, account, positions)
         if result and result.status == "filled":
             trades = app._trade_logger.read_trades()
             assert len(trades) >= 1
             assert trades[0].symbol == "AAPL"
-            assert trades[0].strategy == "consecutive_down"
+            assert trades[0].strategy == "breakout_momentum"
         await app.stop()
 
 
@@ -809,7 +811,7 @@ class TestPDTGuard:
         bar = _make_bar("AAPL", 100.0)
         app._bar_history["AAPL"].append(bar)
         signal = Signal(
-            strategy="consecutive_down", symbol="AAPL",
+            strategy="breakout_momentum", symbol="AAPL",
             direction="long", strength=0.8,
         )
         order = app._signal_to_order(signal, account, [])

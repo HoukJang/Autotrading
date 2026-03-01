@@ -3,7 +3,7 @@
 Orchestrates the full stock universe selection pipeline:
 1. Build StockCandidate objects from bar data (computing metrics)
 2. Apply HardFilter to eliminate unsuitable candidates
-3. Run BacktestEngine on each filtered candidate (all 5 strategies)
+3. Run BacktestEngine on each filtered candidate (BM+MR strategies)
 4. Compute hybrid score (proxy_weight * proxy + backtest_weight * backtest)
 5. Pass scored candidates to PortfolioOptimizer for final selection
 """
@@ -25,10 +25,8 @@ from autotrader.universe.filters import HardFilter
 from autotrader.universe.scorer import ProxyScorer, BacktestScorer
 from autotrader.universe.optimizer import PortfolioOptimizer
 from autotrader.backtest.engine import BacktestEngine
+from autotrader.strategy.breakout_momentum import BreakoutMomentum
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
-from autotrader.strategy.consecutive_down import ConsecutiveDown
-from autotrader.strategy.ema_pullback import EmaPullback
-from autotrader.strategy.volume_divergence import VolumeDivergence
 
 logger = logging.getLogger(__name__)
 
@@ -215,9 +213,9 @@ class UniverseSelector:
         )
 
     def _run_backtest_for_symbol(self, bars: list[Bar]) -> float:
-        """Run all 5 strategies via BacktestEngine and return backtest score.
+        """Run BM+MR strategies via BacktestEngine and return backtest score.
 
-        Creates a fresh BacktestEngine with all 4 strategies, runs it on
+        Creates a fresh BacktestEngine with BM+MR strategies, runs it on
         the provided bars, and feeds the results to BacktestScorer.
 
         Returns:
@@ -225,10 +223,8 @@ class UniverseSelector:
         """
         engine = BacktestEngine(self._initial_balance, self._risk_config)
         strategies = [
+            BreakoutMomentum(),
             RsiMeanReversion(),
-            ConsecutiveDown(),
-            EmaPullback(),
-            VolumeDivergence(),
         ]
         for s in strategies:
             engine.add_strategy(s)

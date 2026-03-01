@@ -1,29 +1,31 @@
 """Capital allocation engine based on market regime.
 
-Determines per-strategy position sizes by combining regime-based
-allocation weights with account equity and risk constraints such as
-minimum position value, maximum positions per strategy, and risk-based
-ATR stop-loss sizing.
+Risk-based position sizing engine. Primary sizing uses per-trade risk
+percentage from the regime allocation table, capped by MAX_POSITION_PCT
+of equity. Short positions are reduced by SHORT_SIZE_RATIO.
+
+Position caps are managed by EntryManager (not duplicated here).
 """
 from __future__ import annotations
 
 from autotrader.portfolio.regime_detector import MarketRegime, RegimeDetector
 
-RISK_PER_TRADE_PCT: float = 0.02  # Max 2% account risk per trade
 SHORT_SIZE_RATIO: float = 0.65  # Short positions sized at 65% of long
 
 
 class AllocationEngine:
-    """Manages per-strategy capital allocation based on market regime.
+    """Risk-based position sizing engine driven by market regime.
 
-    Determines position sizes by combining regime-based weights
-    with account equity and risk constraints.  When ATR is provided,
-    position size is further capped so that a 2x-ATR stop-loss would
-    not exceed RISK_PER_TRADE_PCT of equity.
+    Primary sizing uses the regime allocation table to determine
+    per-trade risk percentage, then sizes the position so that the
+    stop-loss distance consumes at most that risk amount. The result
+    is hard-capped at MAX_POSITION_PCT of equity per position.
+
+    Supports future Phase 4 hooks: GDR risk multiplier and safety net.
     """
 
-    MIN_POSITION_VALUE: float = 200.0  # Minimum $200 per position
-    MAX_POSITIONS_PER_STRATEGY: int = 2
+    MIN_POSITION_VALUE: float = 200.0    # Minimum $200 per position
+    MAX_POSITION_PCT: float = 0.25       # Max 25% of equity per position (Iter 29)
 
     def __init__(self, regime_detector: RegimeDetector) -> None:
         self._detector = regime_detector
@@ -37,27 +39,28 @@ class AllocationEngine:
         atr: float | None = None,
         direction: str = "long",
         stop_distance: float | None = None,
+        gdr_risk_mult: float = 1.0,
+        safety_net_active: bool = False,
     ) -> int:
-        """Calculate position size considering allocation weight and risk.
+        """Calculate position size using risk-based primary sizing.
 
-        Uses the regime-based weight to determine a maximum allocation,
-        then optionally caps that size using ATR-based risk sizing so
-        that no single trade risks more than RISK_PER_TRADE_PCT of equity.
-        Short positions are further reduced by SHORT_SIZE_RATIO.
+        Sizing priority:
+        1. Determine effective risk pct from regime table (or safety net).
+        2. Compute qty from risk_per_trade / stop_distance.
+        3. Hard cap at MAX_POSITION_PCT of equity.
+        4. Apply short size reduction.
 
         Args:
             strategy_name: Name of the strategy requesting position.
             price: Current price of the asset.
             equity: Current account equity.
             regime: Current market regime.
-            atr: Current Average True Range for the asset.  When provided
-                 and ``stop_distance`` is None, the stop is estimated as
-                 ``2.0 * atr`` (backward-compatible default).
-            direction: Trade direction, either ``"long"`` or ``"short"``.
+            atr: Current Average True Range for the asset.
+            direction: Trade direction, ``"long"`` or ``"short"``.
             stop_distance: Actual distance from entry to stop-loss in price
-                units.  When provided, overrides the ``2.0 * atr`` default,
-                enabling strategy-specific SL multipliers from entry_rules.
-                Pass ``abs(entry_price - sl_price)`` from the execution engine.
+                units. Overrides 2*ATR default when provided.
+            gdr_risk_mult: GDR multiplier applied to base risk (Phase 4).
+            safety_net_active: When True, forces 0.5% risk (Phase 4).
 
         Returns:
             Number of shares to trade (0 if below minimum or invalid price).
@@ -65,38 +68,41 @@ class AllocationEngine:
         if price <= 0:
             return 0
 
-        weights = self._detector.get_weights(regime)
-        weight = weights.get(strategy_name, 0.0)
-        max_value = equity * weight
+        # Determine effective risk percentage
+        if safety_net_active:
+            effective_risk_pct = 0.005  # 0.5% during safety net
+        else:
+            alloc = self._detector.get_allocation(regime)
+            base_risk = alloc.get(strategy_name, 0.02)
+            # Ensure we only use numeric risk values, not boolean flags
+            if not isinstance(base_risk, (int, float)):
+                base_risk = 0.02
+            effective_risk_pct = base_risk * gdr_risk_mult
 
-        if max_value < self.MIN_POSITION_VALUE:
-            return 0
+        # Risk-based primary sizing
+        risk_per_trade = equity * effective_risk_pct
 
-        weight_qty = int(max_value / price)
-
-        qty = weight_qty
-
-        # Determine effective stop distance for risk-based sizing
-        effective_stop: float | None = None
         if stop_distance is not None and stop_distance > 0:
-            # Prefer explicitly provided stop distance (strategy-specific SL)
-            effective_stop = stop_distance
+            qty = int(risk_per_trade / stop_distance)
         elif atr is not None and atr > 0:
-            # Fallback: use 2x ATR as a conservative default
-            effective_stop = 2.0 * atr
+            qty = int(risk_per_trade / (2.0 * atr))
+        else:
+            # Fallback: treat risk as position weight
+            qty = int((equity * effective_risk_pct * 5) / price)
 
-        if effective_stop is not None and effective_stop > 0:
-            risk_per_trade = equity * RISK_PER_TRADE_PCT
-            risk_qty = int(risk_per_trade / effective_stop)
-            qty = min(weight_qty, risk_qty)
+        # Hard cap: MAX_POSITION_PCT of equity
+        max_by_position = int((equity * self.MAX_POSITION_PCT) / price)
+        qty = min(qty, max_by_position)
 
+        # Short size reduction
         if direction == "short":
             qty = int(qty * SHORT_SIZE_RATIO)
 
+        # Min position value check
         if qty * price < self.MIN_POSITION_VALUE:
             return 0
 
-        return qty
+        return max(0, qty)
 
     def should_enter(
         self,
@@ -104,7 +110,10 @@ class AllocationEngine:
         regime: MarketRegime,
         strategy_position_count: int,
     ) -> bool:
-        """Check if strategy is allowed to enter based on allocation constraints.
+        """Check if strategy is allowed to enter based on allocation weight.
+
+        Position caps are enforced by EntryManager. This method only
+        checks that the regime gives a non-zero weight to the strategy.
 
         Args:
             strategy_name: Name of the strategy.
@@ -115,9 +124,7 @@ class AllocationEngine:
             True if entry is allowed.
         """
         weights = self._detector.get_weights(regime)
-        if weights.get(strategy_name, 0.0) < 0.05:
-            return False
-        return strategy_position_count < self.MAX_POSITIONS_PER_STRATEGY
+        return weights.get(strategy_name, 0.0) >= 0.001
 
     def get_all_weights(self, regime: MarketRegime) -> dict[str, float]:
         """Get all strategy weights for current regime."""
