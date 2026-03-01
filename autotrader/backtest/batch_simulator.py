@@ -45,7 +45,9 @@ from autotrader.execution.exit_rules import (
     _TRAILING_STRATEGIES,
     _TRAILING_ATR_MULT,
     _TRAILING_ACTIVATION_ATR,
-    _BREAKEVEN_ACTIVATION_ATR,
+    _STAGE1_BE_ACTIVATION_ATR,
+    _STAGE2_PROFIT_ACTIVATION_ATR,
+    _STAGE2_PROFIT_LOCK_ATR,
     _EMERGENCY_LOSS_IMMEDIATE_PCT,
 )
 from autotrader.indicators.base import IndicatorSpec
@@ -78,7 +80,7 @@ _PER_STRATEGY_GDR: bool = True          # Toggle: True = per-strategy, False = p
 # Per-strategy base risk (replaces single _RISK_PER_TRADE_PCT for all)
 _STRATEGY_BASE_RISK: dict[str, float] = {
     "rsi_mean_reversion": 0.01,          # 1% (reduced from 2%)
-    "consecutive_down": 0.02,            # 2%
+    "consecutive_down": 0.015,           # 1.5% (reduced: wider SL compensated by lower risk)
     "ema_cross_trend": 0.015,            # 1.5%
 }
 _DEFAULT_BASE_RISK: float = 0.02        # fallback for unknown strategies
@@ -1213,19 +1215,27 @@ class BatchBacktester:
         strategy = held.strategy
         direction = held.direction
 
-        # --- Stop Loss check (with breakeven upgrade) ---
+        # --- Stop Loss check (with 2-stage SL upgrade) ---
         sl_mult = _SL_ATR_MULT.get(strategy, {}).get(direction, 2.0)
         sl_distance = sl_mult * atr
         if direction == "long":
             sl_price = held.entry_price - sl_distance
-            # Breakeven upgrade: if price reached entry + activation ATR, floor SL at entry
-            if held.highest_price >= held.entry_price + _BREAKEVEN_ACTIVATION_ATR * atr:
+            # 2-stage SL upgrade
+            if held.highest_price >= held.entry_price + _STAGE2_PROFIT_ACTIVATION_ATR * atr:
+                # Stage 2: lock in profit
+                sl_price = max(sl_price, held.entry_price + _STAGE2_PROFIT_LOCK_ATR * atr)
+            elif held.highest_price >= held.entry_price + _STAGE1_BE_ACTIVATION_ATR * atr:
+                # Stage 1: breakeven
                 sl_price = max(sl_price, held.entry_price)
             sl_hit = bar.low <= sl_price
         else:
             sl_price = held.entry_price + sl_distance
-            # Breakeven upgrade for short
-            if held.lowest_price <= held.entry_price - _BREAKEVEN_ACTIVATION_ATR * atr:
+            # 2-stage SL upgrade
+            if held.lowest_price <= held.entry_price - _STAGE2_PROFIT_ACTIVATION_ATR * atr:
+                # Stage 2: lock in profit
+                sl_price = min(sl_price, held.entry_price - _STAGE2_PROFIT_LOCK_ATR * atr)
+            elif held.lowest_price <= held.entry_price - _STAGE1_BE_ACTIVATION_ATR * atr:
+                # Stage 1: breakeven
                 sl_price = min(sl_price, held.entry_price)
             sl_hit = bar.high >= sl_price
 

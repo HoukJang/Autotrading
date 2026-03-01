@@ -28,8 +28,10 @@ _EMERGENCY_LOSS_CONFIRM_PCT: float = 0.07   # -7%: need 2 consecutive bars
 _EMERGENCY_LOSS_IMMEDIATE_PCT: float = 0.10  # -10%: immediate single-bar exit
 _EMERGENCY_BARS_NEEDED: int = 2             # bars at -7% before triggering
 
-# Breakeven stop: once price moves this many ATRs in our favour, move SL to entry
-_BREAKEVEN_ACTIVATION_ATR: float = 0.6
+# 2-stage SL upgrade: protects profits progressively
+_STAGE1_BE_ACTIVATION_ATR: float = 0.7   # Stage 1: move SL to entry (breakeven)
+_STAGE2_PROFIT_ACTIVATION_ATR: float = 1.2  # Stage 2: lock in 0.4 ATR profit
+_STAGE2_PROFIT_LOCK_ATR: float = 0.4      # Stage 2: SL moved to entry + this
 
 # Strategy-specific max hold days
 _MAX_HOLD_DAYS: dict[str, int] = {
@@ -40,8 +42,8 @@ _MAX_HOLD_DAYS: dict[str, int] = {
 
 # Strategy-specific SL ATR multipliers (by direction)
 _SL_ATR_MULT: dict[str, dict[str, float]] = {
-    "rsi_mean_reversion": {"long": 1.0, "short": 1.5},
-    "consecutive_down": {"long": 1.0},
+    "rsi_mean_reversion": {"long": 1.0, "short": 0.75},
+    "consecutive_down": {"long": 1.2},
     "ema_cross_trend": {"long": 3.0, "short": 3.0},
 }
 
@@ -303,18 +305,29 @@ class ExitRuleEngine:
     def _evaluate_sl(
         self, position: HeldPosition, bar_close: float, atr: float,
     ) -> ExitDecision:
-        """Standard stop-loss check with breakeven upgrade.
+        """Standard stop-loss check with 2-stage SL upgrade.
 
-        Once price has moved _BREAKEVEN_ACTIVATION_ATR in our favour,
-        the stop loss is raised (long) or lowered (short) to the entry
-        price, so the trade can no longer result in a loss.
+        Stage 1 (Breakeven): Once price has moved _STAGE1_BE_ACTIVATION_ATR
+        in our favour, the stop loss is moved to the entry price so the
+        trade can no longer result in a loss.
+
+        Stage 2 (Profit Protection): Once price has moved
+        _STAGE2_PROFIT_ACTIVATION_ATR in our favour, the stop loss is
+        moved to entry + _STAGE2_PROFIT_LOCK_ATR * ATR, locking in a
+        portion of the unrealised profit.
+
+        Stage 2 is checked first since it is the more favourable upgrade.
         """
         mult = _SL_ATR_MULT.get(position.strategy, {}).get(position.direction, 2.0)
         sl_distance = mult * atr
         if position.direction == "long":
             sl_price = position.entry_price - sl_distance
-            # Breakeven upgrade: if price reached entry + activation ATR, floor SL at entry
-            if position.highest_price >= position.entry_price + _BREAKEVEN_ACTIVATION_ATR * atr:
+            # 2-stage SL upgrade
+            if position.highest_price >= position.entry_price + _STAGE2_PROFIT_ACTIVATION_ATR * atr:
+                # Stage 2: lock in profit
+                sl_price = max(sl_price, position.entry_price + _STAGE2_PROFIT_LOCK_ATR * atr)
+            elif position.highest_price >= position.entry_price + _STAGE1_BE_ACTIVATION_ATR * atr:
+                # Stage 1: breakeven
                 sl_price = max(sl_price, position.entry_price)
             if bar_close <= sl_price:
                 logger.info(
@@ -326,8 +339,12 @@ class ExitRuleEngine:
                 )
         else:  # short
             sl_price = position.entry_price + sl_distance
-            # Breakeven upgrade for short
-            if position.lowest_price <= position.entry_price - _BREAKEVEN_ACTIVATION_ATR * atr:
+            # 2-stage SL upgrade
+            if position.lowest_price <= position.entry_price - _STAGE2_PROFIT_ACTIVATION_ATR * atr:
+                # Stage 2: lock in profit
+                sl_price = min(sl_price, position.entry_price - _STAGE2_PROFIT_LOCK_ATR * atr)
+            elif position.lowest_price <= position.entry_price - _STAGE1_BE_ACTIVATION_ATR * atr:
+                # Stage 1: breakeven
                 sl_price = min(sl_price, position.entry_price)
             if bar_close >= sl_price:
                 logger.info(

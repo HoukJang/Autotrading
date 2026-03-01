@@ -11,6 +11,7 @@ Tests cover:
 - Re-entry block: same symbol blocked after exit (both directions)
 - Re-entry block: cleared on new trading day
 - Long vs Short direction correctly handled
+- 2-stage SL upgrade: breakeven (Stage 1) + profit protection (Stage 2)
 """
 from __future__ import annotations
 
@@ -31,6 +32,9 @@ from autotrader.execution.exit_rules import (
     _EMERGENCY_LOSS_CONFIRM_PCT,
     _EMERGENCY_LOSS_IMMEDIATE_PCT,
     _EMERGENCY_BARS_NEEDED,
+    _STAGE1_BE_ACTIVATION_ATR,
+    _STAGE2_PROFIT_ACTIVATION_ATR,
+    _STAGE2_PROFIT_LOCK_ATR,
 )
 
 
@@ -303,13 +307,13 @@ class TestDay2StopLoss:
         actual_mult = _SL_ATR_MULT.get("rsi_mean_reversion", {}).get("long", 2.0)
         self._test_sl_triggers("rsi_mean_reversion", "long", actual_mult)
 
-    def test_rsi_mr_short_sl_at_1_5x_atr(self):
-        """RSI MR short: SL should trigger at 1.5x ATR above entry."""
+    def test_rsi_mr_short_sl_at_0_75x_atr(self):
+        """RSI MR short: SL should trigger at 0.75x ATR above entry."""
         actual_mult = _SL_ATR_MULT.get("rsi_mean_reversion", {}).get("short", 2.0)
         self._test_sl_triggers("rsi_mean_reversion", "short", actual_mult)
 
-    def test_consecutive_down_long_sl_at_1x_atr(self):
-        """Consecutive Down long: SL should trigger at 1.0x ATR below entry."""
+    def test_consecutive_down_long_sl_at_1_2x_atr(self):
+        """Consecutive Down long: SL should trigger at 1.2x ATR below entry."""
         actual_mult = _SL_ATR_MULT.get("consecutive_down", {}).get("long", 2.0)
         self._test_sl_triggers("consecutive_down", "long", actual_mult)
 
@@ -359,6 +363,196 @@ class TestDay2StopLoss:
             bar_low=bar_close - 0.5,
             indicators={},  # No ATR indicator
             current_date_et=NEXT_DAY,
+        )
+        assert decision.action == "exit"
+        assert decision.reason == "stop_loss"
+
+
+# ---------------------------------------------------------------------------
+# Test class: 2-stage SL upgrade (breakeven + profit protection)
+# ---------------------------------------------------------------------------
+
+class TestTwoStageSLUpgrade:
+    """Tests for the 2-stage SL upgrade (breakeven + profit protection)."""
+
+    def test_two_stage_constants_match_spec(self):
+        """2-stage SL constants should match P0 optimization spec."""
+        assert _STAGE1_BE_ACTIVATION_ATR == 0.7
+        assert _STAGE2_PROFIT_ACTIVATION_ATR == 1.2
+        assert _STAGE2_PROFIT_LOCK_ATR == 0.4
+
+    def test_stage1_breakeven_activation_long(self):
+        """Long: SL moves to entry when price reaches +0.7 ATR."""
+        engine = ExitRuleEngine()
+        atr = 2.0
+        entry_price = 100.0
+        pos = HeldPosition(
+            symbol="AAPL",
+            strategy="rsi_mean_reversion",
+            direction="long",
+            entry_price=entry_price,
+            entry_atr=atr,
+            entry_date_et=date(2026, 2, 24),
+            bars_held=1,
+            qty=10.0,
+            highest_price=entry_price + _STAGE1_BE_ACTIVATION_ATR * atr,  # 101.4
+            lowest_price=entry_price,
+        )
+        # Close at entry price exactly: original SL would be 100-1.0*2=98,
+        # but Stage 1 raises SL to 100 (entry). Close at 99.99 triggers.
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=99.99,
+            bar_high=100.5,
+            bar_low=99.9,
+            indicators={"ATR_14": atr, "RSI_14": 45.0, "BBANDS_20": {"pct_b": 0.4}},
+            current_date_et=date(2026, 2, 25),
+        )
+        assert decision.action == "exit"
+        assert decision.reason == "stop_loss"
+
+    def test_stage1_breakeven_activation_short(self):
+        """Short: SL moves to entry when price drops -0.7 ATR."""
+        engine = ExitRuleEngine()
+        atr = 2.0
+        entry_price = 100.0
+        pos = HeldPosition(
+            symbol="AAPL",
+            strategy="rsi_mean_reversion",
+            direction="short",
+            entry_price=entry_price,
+            entry_atr=atr,
+            entry_date_et=date(2026, 2, 24),
+            bars_held=1,
+            qty=10.0,
+            highest_price=entry_price,
+            lowest_price=entry_price - _STAGE1_BE_ACTIVATION_ATR * atr,  # 98.6
+        )
+        # SL moves from 100+0.75*2=101.5 down to 100 (entry). Close at 100.01 triggers.
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=100.01,
+            bar_high=100.1,
+            bar_low=99.5,
+            indicators={"ATR_14": atr, "RSI_14": 55.0, "BBANDS_20": {"pct_b": 0.6}},
+            current_date_et=date(2026, 2, 25),
+        )
+        assert decision.action == "exit"
+        assert decision.reason == "stop_loss"
+
+    def test_stage2_profit_protection_long(self):
+        """Long: SL moves to entry+0.4ATR when price reaches +1.2 ATR."""
+        engine = ExitRuleEngine()
+        atr = 2.0
+        entry_price = 100.0
+        pos = HeldPosition(
+            symbol="AAPL",
+            strategy="rsi_mean_reversion",
+            direction="long",
+            entry_price=entry_price,
+            entry_atr=atr,
+            entry_date_et=date(2026, 2, 24),
+            bars_held=1,
+            qty=10.0,
+            highest_price=entry_price + _STAGE2_PROFIT_ACTIVATION_ATR * atr,  # 102.4
+            lowest_price=entry_price,
+        )
+        # Stage 2 SL = entry + 0.4*2 = 100.8. Close at 100.79 triggers.
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=100.79,
+            bar_high=101.0,
+            bar_low=100.5,
+            indicators={"ATR_14": atr, "RSI_14": 45.0, "BBANDS_20": {"pct_b": 0.4}},
+            current_date_et=date(2026, 2, 25),
+        )
+        assert decision.action == "exit"
+        assert decision.reason == "stop_loss"
+
+    def test_stage2_profit_protection_short(self):
+        """Short: SL moves to entry-0.4ATR when price drops -1.2 ATR."""
+        engine = ExitRuleEngine()
+        atr = 2.0
+        entry_price = 100.0
+        pos = HeldPosition(
+            symbol="AAPL",
+            strategy="rsi_mean_reversion",
+            direction="short",
+            entry_price=entry_price,
+            entry_atr=atr,
+            entry_date_et=date(2026, 2, 24),
+            bars_held=1,
+            qty=10.0,
+            highest_price=entry_price,
+            lowest_price=entry_price - _STAGE2_PROFIT_ACTIVATION_ATR * atr,  # 97.6
+        )
+        # Stage 2 SL = entry - 0.4*2 = 99.2. Close at 99.21 triggers.
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=99.21,
+            bar_high=99.5,
+            bar_low=99.0,
+            indicators={"ATR_14": atr, "RSI_14": 55.0, "BBANDS_20": {"pct_b": 0.6}},
+            current_date_et=date(2026, 2, 25),
+        )
+        assert decision.action == "exit"
+        assert decision.reason == "stop_loss"
+
+    def test_no_upgrade_below_stage1_threshold(self):
+        """SL should NOT upgrade if price hasn't reached +0.7 ATR."""
+        engine = ExitRuleEngine()
+        atr = 2.0
+        entry_price = 100.0
+        pos = HeldPosition(
+            symbol="AAPL",
+            strategy="rsi_mean_reversion",
+            direction="long",
+            entry_price=entry_price,
+            entry_atr=atr,
+            entry_date_et=date(2026, 2, 24),
+            bars_held=1,
+            qty=10.0,
+            highest_price=entry_price + 0.5 * atr,  # 101.0, below 0.7 ATR threshold
+            lowest_price=entry_price,
+        )
+        # Original SL = 100 - 1.0*2 = 98. Price at 98.5 should HOLD (above 98).
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=98.5,
+            bar_high=99.0,
+            bar_low=98.0,
+            indicators={"ATR_14": atr, "RSI_14": 45.0, "BBANDS_20": {"pct_b": 0.3}},
+            current_date_et=date(2026, 2, 25),
+        )
+        assert decision.action == "hold"
+
+    def test_stage2_overrides_stage1(self):
+        """When both stages activated, Stage 2 (more favorable) should apply."""
+        engine = ExitRuleEngine()
+        atr = 2.0
+        entry_price = 100.0
+        pos = HeldPosition(
+            symbol="AAPL",
+            strategy="rsi_mean_reversion",
+            direction="long",
+            entry_price=entry_price,
+            entry_atr=atr,
+            entry_date_et=date(2026, 2, 24),
+            bars_held=1,
+            qty=10.0,
+            highest_price=entry_price + 1.5 * atr,  # 103.0, above Stage 2 threshold
+            lowest_price=entry_price,
+        )
+        # Stage 2 SL = 100 + 0.4*2 = 100.8
+        # Stage 1 SL would be 100 (entry)
+        # Price at 100.5 should trigger exit (below 100.8)
+        decision = engine.evaluate(
+            position=pos,
+            bar_close=100.5,
+            bar_high=101.0,
+            bar_low=100.0,
+            indicators={"ATR_14": atr, "RSI_14": 45.0, "BBANDS_20": {"pct_b": 0.4}},
+            current_date_et=date(2026, 2, 25),
         )
         assert decision.action == "exit"
         assert decision.reason == "stop_loss"

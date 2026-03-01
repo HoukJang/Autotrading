@@ -76,7 +76,7 @@ class TestPerStrategyGDRConstants:
     def test_strategy_base_risk_values(self):
         """Per-strategy base risk should match spec values."""
         assert _STRATEGY_BASE_RISK["rsi_mean_reversion"] == 0.01
-        assert _STRATEGY_BASE_RISK["consecutive_down"] == 0.02
+        assert _STRATEGY_BASE_RISK["consecutive_down"] == 0.015
         assert "volume_divergence" not in _STRATEGY_BASE_RISK
 
     def test_default_base_risk(self):
@@ -369,10 +369,10 @@ class TestCalculateQtyPerStrategy:
         )
         assert qty == 500
 
-    def test_consecutive_down_uses_2pct_base_risk(self):
-        """Consecutive Down should use 2% base risk."""
+    def test_consecutive_down_uses_1_5pct_base_risk(self):
+        """Consecutive Down should use 1.5% base risk (P0-3 optimization)."""
         bt = _make_backtester(initial_capital=100_000, use_per_strategy_gdr=True)
-        # risk = 100K * 2% * 1.0 = $2000; qty = 2000 / 2.0 = 1000
+        # risk = 100K * 1.5% * 1.0 = $1500; qty = 1500 / 2.0 = 750
         qty = bt._calculate_qty(
             equity=100_000,
             fill_price=1.0,
@@ -380,12 +380,12 @@ class TestCalculateQtyPerStrategy:
             gdr_risk_mult=1.0,
             strategy="consecutive_down",
         )
-        assert qty == 1000
+        assert qty == 750
 
     def test_gdr_tier1_halves_risk(self):
         """GDR Tier 1 multiplier (0.5) should halve position size."""
         bt = _make_backtester(initial_capital=100_000, use_per_strategy_gdr=True)
-        # risk = 100K * 2% * 0.5 = $1000; qty = 1000 / 2.0 = 500
+        # risk = 100K * 1.5% * 0.5 = $750; qty = 750 / 2.0 = 375
         qty = bt._calculate_qty(
             equity=100_000,
             fill_price=1.0,
@@ -393,7 +393,7 @@ class TestCalculateQtyPerStrategy:
             gdr_risk_mult=0.5,
             strategy="consecutive_down",
         )
-        assert qty == 500
+        assert qty == 375
 
     def test_gdr_tier2_halts_entries(self):
         """GDR Tier 2 multiplier (0.0) should produce qty = 0."""
@@ -519,8 +519,8 @@ class TestLegacyGDRBackwardCompat:
             gdr_risk_mult=_GDR_LEGACY_RISK_MULT[2],  # 0.25
             strategy="consecutive_down",
         )
-        # risk = 100K * 2% * 0.25 = $500; qty = 500 / 2.0 = 250
-        assert qty == 250
+        # risk = 100K * 1.5% * 0.25 = $375; qty = 375 / 2.0 = 187
+        assert qty == 187
 
     def test_legacy_mode_no_safety_net(self):
         """Legacy mode should not activate the portfolio safety net."""
