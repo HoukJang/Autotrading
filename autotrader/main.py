@@ -329,8 +329,16 @@ class AutoTrader:
         # Start daily regime refresh scheduler
         self._daily_regime_task = asyncio.create_task(self._daily_regime_scheduler())
 
-        # Start legacy symbol stream (for regime monitoring via SPY etc.)
+        # Run universe selection immediately at startup
+        try:
+            await self._run_universe_selection()
+            logger.info("Initial universe selection complete: %d symbols", len(self._settings.symbols))
+        except Exception:
+            logger.warning("Initial universe selection failed; using config symbols")
+
+        # Subscribe to bars for selected universe + regime proxy
         symbols = list(set(self._settings.symbols + [self._regime_proxy_symbol]))
+        logger.info("Subscribing to minute bars for %d symbols", len(symbols))
         await self._broker.subscribe_bars(symbols, self._on_bar)
         if hasattr(self._broker, "run_stream"):
             self._stream_task = asyncio.create_task(
@@ -1086,8 +1094,19 @@ class AutoTrader:
             logger.info("Broker does not support historical bars; skipping warmup")
             return
 
+        # Fetch full S&P 500 universe for warmup
+        try:
+            from autotrader.universe.provider import SP500Provider
+            provider = SP500Provider()
+            infos = await asyncio.to_thread(provider.fetch)
+            all_symbols = [i.symbol for i in infos]
+            logger.info("Fetched %d S&P 500 symbols for warmup", len(all_symbols))
+        except Exception:
+            logger.warning("Failed to fetch S&P 500 list; falling back to config symbols")
+            all_symbols = list(self._settings.symbols)
+
         proxy = self._regime_proxy_symbol
-        symbols = list(set(self._settings.symbols + [proxy]))
+        symbols = list(set(all_symbols + [proxy]))
         logger.info("Loading historical daily bars for %d symbols...", len(symbols))
 
         try:
@@ -1104,7 +1123,8 @@ class AutoTrader:
                 self._bar_history[sym].append(bar)
 
         loaded_count = {s: len(b) for s, b in hist.items() if b}
-        logger.info("Loaded daily bars: %s", loaded_count)
+        logger.info("Loaded daily bars for %d symbols (total bars: %d)",
+                    len(loaded_count), sum(loaded_count.values()))
         self._initialize_regime_from_daily()
 
     def _initialize_regime_from_daily(self) -> None:
