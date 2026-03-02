@@ -170,6 +170,9 @@ class AlpacaAdapter(BrokerAdapter):
         start_date = end_date - timedelta(days=days)
         client = StockHistoricalDataClient(self._api_key, self._secret_key)
 
+        # Alpaca uses '.' for share class indicators (e.g., BRK.B not BRK-B)
+        symbols = [s.replace("-", ".") for s in symbols]
+
         result: dict[str, list[Bar]] = {}
         batch_size = 50
         for i in range(0, len(symbols), batch_size):

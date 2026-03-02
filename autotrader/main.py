@@ -329,14 +329,15 @@ class AutoTrader:
         # Start daily regime refresh scheduler
         self._daily_regime_task = asyncio.create_task(self._daily_regime_scheduler())
 
-        # Run universe selection immediately at startup
-        try:
-            await self._run_universe_selection()
-            logger.info("Initial universe selection complete: %d symbols", len(self._settings.symbols))
-        except Exception:
-            logger.warning("Initial universe selection failed; using config symbols")
+        # Use all symbols loaded during warmup as the trading universe
+        warmup_symbols = [s for s in self._daily_bar_history.keys() if self._daily_bar_history[s]]
+        if warmup_symbols:
+            self._settings.symbols = warmup_symbols
+            logger.info("Trading universe set to %d symbols from warmup data", len(warmup_symbols))
+        else:
+            logger.warning("No warmup data available; using config symbols (%d)", len(self._settings.symbols))
 
-        # Subscribe to bars for selected universe + regime proxy
+        # Subscribe to bars for full universe + regime proxy
         symbols = list(set(self._settings.symbols + [self._regime_proxy_symbol]))
         logger.info("Subscribing to minute bars for %d symbols", len(symbols))
         await self._broker.subscribe_bars(symbols, self._on_bar)
