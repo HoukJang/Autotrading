@@ -3,6 +3,7 @@
 Architecture overview:
   - 8:00 PM ET:   NightlyScanner.scan()  -> BatchResult (candidates)
   - 9:00 AM ET:   REST API daily bar refresh (pre-market)
+  - 9:20 AM ET:   Daily reset (clear daily counters, re-entry blocks)
   - 9:25 AM ET:   GapFilter.filter()     -> filtered Candidate list
   - 9:30 AM ET:   EntryManager.execute_moo()           (Group A)
   - 9:45 AM ET:   EntryManager.execute_confirmation()  (Group B starts)
@@ -198,8 +199,8 @@ _ENTRY_WINDOW_CLOSE_MINUTE: int = 0
 _DAILY_BAR_REFRESH_HOUR: int = 9   # 9:00 AM ET (pre-market daily bar fetch)
 _DAILY_BAR_REFRESH_MINUTE: int = 0
 
-_DAILY_RESET_HOUR: int = 9     # 9:29 AM ET (just before MOO)
-_DAILY_RESET_MINUTE: int = 29
+_DAILY_RESET_HOUR: int = 9     # 9:20 AM ET (before gap_filter at 9:25)
+_DAILY_RESET_MINUTE: int = 20
 
 
 class AutoTrader:
@@ -706,7 +707,7 @@ class AutoTrader:
                 _fired["daily_bar_refresh"] = today_et
                 await self._refresh_daily_bars()
 
-            # 9:29 AM: Daily reset (must run before MOO)
+            # 9:20 AM: Daily reset (must run before gap_filter and MOO)
             if h >= _DAILY_RESET_HOUR and (h > _DAILY_RESET_HOUR or m >= _DAILY_RESET_MINUTE) and _fired["daily_reset"] != today_et:
                 _fired["daily_reset"] = today_et
                 await self._on_daily_reset(today_et)
@@ -746,7 +747,7 @@ class AutoTrader:
     # -----------------------------------------------------------------------
 
     async def _on_daily_reset(self, today_et: date) -> None:
-        """Reset daily state at 9:29 AM ET, just before market open."""
+        """Reset daily state at 9:20 AM ET, before gap_filter and market open."""
         logger.info("Daily reset: %s", today_et)
         self._risk_manager.reset_daily_pnl()
         self._exit_rule_engine.on_new_trading_day(today_et)

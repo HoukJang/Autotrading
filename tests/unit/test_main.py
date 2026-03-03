@@ -943,7 +943,7 @@ class TestSchedulerDeduplication:
 
     @pytest.mark.asyncio
     async def test_daily_reset_fires_exactly_once(self, app):
-        """Even after multiple polling cycles past 9:29 AM, daily_reset fires only once.
+        """Even after multiple polling cycles past 9:20 AM, daily_reset fires only once.
 
         This verifies the _fired dict mechanism used inside
         _batch_intraday_scheduler correctly compares today's date so that

@@ -72,7 +72,7 @@ TRADING_EVENTS: dict[str, EventDefinition] = {
     "daily_reset": EventDefinition(
         name="daily_reset",
         scheduled_hour=9,
-        scheduled_minute=29,
+        scheduled_minute=20,
         catch_up_policy=CatchUpPolicy.ALWAYS,
         depends_on=["daily_bar_refresh"],
     ),
@@ -83,7 +83,7 @@ TRADING_EVENTS: dict[str, EventDefinition] = {
         catch_up_policy=CatchUpPolicy.CONDITIONAL,
         catch_up_deadline_hour=9,
         catch_up_deadline_minute=35,
-        depends_on=["daily_bar_refresh"],
+        depends_on=["daily_bar_refresh", "daily_reset"],
     ),
     "moo": EventDefinition(
         name="moo",

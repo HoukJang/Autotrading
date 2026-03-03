@@ -242,7 +242,7 @@ class TestStartupCatchUpResolver:
         Missed events whose scheduled time <= 9:30:
         - daily_bar_refresh (9:00, ALWAYS) -> included
         - gap_filter (9:25, CONDITIONAL, deadline 9:35, 9:30 < 9:35) -> included
-        - daily_reset (9:29, ALWAYS) -> included
+        - daily_reset (9:20, ALWAYS) -> included
         - moo (9:30, WINDOW deadline 9:45, 9:30 < 9:45) -> included
         - confirmation (9:45, scheduled > 9:30) -> NOT missed yet
         - entry_close (10:00, scheduled > 9:30) -> NOT missed yet
@@ -389,7 +389,7 @@ class TestStartupCatchUpResolver:
         At 9:30, gap_filter is still within its catch-up window (< 9:35).
         Known dependency chains:
         - daily_bar_refresh -> daily_reset
-        - daily_bar_refresh -> gap_filter
+        - daily_bar_refresh -> daily_reset -> gap_filter
         - daily_reset + gap_filter -> moo
         """
         result = resolver.resolve(_et(9, 30), today_is_market_day=True)
@@ -397,6 +397,7 @@ class TestStartupCatchUpResolver:
 
         assert idx["daily_bar_refresh"] < idx["daily_reset"]
         assert idx["daily_bar_refresh"] < idx["gap_filter"]
+        assert idx["daily_reset"] < idx["gap_filter"]
         assert idx["daily_reset"] < idx["moo"]
         assert idx["gap_filter"] < idx["moo"]
 
