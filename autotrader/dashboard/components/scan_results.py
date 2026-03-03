@@ -307,14 +307,16 @@ def _render_score_distribution(
 
 
 def _format_scan_timestamp(scan_ts: str) -> str:
-    """Format scan timestamp for compact display."""
+    """Format scan timestamp for compact display (converted to ET)."""
     if not scan_ts:
         return "Never"
     try:
         from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
         dt = datetime.fromisoformat(scan_ts.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt.strftime("%m/%d %H:%M ET")
+        et = dt.astimezone(ZoneInfo("America/New_York"))
+        return et.strftime("%m/%d %H:%M ET")
     except (ValueError, TypeError):
         return scan_ts[:16] if len(scan_ts) > 16 else scan_ts

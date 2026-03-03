@@ -152,17 +152,34 @@ class TestEventDefinitions:
                     f"WINDOW event '{name}' missing catch_up_deadline_minute"
                 )
 
-    def test_non_window_events_have_no_deadline(self) -> None:
-        """Non-WINDOW events should not specify deadline fields."""
+    def test_non_window_non_conditional_events_have_no_deadline(self) -> None:
+        """Events that are neither WINDOW nor CONDITIONAL should not specify deadline fields."""
         for name, ev in TRADING_EVENTS.items():
-            if ev.catch_up_policy != CatchUpPolicy.WINDOW:
+            if ev.catch_up_policy not in (CatchUpPolicy.WINDOW, CatchUpPolicy.CONDITIONAL):
                 assert ev.catch_up_deadline_hour is None, (
-                    f"Non-WINDOW event '{name}' has unexpected "
+                    f"Non-WINDOW/CONDITIONAL event '{name}' has unexpected "
                     "catch_up_deadline_hour"
                 )
                 assert ev.catch_up_deadline_minute is None, (
-                    f"Non-WINDOW event '{name}' has unexpected "
+                    f"Non-WINDOW/CONDITIONAL event '{name}' has unexpected "
                     "catch_up_deadline_minute"
+                )
+
+    def test_conditional_events_with_deadline_have_valid_fields(self) -> None:
+        """CONDITIONAL events with deadlines must have valid hour/minute values."""
+        for name, ev in TRADING_EVENTS.items():
+            if ev.catch_up_policy == CatchUpPolicy.CONDITIONAL and ev.catch_up_deadline_hour is not None:
+                assert 0 <= ev.catch_up_deadline_hour <= 23, (
+                    f"CONDITIONAL event '{name}' has invalid "
+                    f"catch_up_deadline_hour={ev.catch_up_deadline_hour}"
+                )
+                assert ev.catch_up_deadline_minute is not None, (
+                    f"CONDITIONAL event '{name}' has deadline_hour but missing "
+                    "catch_up_deadline_minute"
+                )
+                assert 0 <= ev.catch_up_deadline_minute <= 59, (
+                    f"CONDITIONAL event '{name}' has invalid "
+                    f"catch_up_deadline_minute={ev.catch_up_deadline_minute}"
                 )
 
     def test_event_definition_is_frozen(self) -> None:
@@ -217,21 +234,21 @@ class TestStartupCatchUpResolver:
         result = resolver.resolve(_et(8, 0), today_is_market_day=True)
         assert result == ["nightly_scan"]
 
-    def test_start_at_935_catches_up_daily_refresh_reset_gap_moo(
+    def test_start_at_930_catches_up_daily_refresh_reset_gap_moo(
         self, resolver: StartupCatchUpResolver
     ) -> None:
-        """Starting at 9:35 AM on a market day.
+        """Starting at 9:30 AM on a market day.
 
-        Missed events whose scheduled time <= 9:35:
+        Missed events whose scheduled time <= 9:30:
         - daily_bar_refresh (9:00, ALWAYS) -> included
-        - gap_filter (9:25, CONDITIONAL) -> included
+        - gap_filter (9:25, CONDITIONAL, deadline 9:35, 9:30 < 9:35) -> included
         - daily_reset (9:29, ALWAYS) -> included
-        - moo (9:30, WINDOW deadline 9:45, 9:35 < 9:45) -> included
-        - confirmation (9:45, scheduled > 9:35) -> NOT missed yet
-        - entry_close (10:00, scheduled > 9:35) -> NOT missed yet
-        - nightly_scan: 9:35 is past 9:00 and before 20:00 -> NOT included
+        - moo (9:30, WINDOW deadline 9:45, 9:30 < 9:45) -> included
+        - confirmation (9:45, scheduled > 9:30) -> NOT missed yet
+        - entry_close (10:00, scheduled > 9:30) -> NOT missed yet
+        - nightly_scan: 9:30 is past 9:00 and before 20:00 -> NOT included
         """
-        result = resolver.resolve(_et(9, 35), today_is_market_day=True)
+        result = resolver.resolve(_et(9, 30), today_is_market_day=True)
         assert set(result) == {
             "daily_bar_refresh",
             "daily_reset",
@@ -239,13 +256,31 @@ class TestStartupCatchUpResolver:
             "moo",
         }
 
-    def test_start_at_1100_skips_moo_and_confirmation(
+    def test_start_at_935_catches_up_without_gap_filter(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """Starting at 9:35 AM on a market day.
+
+        gap_filter (CONDITIONAL, deadline 9:35) is excluded because
+        9:35 is NOT strictly less than the 9:35 deadline (pre-market
+        data is stale by this time).  moo still runs because the
+        topological sort treats absent dependencies as satisfied.
+        """
+        result = resolver.resolve(_et(9, 35), today_is_market_day=True)
+        assert set(result) == {
+            "daily_bar_refresh",
+            "daily_reset",
+            "moo",
+        }
+        assert "gap_filter" not in result
+
+    def test_start_at_1100_skips_moo_confirmation_and_gap_filter(
         self, resolver: StartupCatchUpResolver
     ) -> None:
         """Starting at 11:00 AM on a market day.
 
         - daily_bar_refresh (ALWAYS) -> included
-        - gap_filter (CONDITIONAL) -> included
+        - gap_filter (CONDITIONAL, deadline 9:35, 11:00 >= 9:35) -> EXCLUDED
         - daily_reset (ALWAYS) -> included
         - moo (WINDOW, deadline 9:45, 11:00 >= 9:45) -> EXCLUDED
         - confirmation (WINDOW, deadline 10:00, 11:00 >= 10:00) -> EXCLUDED
@@ -256,18 +291,19 @@ class TestStartupCatchUpResolver:
         assert set(result) == {
             "daily_bar_refresh",
             "daily_reset",
-            "gap_filter",
             "entry_close",
         }
+        assert "gap_filter" not in result
         assert "moo" not in result
         assert "confirmation" not in result
 
-    def test_start_at_1500_catches_all_morning_events(
+    def test_start_at_1500_catches_always_events_only(
         self, resolver: StartupCatchUpResolver
     ) -> None:
         """Starting at 3:00 PM on a market day.
 
-        All morning ALWAYS/CONDITIONAL events included.
+        ALWAYS events included. gap_filter (CONDITIONAL, deadline 9:35)
+        excluded -- pre-market window long past.
         WINDOW events (moo, confirmation) excluded -- past deadlines.
         nightly_scan: 15:00 is between 9:00 and 20:00 -> NOT included.
         """
@@ -275,28 +311,29 @@ class TestStartupCatchUpResolver:
         assert set(result) == {
             "daily_bar_refresh",
             "daily_reset",
-            "gap_filter",
             "entry_close",
         }
+        assert "gap_filter" not in result
         assert "nightly_scan" not in result
 
-    def test_start_at_2200_catches_everything_except_window_events(
+    def test_start_at_2200_catches_always_and_nightly_only(
         self, resolver: StartupCatchUpResolver
     ) -> None:
         """Starting at 10:00 PM on a market day.
 
-        All events past their scheduled time. ALWAYS and CONDITIONAL included.
-        WINDOW events (moo, confirmation) still excluded -- past deadlines.
+        All events past their scheduled time. ALWAYS events included.
+        gap_filter (CONDITIONAL, deadline 9:35) excluded -- evening start.
+        WINDOW events (moo, confirmation) excluded -- past deadlines.
         nightly_scan (20:00) included via evening window (>= 20:00).
         """
         result = resolver.resolve(_et(22, 0), today_is_market_day=True)
         assert set(result) == {
             "daily_bar_refresh",
             "daily_reset",
-            "gap_filter",
             "entry_close",
             "nightly_scan",
         }
+        assert "gap_filter" not in result
         assert "moo" not in result
         assert "confirmation" not in result
 
@@ -349,12 +386,13 @@ class TestStartupCatchUpResolver:
     ) -> None:
         """Topological sort must ensure dependencies precede dependents.
 
-        Known dependency chains at 9:35:
+        At 9:30, gap_filter is still within its catch-up window (< 9:35).
+        Known dependency chains:
         - daily_bar_refresh -> daily_reset
         - daily_bar_refresh -> gap_filter
         - daily_reset + gap_filter -> moo
         """
-        result = resolver.resolve(_et(9, 35), today_is_market_day=True)
+        result = resolver.resolve(_et(9, 30), today_is_market_day=True)
         idx = {name: i for i, name in enumerate(result)}
 
         assert idx["daily_bar_refresh"] < idx["daily_reset"]
@@ -365,15 +403,17 @@ class TestStartupCatchUpResolver:
     def test_dependency_order_with_entry_close(
         self, resolver: StartupCatchUpResolver
     ) -> None:
-        """At 11:00 AM, entry_close is included but confirmation is not.
+        """At 11:00 AM, entry_close is included but confirmation and gap_filter are not.
 
         Verify entry_close still appears after its available dependencies.
+        gap_filter excluded (CONDITIONAL deadline 9:35 passed).
         """
         result = resolver.resolve(_et(11, 0), today_is_market_day=True)
         idx = {name: i for i, name in enumerate(result)}
 
         assert idx["daily_bar_refresh"] < idx["entry_close"]
         assert idx["daily_reset"] < idx["entry_close"]
+        assert "gap_filter" not in idx
 
     # ------------------------------------------------------------------
     # WINDOW policy boundary tests
@@ -533,7 +573,7 @@ class TestStartupCatchUpResolver:
         self, resolver: StartupCatchUpResolver
     ) -> None:
         """resolve() must return a list whose elements are all strings."""
-        result = resolver.resolve(_et(9, 35), today_is_market_day=True)
+        result = resolver.resolve(_et(9, 30), today_is_market_day=True)
         assert isinstance(result, list)
         for item in result:
             assert isinstance(item, str), (
@@ -577,19 +617,20 @@ class TestStartupCatchUpResolver:
     def test_end_of_day_2359_on_market_day(
         self, resolver: StartupCatchUpResolver
     ) -> None:
-        """Starting at 23:59 on a market day catches ALWAYS/CONDITIONAL events.
+        """Starting at 23:59 on a market day catches ALWAYS events + nightly_scan.
 
-        WINDOW events (moo, confirmation) remain excluded.
+        gap_filter (CONDITIONAL, deadline 9:35) excluded.
+        WINDOW events (moo, confirmation) excluded.
         """
         result = resolver.resolve(_et(23, 59), today_is_market_day=True)
         expected = {
             "daily_bar_refresh",
             "daily_reset",
-            "gap_filter",
             "entry_close",
             "nightly_scan",
         }
         assert set(result) == expected
+        assert "gap_filter" not in result
 
     def test_skip_policy_event_never_included(self) -> None:
         """An event with SKIP policy should never be caught up."""
@@ -713,7 +754,7 @@ class TestStartupCatchUpResolver:
     def test_default_resolver_uses_trading_events(self) -> None:
         """A resolver created without arguments should use TRADING_EVENTS."""
         resolver = StartupCatchUpResolver()
-        result = resolver.resolve(_et(9, 35), today_is_market_day=True)
+        result = resolver.resolve(_et(9, 30), today_is_market_day=True)
         assert "daily_bar_refresh" in result
 
     def test_topological_sort_handles_independent_events(self) -> None:
@@ -793,3 +834,147 @@ class TestStartupCatchUpResolver:
         resolver = StartupCatchUpResolver(events=custom_events)
         with pytest.raises(ValueError, match="cycle"):
             resolver.resolve(_et(10, 0), today_is_market_day=True)
+
+
+# ======================================================================
+# Gap filter CONDITIONAL deadline tests
+# ======================================================================
+
+
+class TestGapFilterConditionalDeadline:
+    """Test that gap_filter only catches up within the pre-market window.
+
+    The gap_filter is scheduled at 09:25 ET with a CONDITIONAL policy and
+    a catch-up deadline of 09:35 ET.  It should only be caught up when
+    the system starts between 09:25 and 09:35 (exclusive).  Outside this
+    window, pre-market price data is either unavailable or stale.
+    """
+
+    @pytest.fixture()
+    def resolver(self) -> StartupCatchUpResolver:
+        return StartupCatchUpResolver()
+
+    def test_gap_filter_caught_up_at_926(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """System starts at 9:26 AM -- one minute after scheduled time.
+
+        Within pre-market window (9:26 < 9:35), gap_filter included.
+        """
+        result = resolver.resolve(_et(9, 26), today_is_market_day=True)
+        assert "gap_filter" in result
+
+    def test_gap_filter_caught_up_at_930(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """System starts at 9:30 AM -- still within pre-market window."""
+        result = resolver.resolve(_et(9, 30), today_is_market_day=True)
+        assert "gap_filter" in result
+
+    def test_gap_filter_caught_up_at_934(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """System starts at 9:34 AM -- last minute before deadline."""
+        result = resolver.resolve(_et(9, 34), today_is_market_day=True)
+        assert "gap_filter" in result
+
+    def test_gap_filter_excluded_at_935(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """System starts at 9:35 AM -- exactly at deadline (strict less-than)."""
+        result = resolver.resolve(_et(9, 35), today_is_market_day=True)
+        assert "gap_filter" not in result
+
+    def test_gap_filter_excluded_at_936(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """System starts at 9:36 AM -- one minute past deadline."""
+        result = resolver.resolve(_et(9, 36), today_is_market_day=True)
+        assert "gap_filter" not in result
+
+    def test_gap_filter_excluded_at_1000(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """System starts at 10:00 AM -- well past pre-market window."""
+        result = resolver.resolve(_et(10, 0), today_is_market_day=True)
+        assert "gap_filter" not in result
+
+    def test_gap_filter_excluded_at_2037_evening_start(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """System starts at 8:37 PM -- the specific bug scenario.
+
+        When AutoTrader starts at 20:37 ET with catch-up logic,
+        the gap_filter must NOT run because pre-market data is
+        meaningless at this time.
+        """
+        result = resolver.resolve(_et(20, 37), today_is_market_day=True)
+        assert "gap_filter" not in result
+        # nightly_scan SHOULD be caught up at 20:37
+        assert "nightly_scan" in result
+
+    def test_gap_filter_not_caught_up_before_scheduled_time(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """System starts at 9:20 AM -- before gap_filter is scheduled."""
+        result = resolver.resolve(_et(9, 20), today_is_market_day=True)
+        assert "gap_filter" not in result
+
+    @pytest.mark.parametrize(
+        "hour, minute, gap_included",
+        [
+            (9, 24, False),   # before scheduled time
+            (9, 25, True),    # exactly at scheduled time
+            (9, 30, True),    # within window
+            (9, 34, True),    # last minute in window
+            (9, 35, False),   # at deadline (excluded)
+            (9, 40, False),   # past deadline
+            (11, 0, False),   # late morning
+            (15, 0, False),   # afternoon
+            (20, 37, False),  # evening (reported bug scenario)
+            (23, 59, False),  # end of day
+        ],
+        ids=[
+            "924-before-scheduled",
+            "925-at-scheduled",
+            "930-within-window",
+            "934-last-minute",
+            "935-at-deadline-excluded",
+            "940-past-deadline",
+            "1100-late-morning",
+            "1500-afternoon",
+            "2037-evening-bug-scenario",
+            "2359-end-of-day",
+        ],
+    )
+    def test_gap_filter_conditional_window_boundary(
+        self,
+        resolver: StartupCatchUpResolver,
+        hour: int,
+        minute: int,
+        gap_included: bool,
+    ) -> None:
+        """Parametrized boundary test for gap_filter CONDITIONAL deadline.
+
+        Catch-up window: [09:25, 09:35) -- scheduled time to deadline.
+        """
+        result = resolver.resolve(_et(hour, minute), today_is_market_day=True)
+        if gap_included:
+            assert "gap_filter" in result
+        else:
+            assert "gap_filter" not in result
+
+    def test_conditional_without_deadline_behaves_as_always(self) -> None:
+        """A CONDITIONAL event without deadline fields falls back to ALWAYS."""
+        custom_events = {
+            "cond_no_deadline": EventDefinition(
+                name="cond_no_deadline",
+                scheduled_hour=9,
+                scheduled_minute=0,
+                catch_up_policy=CatchUpPolicy.CONDITIONAL,
+                depends_on=[],
+            ),
+        }
+        resolver = StartupCatchUpResolver(events=custom_events)
+        result = resolver.resolve(_et(15, 0), today_is_market_day=True)
+        assert "cond_no_deadline" in result

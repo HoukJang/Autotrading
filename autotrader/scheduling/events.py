@@ -11,8 +11,11 @@ class CatchUpPolicy(Enum):
     ALWAYS  -- always catch up regardless of how late we start.
     WINDOW  -- catch up only if we start before the deadline.
     SKIP    -- never catch up; wait for the next scheduled occurrence.
-    CONDITIONAL -- catch up only if a runtime condition is met (treated as
-                   ALWAYS by the resolver; the caller decides the condition).
+    CONDITIONAL -- catch up only if the current time is within the allowed
+                   catch-up window.  When ``catch_up_deadline_hour/minute``
+                   are set, the resolver enforces ``now < deadline`` (same
+                   semantics as WINDOW).  When no deadline is set, behaves
+                   like ALWAYS.
     """
 
     ALWAYS = "always"
@@ -36,9 +39,12 @@ class EventDefinition:
     catch_up_policy : CatchUpPolicy
         Governs whether the resolver should include this event on late start.
     catch_up_deadline_hour : int | None
-        For WINDOW policy only -- hour component of the latest allowed catch-up.
+        For WINDOW and CONDITIONAL policies -- hour component of the latest
+        allowed catch-up time.  When set, the resolver requires ``now < deadline``
+        for catch-up to occur.
     catch_up_deadline_minute : int | None
-        For WINDOW policy only -- minute component of the latest allowed catch-up.
+        For WINDOW and CONDITIONAL policies -- minute component of the latest
+        allowed catch-up time.
     depends_on : list[str]
         Names of events that must run *before* this event.
     """
@@ -75,6 +81,8 @@ TRADING_EVENTS: dict[str, EventDefinition] = {
         scheduled_hour=9,
         scheduled_minute=25,
         catch_up_policy=CatchUpPolicy.CONDITIONAL,
+        catch_up_deadline_hour=9,
+        catch_up_deadline_minute=35,
         depends_on=["daily_bar_refresh"],
     ),
     "moo": EventDefinition(

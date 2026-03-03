@@ -127,7 +127,17 @@ class StartupCatchUpResolver:
         if policy == CatchUpPolicy.SKIP:
             return False
 
-        if policy in (CatchUpPolicy.ALWAYS, CatchUpPolicy.CONDITIONAL):
+        if policy == CatchUpPolicy.ALWAYS:
+            return True
+
+        if policy == CatchUpPolicy.CONDITIONAL:
+            # When a deadline is specified, only catch up if now < deadline.
+            # This prevents the event from running outside its meaningful
+            # time window (e.g., gap_filter should only run pre-market).
+            if event.catch_up_deadline_hour is not None:
+                deadline_min = event.catch_up_deadline_minute or 0
+                deadline = event.catch_up_deadline_hour * 60 + deadline_min
+                return now_minutes < deadline
             return True
 
         if policy == CatchUpPolicy.WINDOW:
