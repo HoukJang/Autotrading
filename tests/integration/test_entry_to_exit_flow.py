@@ -75,10 +75,7 @@ def _make_held_position(
 def _make_monitor_with_real_exit_engine(
     exit_result: OrderResult | None = None,
 ) -> tuple[PositionMonitor, ExitRuleEngine]:
-    """Create PositionMonitor with a real ExitRuleEngine but mocked adapter/orders."""
-    adapter = MagicMock()
-    adapter.subscribe_bars = AsyncMock()
-
+    """Create PositionMonitor with a real ExitRuleEngine but mocked orders."""
     exit_result = exit_result or OrderResult(
         order_id="exit-001",
         symbol="AAPL",
@@ -97,7 +94,6 @@ def _make_monitor_with_real_exit_engine(
     indicator_engine.compute = MagicMock(return_value={"ATR_14": 2.0, "RSI_14": 45.0})
 
     monitor = PositionMonitor(
-        adapter=adapter,
         order_manager=order_manager,
         exit_rule_engine=exit_rule_engine,
         indicator_engine=indicator_engine,
@@ -191,9 +187,6 @@ class TestReEntryBlockingEndToEnd:
         """After exit, ExitRuleEngine should block the symbol from re-entry."""
         exit_decision = ExitDecision(action="exit", reason="stop_loss", target_price=95.0)
 
-        adapter = MagicMock()
-        adapter.subscribe_bars = AsyncMock()
-
         order_manager = MagicMock(spec=OrderManager)
         order_manager.submit_exit = AsyncMock(return_value=OrderResult(
             order_id="exit-001", symbol="AAPL", status="filled",
@@ -208,7 +201,6 @@ class TestReEntryBlockingEndToEnd:
         mock_indicator_engine.evaluate = MagicMock(return_value=exit_decision)
 
         # Override evaluate to force exit on second daily bar
-        original_evaluate = exit_rule_engine.evaluate
         call_count = {"n": 0}
 
         def forced_exit(*args, **kwargs):
@@ -220,7 +212,6 @@ class TestReEntryBlockingEndToEnd:
         exit_rule_engine.evaluate = forced_exit
 
         monitor = PositionMonitor(
-            adapter=adapter,
             order_manager=order_manager,
             exit_rule_engine=exit_rule_engine,
             indicator_engine=mock_indicator_engine,

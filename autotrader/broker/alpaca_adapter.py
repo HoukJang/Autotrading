@@ -210,6 +210,29 @@ class AlpacaAdapter(BrokerAdapter):
 
         self._stream.subscribe_bars(_bridge, *symbols)
 
+    async def add_bar_subscription(self, symbols: list[str], callback: Callable) -> None:
+        if not self._stream:
+            logger.warning("Cannot add subscription: stream not initialized")
+            return
+        if not symbols:
+            return
+
+        async def _bridge(alpaca_bar: Any) -> None:
+            bar = self._convert_bar(alpaca_bar, timeframe=Timeframe.MINUTE)
+            asyncio.run_coroutine_threadsafe(callback(bar), self._loop)
+
+        self._stream.subscribe_bars(_bridge, *symbols)
+        logger.info("Added bar subscription for %d symbols: %s", len(symbols), symbols)
+
+    async def remove_bar_subscription(self, symbols: list[str]) -> None:
+        if not self._stream:
+            logger.warning("Cannot remove subscription: stream not initialized")
+            return
+        if not symbols:
+            return
+        self._stream.unsubscribe_bars(*symbols)
+        logger.info("Removed bar subscription for %d symbols: %s", len(symbols), symbols)
+
     def run_stream(self) -> None:
         assert self._stream is not None
         self._stream.run()

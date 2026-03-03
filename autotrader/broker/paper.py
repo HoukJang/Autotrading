@@ -163,6 +163,12 @@ class PaperBroker(BrokerAdapter):
     async def subscribe_bars(self, symbols: list[str], callback: Callable) -> None:
         pass  # Paper broker does not produce bars
 
+    async def add_bar_subscription(self, symbols: list[str], callback: Callable) -> None:
+        pass  # Paper broker does not produce bars
+
+    async def remove_bar_subscription(self, symbols: list[str]) -> None:
+        pass  # Paper broker does not produce bars
+
 
 class _PaperPosition:
     def __init__(self, symbol: str, quantity: float, avg_price: float) -> None:

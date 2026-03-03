@@ -100,9 +100,12 @@ class BatchResult:
         """Serialize to a JSON-serializable dict for dashboard consumption."""
         return {
             "run_at": self.run_at.isoformat(),
+            "scan_timestamp": self.run_at.isoformat(),
             "scan_duration_secs": round(self.scan_duration_secs, 2),
             "symbols_scanned": self.symbols_scanned,
+            "total_scanned": self.symbols_scanned,
             "symbols_with_signals": self.symbols_with_signals,
+            "signals_generated": self.symbols_with_signals,
             "regime": self.regime,
             "candidates": [
                 {
@@ -112,9 +115,15 @@ class BatchResult:
                     "direction": c.direction,
                     "signal_strength": round(c.signal_strength, 4),
                     "composite_score": round(c.composite_score, 4),
+                    "score": round(c.composite_score, 4),
                     "regime_compatibility": round(c.regime_compatibility, 4),
                     "sector": c.sector,
                     "prev_close": c.prev_close,
+                    "entry_group": c.scan_result.metadata.get("entry_group", "MOO"),
+                    "atr": round(c.scan_result.indicators.get("ATR_14", 0) or 0, 2),
+                    "sl_price": c.scan_result.metadata.get("sl_price"),
+                    "tp_price": c.scan_result.metadata.get("tp_price"),
+                    "gap_filter_status": "pending",
                     "indicators": {
                         k: (round(v, 4) if isinstance(v, float) else v)
                         for k, v in c.scan_result.indicators.items()

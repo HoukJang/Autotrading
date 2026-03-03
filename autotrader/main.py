@@ -2,29 +2,21 @@
 
 Architecture overview:
   - 8:00 PM ET:   NightlyScanner.scan()  -> BatchResult (candidates)
+  - 9:00 AM ET:   REST API daily bar refresh (pre-market)
   - 9:25 AM ET:   GapFilter.filter()     -> filtered Candidate list
   - 9:30 AM ET:   EntryManager.execute_moo()           (Group A)
   - 9:45 AM ET:   EntryManager.execute_confirmation()  (Group B starts)
   - 10:00 AM ET:  EntryManager.close_entry_window()    (discard unconfirmed)
-  - Continuous:   PositionMonitor streams bars, evaluates exits
+  - Continuous:   Minute bars streamed for held positions only (0~9)
 
-Integration with existing v2 modules:
-  - AlpacaAdapter (broker/alpaca_adapter.py)  - unchanged
-  - RiskManager (risk/manager.py)             - unchanged
-  - AllocationEngine (portfolio/allocation_engine.py) - unchanged
-  - RegimeDetector (portfolio/regime_detector.py)    - unchanged
-  - IndicatorEngine (indicators/engine.py)           - unchanged
-  - TradeLogger (portfolio/trade_logger.py)          - unchanged
-
-Batch module integration (autotrader/batch/ - developed by another agent):
-  - NightlyScanner, GapFilter, SignalRanker are injected via Protocol
-    interfaces defined in this file.
-  - If batch components are not provided, the system falls back to
-    the legacy v2 direct-signal strategy flow.
+Daily bar source: REST API pre-fetch (not minute->daily aggregation).
+Minute bar streaming: held positions only, dynamically subscribed on
+entry and unsubscribed on exit.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections import defaultdict, deque
@@ -35,7 +27,6 @@ from typing import Any, Protocol, runtime_checkable
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
 
-from autotrader.core.aggregator import DailyBarAggregator
 from autotrader.core.config import RotationConfig, Settings, load_settings
 from autotrader.core.event_bus import EventBus
 from autotrader.core.logger import setup_logging
@@ -44,7 +35,9 @@ from autotrader.core.types import (
 )
 from autotrader.broker.base import BrokerAdapter
 from autotrader.broker.paper import PaperBroker
-from autotrader.execution.entry_manager import Candidate, EntryManager
+from autotrader.batch.gap_filter import GapFilter
+from autotrader.batch.types import Candidate as BatchCandidate, FilteredCandidate
+from autotrader.execution.entry_manager import Candidate as EntryCandidate, EntryManager
 from autotrader.execution.exit_rules import ExitRuleEngine, HeldPosition
 from autotrader.execution.order_manager import OrderManager
 from autotrader.execution.position_monitor import PositionMonitor
@@ -62,6 +55,7 @@ from autotrader.risk.manager import RiskManager
 from autotrader.risk.position_sizer import PositionSizer
 from autotrader.rotation.event_driven import EventDrivenRotation
 from autotrader.rotation.manager import RotationManager
+from autotrader.scheduling import StartupCatchUpResolver
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
 from autotrader.strategy.breakout_momentum import BreakoutMomentum
@@ -79,16 +73,17 @@ _ET = ZoneInfo("America/New_York")
 # ---------------------------------------------------------------------------
 
 @runtime_checkable
-class BatchResult(Protocol):
+class BatchResultProtocol(Protocol):
     """Protocol for the result of a nightly scan.
 
     The concrete implementation lives in autotrader/batch/ (another agent).
     This protocol is satisfied by any object that exposes ``candidates``.
+    Candidates are ``autotrader.batch.types.Candidate`` objects.
     """
 
     @property
-    def candidates(self) -> list[Candidate]:
-        """List of Candidate objects from the scan."""
+    def candidates(self) -> list[Any]:
+        """List of batch Candidate objects from the scan."""
         ...
 
 
@@ -97,7 +92,7 @@ class NightlyScannerProtocol(Protocol):
     """Protocol for the nightly batch scanner."""
 
     async def scan(self) -> Any:
-        """Run the nightly scan.  Returns an object satisfying BatchResult."""
+        """Run the nightly scan.  Returns an object satisfying BatchResultProtocol."""
         ...
 
 
@@ -105,17 +100,17 @@ class NightlyScannerProtocol(Protocol):
 class GapFilterProtocol(Protocol):
     """Protocol for the pre-market gap filter (9:25 AM ET)."""
 
-    async def filter(self, candidates: list[Candidate]) -> list[Candidate]:
+    async def filter(self, candidates: list[Any]) -> list[Any]:
         """Filter candidates based on overnight gap size.
 
         Removes candidates where the overnight gap exceeds the configured
         max_gap_pct threshold.
 
         Args:
-            candidates: Raw candidates from NightlyScanner.
+            candidates: Raw batch.types.Candidate objects from NightlyScanner.
 
         Returns:
-            Filtered list of Candidate objects.
+            List of FilteredCandidate objects.
         """
         ...
 
@@ -124,7 +119,7 @@ class GapFilterProtocol(Protocol):
 class SignalRankerProtocol(Protocol):
     """Protocol for ranking candidates by signal quality."""
 
-    def rank(self, candidates: list[Candidate]) -> list[Candidate]:
+    def rank(self, candidates: list[Any]) -> list[Any]:
         """Return candidates sorted from highest to lowest quality.
 
         Args:
@@ -134,6 +129,51 @@ class SignalRankerProtocol(Protocol):
             Sorted list (highest quality first).
         """
         ...
+
+
+class _NightlyScannerAdapter:
+    """Wraps NightlyScanner to satisfy NightlyScannerProtocol.
+
+    Bridges between the NightlyScanner.run(symbols, days, regime) interface
+    and the NightlyScannerProtocol.scan() expected by AutoTrader.
+    """
+
+    def __init__(self, scanner: Any, get_symbols: Any, get_regime: Any) -> None:
+        self._scanner = scanner
+        self._get_symbols = get_symbols
+        self._get_regime = get_regime
+
+    async def scan(self) -> Any:
+        symbols = self._get_symbols()
+        regime = self._get_regime()
+        return await self._scanner.run(symbols, regime=regime)
+
+
+def _batch_to_entry_candidate(batch_cand: BatchCandidate) -> EntryCandidate:
+    """Convert a batch pipeline Candidate to an EntryManager Candidate.
+
+    The batch pipeline produces ``autotrader.batch.types.Candidate`` objects
+    (with a nested ``ScanResult``), while the execution layer expects
+    ``autotrader.execution.entry_manager.Candidate`` objects (with a
+    ``Signal``).  This helper bridges the two representations.
+    """
+    sr = batch_cand.scan_result
+    signal = Signal(
+        strategy=sr.strategy,
+        symbol=sr.symbol,
+        direction=sr.direction,
+        strength=sr.signal_strength,
+        metadata=sr.metadata,
+    )
+    atr = sr.indicators.get("ATR_14", 1.0)
+    if not isinstance(atr, (int, float)) or atr <= 0:
+        atr = 1.0
+    return EntryCandidate(
+        signal=signal,
+        prev_close=sr.prev_close,
+        atr=float(atr),
+        indicators=sr.indicators,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +194,9 @@ _CONFIRMATION_MINUTE: int = 45
 
 _ENTRY_WINDOW_CLOSE_HOUR: int = 10   # 10:00 AM ET
 _ENTRY_WINDOW_CLOSE_MINUTE: int = 0
+
+_DAILY_BAR_REFRESH_HOUR: int = 9   # 9:00 AM ET (pre-market daily bar fetch)
+_DAILY_BAR_REFRESH_MINUTE: int = 0
 
 _DAILY_RESET_HOUR: int = 9     # 9:29 AM ET (just before MOO)
 _DAILY_RESET_MINUTE: int = 29
@@ -215,7 +258,6 @@ class AutoTrader:
         self._daily_bar_history: dict[str, deque[Bar]] = defaultdict(
             lambda: deque(maxlen=settings.data.bar_history_size)
         )
-        self._aggregator = DailyBarAggregator()
 
         # --- Position tracking ---
         self._portfolio_tracker: PortfolioTracker | None = None
@@ -269,6 +311,7 @@ class AutoTrader:
 
         # --- Scheduler tasks ---
         self._running = False
+        self._scheduler_running = False  # Guard against duplicate scheduler instances
         self._stream_task: asyncio.Task | None = None
         self._scheduler_task: asyncio.Task | None = None
         self._batch_scheduler_task: asyncio.Task | None = None
@@ -337,14 +380,23 @@ class AutoTrader:
         else:
             logger.warning("No warmup data available; using config symbols (%d)", len(self._settings.symbols))
 
-        # Subscribe to bars for full universe + regime proxy
-        symbols = list(set(self._settings.symbols + [self._regime_proxy_symbol]))
-        logger.info("Subscribing to minute bars for %d symbols", len(symbols))
-        await self._broker.subscribe_bars(symbols, self._on_bar)
-        if hasattr(self._broker, "run_stream"):
-            self._stream_task = asyncio.create_task(
-                asyncio.to_thread(self._broker.run_stream)
-            )
+        # Subscribe to minute bars for held positions only (not full universe)
+        held_symbols = list(self._held_positions.keys())
+        if held_symbols:
+            logger.info("Subscribing to minute bars for %d held positions: %s", len(held_symbols), held_symbols)
+            await self._broker.subscribe_bars(held_symbols, self._on_bar)
+            if hasattr(self._broker, "run_stream"):
+                self._stream_task = asyncio.create_task(
+                    asyncio.to_thread(self._broker.run_stream)
+                )
+        else:
+            logger.info("No held positions; minute bar stream not started (will start on first entry)")
+            # Initialize stream with empty subscription so it's ready for dynamic adds
+            await self._broker.subscribe_bars([], self._on_bar)
+            if hasattr(self._broker, "run_stream"):
+                self._stream_task = asyncio.create_task(
+                    asyncio.to_thread(self._broker.run_stream)
+                )
 
         # Start batch+intraday scheduler
         self._batch_scheduler_task = asyncio.create_task(self._batch_intraday_scheduler())
@@ -359,6 +411,7 @@ class AutoTrader:
         """Gracefully shutdown all components."""
         logger.info("Stopping %s", self._settings.system.name)
         self._running = False
+        self._scheduler_running = False
 
         # Stop PositionMonitor
         if self._position_monitor is not None:
@@ -409,7 +462,6 @@ class AutoTrader:
         )
 
         self._position_monitor = PositionMonitor(
-            adapter=self._broker,  # type: ignore[arg-type]
             order_manager=self._order_manager,
             exit_rule_engine=self._exit_rule_engine,
             indicator_engine=self._indicator_engine,
@@ -455,7 +507,12 @@ class AutoTrader:
                 if self._position_monitor is not None:
                     self._position_monitor.add_position(held)
 
-            # Start the position monitor stream
+            # Subscribe to minute bars for held positions
+            if held_symbols := list(self._held_positions.keys()):
+                await self._broker.add_bar_subscription(held_symbols, self._on_bar)
+                logger.info("Subscribed to minute bars for %d existing positions", len(held_symbols))
+
+            # Start the position monitor
             if self._position_monitor is not None:
                 await self._position_monitor.start()
 
@@ -466,13 +523,162 @@ class AutoTrader:
     # Batch+intraday scheduler
     # -----------------------------------------------------------------------
 
+    async def _run_startup_catchup(self, fired: dict[str, date | None]) -> None:
+        """Execute catch-up for events missed due to late system start.
+
+        Uses StartupCatchUpResolver to determine which events should be
+        replayed, then executes them in dependency order.
+        """
+        now_et = datetime.now(timezone.utc).astimezone(_ET)
+        today_et = now_et.date()
+
+        # Determine if today is a market day (simple weekday check)
+        is_market_day = now_et.weekday() < 5  # Mon-Fri
+
+        resolver = StartupCatchUpResolver()
+        catchup_events = resolver.resolve(now_et, today_is_market_day=is_market_day)
+
+        if not catchup_events:
+            logger.info("Startup catch-up: no missed events to replay")
+            return
+
+        logger.info(
+            "Startup catch-up: replaying %d event(s): %s",
+            len(catchup_events),
+            ", ".join(catchup_events),
+        )
+
+        event_handlers: dict[str, Any] = {
+            "daily_bar_refresh": self._refresh_daily_bars,
+            "daily_reset": lambda: self._on_daily_reset(today_et),
+            "gap_filter": self._on_gap_filter,
+            "moo": self._on_moo,
+            "confirmation": self._on_confirmation_window,
+            "entry_close": self._on_entry_window_close,
+            "nightly_scan": self._on_nightly_scan,
+        }
+
+        for event_name in catchup_events:
+            handler = event_handlers.get(event_name)
+            if handler is None:
+                logger.warning("No handler for catch-up event: %s", event_name)
+                continue
+            try:
+                logger.info("Catch-up: executing %s", event_name)
+                result = handler()
+                if asyncio.iscoroutine(result):
+                    await result
+                fired[event_name] = today_et
+            except Exception:
+                logger.exception("Catch-up failed for event: %s", event_name)
+
+    def _load_last_batch_result(self) -> None:
+        """Load the most recent batch result from disk if still fresh.
+
+        On process restart, the in-memory ``_last_batch_result`` is lost.
+        This method reconstructs it from ``data/batch_results.json`` when the
+        file exists and was produced within the last 18 hours (nightly scan at
+        8 PM, gap filter at 9:25 AM = ~13 h gap; 18 h provides safe margin).
+        """
+        results_path = os.path.join("data", "batch_results.json")
+        if not os.path.exists(results_path):
+            logger.debug("No batch_results.json found; skipping load")
+            return
+
+        try:
+            with open(results_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to read batch_results.json: %s", exc)
+            return
+
+        # Check freshness: run_at must be within 18 hours of now
+        run_at_str = data.get("run_at")
+        if not run_at_str:
+            logger.warning("batch_results.json missing run_at; skipping load")
+            return
+
+        try:
+            run_at = datetime.fromisoformat(run_at_str)
+            # Ensure timezone-aware comparison
+            if run_at.tzinfo is None:
+                run_at = run_at.replace(tzinfo=timezone.utc)
+            age_hours = (datetime.now(timezone.utc) - run_at).total_seconds() / 3600
+        except (ValueError, TypeError) as exc:
+            logger.warning("Invalid run_at in batch_results.json: %s", exc)
+            return
+
+        if age_hours > 18:
+            logger.info(
+                "batch_results.json is %.1f hours old (>18h); not loading stale result",
+                age_hours,
+            )
+            return
+
+        # Reconstruct minimal BatchResult-like object with .candidates
+        raw_candidates = data.get("candidates", [])
+
+        class _RestoredBatchResult:
+            """Minimal stand-in satisfying the BatchResultProtocol (.candidates)."""
+
+            def __init__(self, candidates: list[BatchCandidate]) -> None:
+                self.candidates = candidates
+
+        from autotrader.batch.types import ScanResult as _ScanResult
+
+        candidates: list[BatchCandidate] = []
+        for c in raw_candidates:
+            try:
+                scan_result = _ScanResult(
+                    symbol=c["symbol"],
+                    strategy=c["strategy"],
+                    direction=c["direction"],
+                    signal_strength=c.get("signal_strength", 0.0),
+                    indicators=c.get("indicators", {}),
+                    prev_close=c.get("prev_close", 0.0),
+                    scanned_at=datetime.fromisoformat(c["scanned_at"]) if c.get("scanned_at") else datetime.now(timezone.utc),
+                    metadata=c.get("metadata", {}),
+                )
+                candidate = BatchCandidate(
+                    scan_result=scan_result,
+                    composite_score=c.get("composite_score", 0.0),
+                    regime_compatibility=c.get("regime_compatibility", 0.0),
+                    sector=c.get("sector", "Unknown"),
+                    rank=c.get("rank", 0),
+                )
+                candidates.append(candidate)
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.debug("Skipping malformed candidate in batch_results.json: %s", exc)
+                continue
+
+        self._last_batch_result = _RestoredBatchResult(candidates)
+        logger.info(
+            "Loaded %d candidates from batch_results.json (%.1f hours old)",
+            len(candidates),
+            age_hours,
+        )
+
     async def _batch_intraday_scheduler(self) -> None:
         """Background task that drives the batch+intraday daily workflow.
 
-        Checks current US Eastern time every 30 seconds and fires
-        the appropriate action when the time window is reached.
+        Phase 1 (startup): Catch up any events missed due to late start.
+        Phase 2 (loop): Poll every 30s and fire events at their scheduled time.
         """
+        # Guard against duplicate scheduler instances (Bug 2 fix)
+        if self._scheduler_running:
+            logger.warning("_batch_intraday_scheduler already running; aborting duplicate")
+            return
+        self._scheduler_running = True
+
+        try:
+            await self.__batch_intraday_scheduler_impl()
+        finally:
+            self._scheduler_running = False
+
+    async def __batch_intraday_scheduler_impl(self) -> None:
+        """Internal implementation of the batch+intraday scheduler loop."""
         _fired: dict[str, date | None] = {
+            "daily_bar_refresh": None,
             "daily_reset": None,
             "gap_filter": None,
             "moo": None,
@@ -481,31 +687,44 @@ class AutoTrader:
             "nightly_scan": None,
         }
 
+        # --- Phase 0: Restore last batch result from disk (survives restart) ---
+        if self._last_batch_result is None:
+            self._load_last_batch_result()
+
+        # --- Phase 1: Startup catch-up ---
+        await self._run_startup_catchup(_fired)
+
+        # --- Phase 2: Normal polling loop ---
         while self._running:
             await asyncio.sleep(30)
             now_et = datetime.now(timezone.utc).astimezone(_ET)
             today_et = now_et.date()
             h, m = now_et.hour, now_et.minute
 
+            # 9:00 AM: Pre-market daily bar refresh via REST API
+            if h >= _DAILY_BAR_REFRESH_HOUR and (h > _DAILY_BAR_REFRESH_HOUR or m >= _DAILY_BAR_REFRESH_MINUTE) and _fired["daily_bar_refresh"] != today_et:
+                _fired["daily_bar_refresh"] = today_et
+                await self._refresh_daily_bars()
+
             # 9:29 AM: Daily reset (must run before MOO)
-            if h == _DAILY_RESET_HOUR and m >= _DAILY_RESET_MINUTE and _fired["daily_reset"] != today_et:
+            if h >= _DAILY_RESET_HOUR and (h > _DAILY_RESET_HOUR or m >= _DAILY_RESET_MINUTE) and _fired["daily_reset"] != today_et:
                 _fired["daily_reset"] = today_et
                 await self._on_daily_reset(today_et)
 
             # 9:25 AM: Gap filter
-            if h == _GAP_FILTER_HOUR and m >= _GAP_FILTER_MINUTE and _fired["gap_filter"] != today_et:
+            if h >= _GAP_FILTER_HOUR and (h > _GAP_FILTER_HOUR or m >= _GAP_FILTER_MINUTE) and _fired["gap_filter"] != today_et:
                 _fired["gap_filter"] = today_et
                 await self._on_gap_filter()
 
             # 9:30 AM: Group A MOO entries
-            if h == _MOO_HOUR and m >= _MOO_MINUTE and _fired["moo"] != today_et:
+            if h >= _MOO_HOUR and (h > _MOO_HOUR or m >= _MOO_MINUTE) and _fired["moo"] != today_et:
                 _fired["moo"] = today_et
                 await self._on_moo()
 
             # 9:45 AM: Group B confirmation window
             if (
-                h == _CONFIRMATION_HOUR
-                and m >= _CONFIRMATION_MINUTE
+                h >= _CONFIRMATION_HOUR
+                and (h > _CONFIRMATION_HOUR or m >= _CONFIRMATION_MINUTE)
                 and (h < _ENTRY_WINDOW_CLOSE_HOUR or (h == _ENTRY_WINDOW_CLOSE_HOUR and m < _ENTRY_WINDOW_CLOSE_MINUTE))
                 and _fired["confirmation"] != today_et
             ):
@@ -513,12 +732,12 @@ class AutoTrader:
                 await self._on_confirmation_window()
 
             # 10:00 AM: Close entry window
-            if h == _ENTRY_WINDOW_CLOSE_HOUR and m >= _ENTRY_WINDOW_CLOSE_MINUTE and _fired["entry_close"] != today_et:
+            if h >= _ENTRY_WINDOW_CLOSE_HOUR and (h > _ENTRY_WINDOW_CLOSE_HOUR or m >= _ENTRY_WINDOW_CLOSE_MINUTE) and _fired["entry_close"] != today_et:
                 _fired["entry_close"] = today_et
                 await self._on_entry_window_close()
 
             # 8:00 PM: Nightly scan
-            if h == _NIGHTLY_SCAN_HOUR and m >= _NIGHTLY_SCAN_MINUTE and _fired["nightly_scan"] != today_et:
+            if h >= _NIGHTLY_SCAN_HOUR and (h > _NIGHTLY_SCAN_HOUR or m >= _NIGHTLY_SCAN_MINUTE) and _fired["nightly_scan"] != today_et:
                 _fired["nightly_scan"] = today_et
                 await self._on_nightly_scan()
 
@@ -537,29 +756,123 @@ class AutoTrader:
             self._gdr_manager.reset_daily_entries()
 
     async def _on_gap_filter(self) -> None:
-        """Apply gap filter to last batch result at 9:25 AM ET."""
+        """Apply gap filter to last batch result at 9:25 AM ET.
+
+        Converts batch pipeline Candidates to EntryManager Candidates and
+        loads them into the EntryManager for MOO execution at 9:30 AM.
+
+        When no GapFilter is injected, all raw candidates pass through.
+        When a GapFilter is present, only candidates with acceptable
+        pre-market gaps are kept.  In both cases the surviving batch
+        Candidates are converted to EntryManager Candidates and loaded.
+        """
         if self._last_batch_result is None:
             logger.info("Gap filter: no nightly batch result; skipping")
             return
-        if self._gap_filter is None:
-            logger.info("Gap filter: no GapFilter injected; using raw candidates")
+
+        batch_candidates: list[BatchCandidate] = list(self._last_batch_result.candidates)
+        if not batch_candidates:
+            logger.info("Gap filter: no candidates in batch result")
+            return
+
+        # Track filtered results for dashboard update
+        filtered_results: list[FilteredCandidate] | None = None
+
+        # Apply gap filter if available
+        if self._gap_filter is not None:
+            try:
+                filtered_results = await self._gap_filter.filter(batch_candidates)
+                passed = [fr.candidate for fr in filtered_results if fr.passed_filter]
+                logger.info(
+                    "Gap filter: %d -> %d passed",
+                    len(batch_candidates), len(passed),
+                )
+            except Exception:
+                logger.exception("Gap filter execution failed; using all raw candidates")
+                passed = batch_candidates
+        else:
+            logger.info(
+                "Gap filter: no GapFilter injected; using all %d raw candidates",
+                len(batch_candidates),
+            )
+            passed = batch_candidates
+
+        # Convert batch candidates to entry manager candidates
+        entry_candidates: list[EntryCandidate] = []
+        for bc in passed:
+            try:
+                entry_candidates.append(_batch_to_entry_candidate(bc))
+            except Exception:
+                logger.warning("Failed to convert candidate %s; skipping", bc.symbol)
+
+        # Load into EntryManager
+        if self._entry_manager is not None and entry_candidates:
+            self._entry_manager.load_candidates(entry_candidates)
+            logger.info(
+                "Gap filter complete: %d candidates loaded into EntryManager",
+                len(entry_candidates),
+            )
+        elif not entry_candidates:
+            logger.info("Gap filter: no candidates survived; nothing to load")
+
+        # Update batch_results.json with gap filter status for dashboard
+        self._update_batch_results_gap_status(
+            passed_symbols={bc.symbol for bc in passed},
+            filtered_results=filtered_results,
+        )
+
+    def _update_batch_results_gap_status(
+        self,
+        passed_symbols: set[str],
+        filtered_results: list[FilteredCandidate] | None,
+    ) -> None:
+        """Update gap_filter_status in data/batch_results.json for the dashboard.
+
+        Each candidate entry gets one of:
+          - "passed"   -- kept by gap filter or no gap filter injected
+          - "filtered" -- removed by gap filter (gap too large)
+          - "pending"  -- unchanged (should not happen after this runs)
+
+        If ``filtered_results`` is available (gap filter ran), the
+        ``gap_pct`` field is also written for each candidate.
+        """
+        results_path = os.path.join("data", "batch_results.json")
+        if not os.path.exists(results_path):
             return
 
         try:
-            candidates = list(self._last_batch_result.candidates)
-            filtered = await self._gap_filter.filter(candidates)
-            # Rank if ranker available
-            if self._signal_ranker is not None:
-                filtered = self._signal_ranker.rank(filtered)
-            # Reload into EntryManager
-            if self._entry_manager is not None:
-                self._entry_manager.load_candidates(filtered)
-            logger.info(
-                "Gap filter complete: %d -> %d candidates",
-                len(candidates), len(filtered),
-            )
-        except Exception:
-            logger.exception("Gap filter failed")
+            with open(results_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Could not read batch_results.json for gap status update")
+            return
+
+        # Build a lookup from filtered_results for gap_pct info
+        gap_info: dict[str, FilteredCandidate] = {}
+        if filtered_results is not None:
+            for fr in filtered_results:
+                gap_info[fr.symbol] = fr
+
+        candidates_list = data.get("candidates", [])
+        for cand_dict in candidates_list:
+            sym = cand_dict.get("symbol", "")
+            if sym in passed_symbols:
+                cand_dict["gap_filter_status"] = "passed"
+            else:
+                cand_dict["gap_filter_status"] = "filtered"
+            # Add gap percentage if available
+            fr_info = gap_info.get(sym)
+            if fr_info is not None and fr_info.gap_pct is not None:
+                cand_dict["gap_pct"] = round(fr_info.gap_pct * 100, 2)
+                if fr_info.pre_market_price is not None:
+                    cand_dict["pre_market_price"] = round(fr_info.pre_market_price, 2)
+
+        try:
+            with open(results_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            logger.debug("Updated gap_filter_status in batch_results.json")
+        except OSError:
+            logger.warning("Could not write gap status to batch_results.json")
 
     async def _on_moo(self) -> None:
         """Execute Group A market-on-open orders at 9:30 AM ET."""
@@ -576,9 +889,11 @@ class AutoTrader:
                 regime=self._current_regime,
                 current_date_et=today_et,
             )
+            new_symbols = []
             for held in new_positions:
                 self._held_positions[held.symbol] = held
                 self._position_strategy_map[held.symbol] = held.strategy
+                new_symbols.append(held.symbol)
                 if self._position_monitor is not None:
                     self._position_monitor.add_position(held)
                 # Register with MFE/MAE tracker
@@ -591,8 +906,10 @@ class AutoTrader:
                     quantity=held.qty,
                 )
 
-            if new_positions:
-                logger.info("MOO entries: %d positions opened", len(new_positions))
+            # Subscribe to minute bars for newly opened positions
+            if new_symbols:
+                await self._broker.add_bar_subscription(new_symbols, self._on_bar)
+                logger.info("MOO entries: %d positions opened, subscribed: %s", len(new_positions), new_symbols)
                 await self._log_equity_snapshot()
         except Exception:
             logger.exception("MOO execution failed")
@@ -616,9 +933,11 @@ class AutoTrader:
                 current_date_et=today_et,
                 current_prices=current_prices,
             )
+            new_symbols = []
             for held in new_positions:
                 self._held_positions[held.symbol] = held
                 self._position_strategy_map[held.symbol] = held.strategy
+                new_symbols.append(held.symbol)
                 if self._position_monitor is not None:
                     self._position_monitor.add_position(held)
                 self._open_position_tracker.open_position(
@@ -630,8 +949,10 @@ class AutoTrader:
                     quantity=held.qty,
                 )
 
-            if new_positions:
-                logger.info("Confirmation entries: %d positions opened", len(new_positions))
+            # Subscribe to minute bars for newly opened positions
+            if new_symbols:
+                await self._broker.add_bar_subscription(new_symbols, self._on_bar)
+                logger.info("Confirmation entries: %d positions opened, subscribed: %s", len(new_positions), new_symbols)
                 await self._log_equity_snapshot()
         except Exception:
             logger.exception("Confirmation window execution failed")
@@ -646,6 +967,9 @@ class AutoTrader:
 
     async def _on_nightly_scan(self) -> None:
         """Run the nightly batch scan at 8:00 PM ET."""
+        # Refresh daily bars before running the scan for latest data
+        await self._refresh_daily_bars()
+
         if self._nightly_scanner is None:
             logger.debug("Nightly scan: no NightlyScanner injected; skipping")
             return
@@ -667,7 +991,8 @@ class AutoTrader:
     ) -> None:
         """Called by PositionMonitor after each exit is executed.
 
-        Updates risk manager, portfolio tracker, and trade logger.
+        Updates risk manager, portfolio tracker, trade logger, and
+        unsubscribes the symbol from minute bar streaming.
 
         Args:
             symbol: Closed ticker.
@@ -677,6 +1002,9 @@ class AutoTrader:
         """
         held = self._held_positions.pop(symbol, None)
         self._position_strategy_map.pop(symbol, None)
+
+        # Unsubscribe from minute bars for this symbol
+        await self._broker.remove_bar_subscription([symbol])
 
         # Update MFE/MAE tracker
         tracked = self._open_position_tracker.close_position(symbol)
@@ -733,100 +1061,46 @@ class AutoTrader:
         )
 
     # -----------------------------------------------------------------------
-    # Legacy bar handler (regime monitoring + v2 fallback)
+    # Minute bar handler (held positions only)
     # -----------------------------------------------------------------------
 
     async def _on_bar(self, bar: Bar) -> None:
-        """Handle incoming bars from the subscription stream.
+        """Handle incoming minute bars from held-position-only stream.
 
         Used for:
-        - SPY regime monitoring
-        - MFE/MAE tracking for non-v3 positions
-        - Legacy v2 strategy fallback when no batch components injected
-        - Equity snapshot logging
+        - MFE/MAE tracking for held positions
+        - Forwarding bars to PositionMonitor for exit evaluation
+        - Periodic equity snapshot logging
         """
         # MFE/MAE tracking for open positions
         self._open_position_tracker.update_prices(
             bar.symbol, bar.high, bar.low, bar.close,
         )
 
-        account = await self._broker.get_account()
-        positions = await self._broker.get_positions()
+        # Forward bar to PositionMonitor for exit evaluation
+        if self._position_monitor is not None:
+            await self._position_monitor.on_bar(bar)
 
-        # Rotation manager: force close, weekly loss
-        if self._rotation_manager:
-            open_syms = [p.symbol for p in positions]
-            force_close = self._rotation_manager.get_force_close_symbols(
-                bar.timestamp, open_syms,
-            )
-            for sym in force_close:
-                close_sig = Signal(
-                    strategy="rotation_manager",
-                    symbol=sym,
-                    direction="close",
-                    strength=1.0,
-                    metadata={"exit_reason": "force_close"},
-                )
-                await self._process_legacy_signal(close_sig, account, positions)
-                self._rotation_manager.on_position_closed(sym)
-                positions = await self._broker.get_positions()
-            self._rotation_manager.check_weekly_loss_limit(account.equity)
-
-        # Equity snapshot
+        # Periodic equity snapshot
         self._bar_count += 1
         if (
             self._trade_logger is not None
             and self._bar_count % self._settings.performance.equity_snapshot_interval == 0
         ):
-            snap = EquitySnapshot(
-                timestamp=bar.timestamp.isoformat(),
-                equity=account.equity,
-                cash=account.cash,
-                regime=self._current_regime.value,
-                position_count=len(positions),
-                open_positions=[p.symbol for p in positions],
-            )
-            self._trade_logger.log_equity(snap)
-
-        # Route bar for aggregation and processing
-        if bar.timeframe == Timeframe.MINUTE:
-            daily_bar = self._aggregator.add(bar)
-            if daily_bar is not None:
-                await self._on_daily_bar(daily_bar)
-        else:
-            await self._on_daily_bar(bar)
-
-    async def _on_daily_bar(self, bar: Bar) -> None:
-        """Process a confirmed daily bar for regime and legacy signal flow."""
-        history = self._bar_history[bar.symbol]
-        history.append(bar)
-
-        indicators = self._indicator_engine.compute(history)
-
-        # Regime update from proxy symbol
-        if bar.symbol == self._regime_proxy_symbol:
-            self._update_regime(indicators)
-
-        ctx = MarketContext(
-            symbol=bar.symbol,
-            bar=bar,
-            indicators=indicators,
-            history=history,
-        )
-
-        # V2 legacy fallback: run strategies directly when no batch components
-        if self._nightly_scanner is None:
-            signals = await self._strategy_engine.process(ctx)
-            if not signals:
-                return
-            if self._rotation_manager:
-                signals = self._rotation_manager.filter_signals(signals)
-                if not signals:
-                    return
-            account = await self._broker.get_account()
-            positions = await self._broker.get_positions()
-            for signal in signals:
-                await self._process_legacy_signal(signal, account, positions)
+            try:
+                account = await self._broker.get_account()
+                positions = await self._broker.get_positions()
+                snap = EquitySnapshot(
+                    timestamp=bar.timestamp.isoformat(),
+                    equity=account.equity,
+                    cash=account.cash,
+                    regime=self._current_regime.value,
+                    position_count=len(positions),
+                    open_positions=[p.symbol for p in positions],
+                )
+                self._trade_logger.log_equity(snap)
+            except Exception:
+                logger.exception("Equity snapshot failed during bar processing")
 
     async def _process_signal(
         self, signal: Signal, account: AccountInfo, positions: list[Position],
@@ -1127,6 +1401,43 @@ class AutoTrader:
         logger.info("Loaded daily bars for %d symbols (total bars: %d)",
                     len(loaded_count), sum(loaded_count.values()))
         self._initialize_regime_from_daily()
+
+    async def _refresh_daily_bars(self) -> None:
+        """Fetch latest daily bars for the full S&P 500 universe via REST API.
+
+        Called at 9:00 AM ET (pre-market) and before nightly scan (8:00 PM ET).
+        Updates _daily_bar_history and _bar_history with any new bars,
+        then refreshes regime classification.
+        """
+        if not hasattr(self._broker, "get_historical_bars"):
+            logger.info("Broker does not support historical bars; skipping daily refresh")
+            return
+
+        symbols = list(set(self._settings.symbols + [self._regime_proxy_symbol]))
+        logger.info("Refreshing daily bars for %d symbols via REST API...", len(symbols))
+
+        try:
+            hist = await self._broker.get_historical_bars(symbols, days=5)
+        except Exception:
+            logger.exception("Daily bar refresh failed")
+            return
+
+        new_bar_count = 0
+        for sym, bars in hist.items():
+            if not bars:
+                continue
+            existing_ts = {b.timestamp for b in self._daily_bar_history[sym]}
+            for bar in bars:
+                if bar.timestamp not in existing_ts:
+                    self._daily_bar_history[sym].append(bar)
+                    self._bar_history[sym].append(bar)
+                    new_bar_count += 1
+
+        if new_bar_count > 0:
+            self._initialize_regime_from_daily()
+            logger.info("Daily bar refresh complete: %d new bars added", new_bar_count)
+        else:
+            logger.info("Daily bar refresh: no new bars (already up to date)")
 
     def _initialize_regime_from_daily(self) -> None:
         """Walk SPY daily bars to classify regime using SPY-based 5-regime system."""
@@ -1483,6 +1794,27 @@ def main() -> None:
         logger.info("Strategy params loaded from %s", strategy_params_path)
 
     app = AutoTrader(settings, rotation_config=settings.rotation)
+
+    # Build NightlyScanner after AutoTrader (which loads .env via _create_broker)
+    from autotrader.batch.scanner import NightlyScanner as _NightlyScanner
+    from autotrader.data.batch_fetcher import BatchFetcher
+
+    api_key = os.environ.get("ALPACA_API_KEY", "")
+    secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
+    fetcher = BatchFetcher(api_key, secret_key)
+    scanner = _NightlyScanner(fetcher)
+
+    # Wire scanner adapter so it can access app's state
+    nightly_adapter = _NightlyScannerAdapter(
+        scanner=scanner,
+        get_symbols=lambda: app._settings.symbols,
+        get_regime=lambda: app._current_regime.value if app._current_regime else "UNCERTAIN",
+    )
+    app._nightly_scanner = nightly_adapter
+
+    # Wire GapFilter (uses same BatchFetcher for pre-market quotes)
+    gap_filter = GapFilter(fetcher, gap_threshold=0.03)
+    app._gap_filter = gap_filter
 
     async def run() -> None:
         await app.start()

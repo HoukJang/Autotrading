@@ -27,3 +27,9 @@ class BrokerAdapter(ABC):
 
     @abstractmethod
     async def subscribe_bars(self, symbols: list[str], callback: Callable) -> None: ...
+
+    @abstractmethod
+    async def add_bar_subscription(self, symbols: list[str], callback: Callable) -> None: ...
+
+    @abstractmethod
+    async def remove_bar_subscription(self, symbols: list[str]) -> None: ...

@@ -5,6 +5,7 @@ Tests cover:
 - Bar processing triggers exit evaluation
 - Exit decision triggers order submission
 - Sold-today tracking (record_close called on exit)
+- Public on_bar() interface for receiving bars from main loop
 """
 from __future__ import annotations
 
@@ -72,10 +73,6 @@ def _make_monitor(
     order_result: OrderResult | None = None,
 ) -> PositionMonitor:
     """Create a PositionMonitor with all dependencies mocked."""
-    adapter = MagicMock()
-    adapter.subscribe_bars = AsyncMock()
-    adapter.run_stream = MagicMock()
-
     order_result = order_result or OrderResult(
         order_id="exit-001",
         symbol="AAPL",
@@ -96,7 +93,6 @@ def _make_monitor(
     indicator_engine.compute = MagicMock(return_value={"ATR_14": 2.0, "RSI_14": 50.0})
 
     monitor = PositionMonitor(
-        adapter=adapter,
         order_manager=order_manager,
         exit_rule_engine=exit_rule_engine,
         indicator_engine=indicator_engine,
@@ -157,20 +153,13 @@ class TestPositionTracking:
         monitor.add_position(pos)
         assert "AAPL" in monitor._bar_history
 
-    def test_add_position_creates_aggregator(self):
-        """add_position() should initialize DailyBarAggregator for the symbol."""
-        monitor = _make_monitor()
-        pos = _make_held_position("AAPL")
-        monitor.add_position(pos)
-        assert "AAPL" in monitor._aggregators
-
 
 # ---------------------------------------------------------------------------
 # Test class: bar processing
 # ---------------------------------------------------------------------------
 
 class TestBarProcessing:
-    """Tests for _on_bar() and _on_daily_bar() bar handling."""
+    """Tests for on_bar() and _on_daily_bar() bar handling."""
 
     @pytest.mark.asyncio
     async def test_daily_bar_triggers_exit_evaluation(self):
@@ -180,9 +169,6 @@ class TestBarProcessing:
         monitor.add_position(pos)
 
         bar = _make_bar("AAPL", timeframe=Timeframe.DAILY)
-        # _on_daily_bar calls datetime.now() internally to get current_date_et;
-        # the exit_rule_engine is already mocked to return "hold" regardless of date,
-        # so no datetime patching is needed here - we only verify evaluate() is called.
         await monitor._on_daily_bar(bar, pos)
 
         monitor._exit_rules.evaluate.assert_called_once()
@@ -288,11 +274,7 @@ class TestBarProcessing:
         # Minute bar with new high/low
         minute_bar = _make_bar("AAPL", high=105.0, low=97.0, timeframe=Timeframe.MINUTE)
 
-        # Mock aggregator to not produce a daily bar
-        monitor._aggregators["AAPL"] = MagicMock()
-        monitor._aggregators["AAPL"].add = MagicMock(return_value=None)
-
-        await monitor._on_bar(minute_bar)
+        await monitor.on_bar(minute_bar)
 
         assert pos.highest_price >= 105.0
         assert pos.lowest_price <= 97.0
@@ -304,7 +286,37 @@ class TestBarProcessing:
         bar = _make_bar("UNKNOWN_SYM")
 
         # Should not raise any exception
-        await monitor._on_bar(bar)
+        await monitor.on_bar(bar)
+
+    @pytest.mark.asyncio
+    async def test_on_bar_public_interface(self):
+        """on_bar() public method should forward to _on_bar()."""
+        monitor = _make_monitor()
+        pos = _make_held_position("AAPL")
+        monitor.add_position(pos)
+
+        bar = _make_bar("AAPL", high=110.0, low=90.0, timeframe=Timeframe.MINUTE)
+        await monitor.on_bar(bar)
+
+        # Should have updated price extremes
+        assert pos.highest_price >= 110.0
+        assert pos.lowest_price <= 90.0
+
+    @pytest.mark.asyncio
+    async def test_minute_bar_does_not_trigger_exit(self):
+        """Minute bars should only update MFE/MAE, not trigger exit evaluation."""
+        exit_decision = ExitDecision(action="exit", reason="stop_loss")
+        monitor = _make_monitor(exit_decision=exit_decision)
+        pos = _make_held_position("AAPL", bars_held=2)
+        monitor.add_position(pos)
+
+        minute_bar = _make_bar("AAPL", timeframe=Timeframe.MINUTE)
+        await monitor.on_bar(minute_bar)
+
+        # Exit rules should NOT be evaluated for minute bars
+        monitor._exit_rules.evaluate.assert_not_called()
+        # Position should still be monitored
+        assert "AAPL" in monitor.monitored_symbols
 
 
 # ---------------------------------------------------------------------------
