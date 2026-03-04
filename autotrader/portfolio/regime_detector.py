@@ -9,51 +9,9 @@ risk percentages and entry blocking flags.
 """
 from __future__ import annotations
 
-from enum import Enum
-
-
-class MarketRegime(Enum):
-    """Market regime classification."""
-
-    TREND_UP = "TREND_UP"
-    TREND_DOWN = "TREND_DOWN"
-    RANGING = "RANGING"
-    HIGH_VOLATILITY = "HIGH_VOLATILITY"
-    UNCERTAIN = "UNCERTAIN"
-
-
-_ALLOCATION_TABLE: dict[MarketRegime, dict] = {
-    MarketRegime.TREND_UP: {
-        "breakout_momentum": 0.040,
-        "rsi_mean_reversion": 0.012,
-        "breakout_blocked": False,
-        "mr_short_blocked": True,
-    },
-    MarketRegime.TREND_DOWN: {
-        "breakout_momentum": 0.005,
-        "rsi_mean_reversion": 0.025,
-        "breakout_blocked": True,
-        "mr_short_blocked": False,
-    },
-    MarketRegime.RANGING: {
-        "breakout_momentum": 0.005,
-        "rsi_mean_reversion": 0.040,
-        "breakout_blocked": False,
-        "mr_short_blocked": False,
-    },
-    MarketRegime.HIGH_VOLATILITY: {
-        "breakout_momentum": 0.005,
-        "rsi_mean_reversion": 0.020,
-        "breakout_blocked": False,
-        "mr_short_blocked": True,
-    },
-    MarketRegime.UNCERTAIN: {
-        "breakout_momentum": 0.008,
-        "rsi_mean_reversion": 0.025,
-        "breakout_blocked": False,
-        "mr_short_blocked": False,
-    },
-}
+# MarketRegime enum and allocation table are defined in the unified
+# trading.regime module (SSOT).  Re-exported here for backward compat.
+from autotrader.trading.regime import MarketRegime, ALLOCATION_TABLE as _ALLOCATION_TABLE
 
 
 class RegimeDetector:

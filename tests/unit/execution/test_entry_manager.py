@@ -82,12 +82,12 @@ def _make_account(equity: float = 10_000.0, cash: float = 10_000.0) -> AccountIn
     )
 
 
-def _make_position(symbol: str = "AAPL", side: str = "long") -> Position:
+def _make_position(symbol: str = "AAPL", side: str = "long", market_value: float = 400.0) -> Position:
     return Position(
         symbol=symbol,
         quantity=10.0,
         avg_entry_price=100.0,
-        market_value=1000.0,
+        market_value=market_value,
         unrealized_pnl=0.0,
         side=side,
     )

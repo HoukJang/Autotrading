@@ -6,51 +6,14 @@ Regime transitions require 2 consecutive days of the same classification.
 """
 from __future__ import annotations
 
-from enum import Enum
-
-
-class Regime(Enum):
-    TREND_UP = "TREND_UP"
-    TREND_DOWN = "TREND_DOWN"
-    RANGING = "RANGING"
-    HIGH_VOLATILITY = "HIGH_VOLATILITY"
-    UNCERTAIN = "UNCERTAIN"
-
-
-# Allocation table: regime -> {strategy: risk, blocks}
-# BM + MR 2-strategy portfolio (Iter 29: trend_pullback removed, reverted to Iter 27)
-_ALLOCATION_TABLE: dict[Regime, dict] = {
-    Regime.TREND_UP: {
-        "breakout_momentum": 0.040,     # BM dominant (unchanged)
-        "rsi_mean_reversion": 0.012,    # MR allocation (Iter 26: reverted to Iter 23)
-        "breakout_blocked": False,
-        "mr_short_blocked": True,       # no shorting in uptrend
-    },
-    Regime.TREND_DOWN: {
-        "breakout_momentum": 0.005,     # BM minimal (unchanged)
-        "rsi_mean_reversion": 0.025,    # MR strong (unchanged)
-        "breakout_blocked": True,       # no BM in downtrend
-        "mr_short_blocked": False,
-    },
-    Regime.RANGING: {
-        "breakout_momentum": 0.005,     # BM minimized (was 0.008)
-        "rsi_mean_reversion": 0.040,    # MR dominant (was 0.035)
-        "breakout_blocked": False,
-        "mr_short_blocked": False,
-    },
-    Regime.HIGH_VOLATILITY: {
-        "breakout_momentum": 0.005,     # BM minimized (was 0.008)
-        "rsi_mean_reversion": 0.020,    # MR increased (was 0.015)
-        "breakout_blocked": False,
-        "mr_short_blocked": True,       # no shorting in high vol
-    },
-    Regime.UNCERTAIN: {
-        "breakout_momentum": 0.008,     # BM reduced (was 0.012)
-        "rsi_mean_reversion": 0.025,    # MR increased (was 0.020)
-        "breakout_blocked": False,
-        "mr_short_blocked": False,
-    },
-}
+# Regime enum and allocation table are defined in the unified
+# trading.regime module (SSOT).  ``Regime`` is an alias for
+# ``MarketRegime`` to maintain backward compatibility with existing
+# backtest code and tests that use the shorter name.
+from autotrader.trading.regime import (
+    MarketRegime as Regime,
+    ALLOCATION_TABLE as _ALLOCATION_TABLE,
+)
 
 
 class RegimeClassifier:

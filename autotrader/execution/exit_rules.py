@@ -1,73 +1,52 @@
 """ExitRuleEngine: per-bar exit evaluation for held positions.
 
-Exit hierarchy (evaluated in order, first match wins):
+Thin wrapper around the unified ``UnifiedExitEngine`` from
+``autotrader.trading.exit_engine``.  All exit logic lives in the
+unified engine; this module translates between the live-system's
+``HeldPosition`` / ``ExitDecision`` types and the unified engine's
+``ExitContext`` / ``ExitDecision`` types.
+
+Exit hierarchy (evaluated by UnifiedExitEngine, first match wins):
   1. Day 1 emergency stops only (no SL/TP checks on entry day)
   2. Day 2+ SL/TP from actual fill price using strategy ATR multipliers
   3. Trailing stops (ema_cross_trend uses this)
   4. Time-based exit when max_hold_days reached
   5. (Re-entry blocking is a side effect, not an exit check)
 
-The engine is stateless per call; all position state is passed in via
-HeldPosition objects managed by PositionMonitor.
+Public interface is fully preserved for callers (PositionMonitor,
+EntryManager, tests).
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Literal
 
-from zoneinfo import ZoneInfo
-
-_ET = ZoneInfo("America/New_York")
+from autotrader.core.types import Bar
+from autotrader.trading.exit_engine import UnifiedExitEngine
+from autotrader.trading.types import ExitContext, PriceMode
+from autotrader.trading.types import ExitDecision as _UnifiedExitDecision
 
 logger = logging.getLogger("autotrader.execution.exit_rules")
 
-# Emergency exit thresholds (Day 1 only, overrides everything)
-_EMERGENCY_LOSS_CONFIRM_PCT: float = 0.07   # -7%: need 2 consecutive bars
-_EMERGENCY_LOSS_IMMEDIATE_PCT: float = 0.10  # -10%: immediate single-bar exit
-_EMERGENCY_BARS_NEEDED: int = 2             # bars at -7% before triggering
-
-# 2-stage SL upgrade: protects profits progressively
-_STAGE1_BE_ACTIVATION_ATR: float = 1.5   # Stage 1: move SL to entry (breakeven)
-_STAGE2_PROFIT_ACTIVATION_ATR: float = 1.2  # Stage 2: lock in 0.4 ATR profit
-_STAGE2_PROFIT_LOCK_ATR: float = 0.4      # Stage 2: SL moved to entry + this (Iter 26: reverted to Iter 23)
-
-# Strategy-specific max hold days
-_MAX_HOLD_DAYS: dict[str, int] = {
-    "rsi_mean_reversion": 5,
-    "consecutive_down": 5,
-    "ema_cross_trend": 10,
-    "adaptive_mean_reversion": 7,
-}
-
-# Strategy-specific SL ATR multipliers (by direction)
-_SL_ATR_MULT: dict[str, dict[str, float]] = {
-    "rsi_mean_reversion": {"long": 1.5, "short": 0.75},
-    "consecutive_down": {"long": 2.0},
-    "ema_cross_trend": {"long": 3.0, "short": 3.0},
-    "breakout_momentum": {"long": 2.5},
-    "adaptive_mean_reversion": {"long": 2.5, "short": 2.0},
-}
-
-# Strategy-specific TP ATR multipliers (None = use indicator-based TP)
-_TP_ATR_MULT: dict[str, float | None] = {
-    "rsi_mean_reversion": None,
-    "consecutive_down": None,
-    "ema_cross_trend": 5.0,
-    "breakout_momentum": 4.0,      # was 5.0
-    "adaptive_mean_reversion": None,  # direction-specific ATR TP in _evaluate_tp
-}
-
-# Strategies that use trailing stops
-_TRAILING_STRATEGIES: frozenset[str] = frozenset({"ema_cross_trend", "breakout_momentum"})
-_TRAILING_ATR_MULT: float = 2.0
-
-# Per-strategy trailing stop activation thresholds (ATR multiples of favourable move)
-_TRAILING_ACTIVATION_ATR: dict[str, float] = {
-    "ema_cross_trend": 1.5,
-    "breakout_momentum": 1.5,      # reverted from 1.0 (Iter 25: revert to Iter 23)
-}
+# All exit-rule constants are defined in the trading.constants SSOT module.
+# Re-exported here under their original underscore-prefixed names for
+# backward compatibility (tests, batch_simulator, scripts import from here).
+from autotrader.trading.constants import (
+    EMERGENCY_LOSS_CONFIRM_PCT as _EMERGENCY_LOSS_CONFIRM_PCT,
+    EMERGENCY_LOSS_IMMEDIATE_PCT as _EMERGENCY_LOSS_IMMEDIATE_PCT,
+    EMERGENCY_BARS_NEEDED as _EMERGENCY_BARS_NEEDED,
+    STAGE1_BE_ACTIVATION_ATR as _STAGE1_BE_ACTIVATION_ATR,
+    STAGE2_PROFIT_ACTIVATION_ATR as _STAGE2_PROFIT_ACTIVATION_ATR,
+    STAGE2_PROFIT_LOCK_ATR as _STAGE2_PROFIT_LOCK_ATR,
+    MAX_HOLD_DAYS as _MAX_HOLD_DAYS,
+    SL_ATR_MULT as _SL_ATR_MULT,
+    TP_ATR_MULT as _TP_ATR_MULT,
+    TRAILING_STRATEGIES as _TRAILING_STRATEGIES,
+    TRAILING_ATR_MULT as _TRAILING_ATR_MULT,
+    TRAILING_ACTIVATION_ATR as _TRAILING_ACTIVATION_ATR,
+)
 
 
 @dataclass
@@ -141,9 +120,81 @@ class ExitDecision:
 
 _HOLD = ExitDecision(action="hold")
 
+# Reason mapping: unified engine reason -> live engine reason.
+# Reasons not in this map are passed through unchanged.
+_REASON_MAP: dict[str, str] = {
+    "sl_hit": "stop_loss",
+    "tp_hit": "take_profit",
+    # These pass through unchanged:
+    # "trailing_stop", "time_exit", "emergency_immediate",
+    # "emergency_confirmed", "tp_rsi_*", "tp_bb", "tp_ema5"
+}
+
+
+def _to_exit_context(position: HeldPosition) -> ExitContext:
+    """Convert a HeldPosition to an ExitContext for the unified engine."""
+    return ExitContext(
+        symbol=position.symbol,
+        strategy=position.strategy,
+        direction=position.direction,
+        entry_price=position.entry_price,
+        entry_date=position.entry_date_et,
+        qty=int(position.qty),
+        entry_atr=position.entry_atr,
+        bars_held=position.bars_held,
+        trailing_high=position.highest_price,
+        trailing_low=position.lowest_price,
+        mfe_price=position.highest_price,
+        mae_price=position.lowest_price,
+        consecutive_loss_bars=position.consecutive_loss_bars,
+    )
+
+
+def _apply_context_to_position(
+    position: HeldPosition, ctx: ExitContext,
+) -> None:
+    """Apply updated state from ExitContext back to the HeldPosition."""
+    position.highest_price = ctx.trailing_high
+    position.lowest_price = ctx.trailing_low
+    position.consecutive_loss_bars = ctx.consecutive_loss_bars
+
+
+def _translate_decision(
+    unified: _UnifiedExitDecision,
+    position: HeldPosition,
+) -> ExitDecision:
+    """Translate a unified ExitDecision to the live ExitDecision type.
+
+    Also applies updated state from the unified context back to the
+    HeldPosition (MFE/MAE, consecutive_loss_bars, etc.).
+    """
+    # Always apply context updates back to position
+    _apply_context_to_position(position, unified.updated_context)
+
+    if not unified.should_exit:
+        return _HOLD
+
+    # Map unified reason to live reason
+    reason = unified.reason
+    mapped_reason = _REASON_MAP.get(reason, reason)
+
+    is_emergency = reason in ("emergency_immediate", "emergency_confirmed")
+
+    return ExitDecision(
+        action="exit",
+        reason=mapped_reason,
+        target_price=unified.exit_price,
+        is_emergency=is_emergency,
+    )
+
 
 class ExitRuleEngine:
     """Evaluates exit conditions for held positions on each new bar.
+
+    Delegates all exit logic to ``UnifiedExitEngine`` from the trading
+    core, translating between live-system types (``HeldPosition``,
+    ``ExitDecision``) and unified types (``ExitContext``,
+    ``ExitDecision``).
 
     Usage pattern:
     1. Instantiate once and share across all monitored positions.
@@ -160,10 +211,7 @@ class ExitRuleEngine:
     """
 
     def __init__(self) -> None:
-        # Set of symbols that may not be re-entered today.
-        self._closed_today: set[str] = set()
-        # Last date the block set was cleared (ET).
-        self._last_clear_date: date | None = None
+        self._unified = UnifiedExitEngine()
 
     # ------------------------------------------------------------------
     # Public API
@@ -193,32 +241,31 @@ class ExitRuleEngine:
         Returns:
             ExitDecision with action, reason, and optional target_price.
         """
-        position.update_price_extremes(bar_high, bar_low)
+        # Build a synthetic Bar for the unified engine
+        bar = Bar(
+            symbol=position.symbol,
+            open=bar_close,  # open not used in BAR_CLOSE mode
+            high=bar_high,
+            low=bar_low,
+            close=bar_close,
+            volume=0,
+            timestamp=datetime.now(timezone.utc),
+        )
 
-        is_entry_day = (position.entry_date_et == current_date_et)
+        # Convert HeldPosition to ExitContext
+        ctx = _to_exit_context(position)
 
-        if is_entry_day:
-            return self._evaluate_emergency(position, bar_close)
+        # Delegate to unified engine
+        unified_decision = self._unified.evaluate(
+            ctx=ctx,
+            bar=bar,
+            indicators=indicators,
+            current_date=current_date_et,
+            price_mode=PriceMode.BAR_CLOSE,
+        )
 
-        # Day 2+ evaluation
-        atr = self._get_atr(indicators, position.entry_atr)
-        decision = self._evaluate_sl(position, bar_close, atr)
-        if decision.action == "exit":
-            return decision
-
-        decision = self._evaluate_tp(position, bar_close, indicators, atr)
-        if decision.action == "exit":
-            return decision
-
-        decision = self._evaluate_trailing(position, bar_close, atr)
-        if decision.action == "exit":
-            return decision
-
-        decision = self._evaluate_time(position)
-        if decision.action == "exit":
-            return decision
-
-        return _HOLD
+        # Translate back to live types and apply state to position
+        return _translate_decision(unified_decision, position)
 
     def record_close(self, symbol: str) -> None:
         """Block the symbol from re-entry for the rest of the current day.
@@ -229,7 +276,7 @@ class ExitRuleEngine:
         Args:
             symbol: The ticker that was just closed.
         """
-        self._closed_today.add(symbol)
+        self._unified.record_close(symbol)
         logger.debug("Re-entry blocked for %s (today)", symbol)
 
     def is_reentry_blocked(self, symbol: str) -> bool:
@@ -238,7 +285,7 @@ class ExitRuleEngine:
         Args:
             symbol: Ticker to check.
         """
-        return symbol in self._closed_today
+        return self._unified.is_reentry_blocked(symbol)
 
     def on_new_trading_day(self, today_et: date) -> None:
         """Clear the re-entry block set at the start of a new trading day.
@@ -250,284 +297,16 @@ class ExitRuleEngine:
             today_et: Today's date in US/Eastern.  Used to guard against
                 duplicate calls within the same session.
         """
-        if self._last_clear_date != today_et:
-            cleared_count = len(self._closed_today)
-            self._closed_today.clear()
-            self._last_clear_date = today_et
-            if cleared_count:
-                logger.info(
-                    "Re-entry block cleared for new trading day %s (%d symbols released)",
-                    today_et, cleared_count,
-                )
-
-    # ------------------------------------------------------------------
-    # Private evaluation helpers
-    # ------------------------------------------------------------------
-
-    def _evaluate_emergency(
-        self, position: HeldPosition, bar_close: float,
-    ) -> ExitDecision:
-        """Day-1 emergency stop checks only.
-
-        Triggers on:
-        - Immediate: -10% loss from entry in a single bar.
-        - Confirmed: -7% loss over _EMERGENCY_BARS_NEEDED consecutive bars.
-        """
-        loss_pct = self._loss_pct(position, bar_close)
-
-        if loss_pct >= _EMERGENCY_LOSS_IMMEDIATE_PCT:
-            logger.warning(
-                "Emergency exit (immediate -%.1f%%) for %s %s @ %.2f (entry=%.2f)",
-                loss_pct * 100, position.direction, position.symbol,
-                bar_close, position.entry_price,
-            )
-            return ExitDecision(
-                action="exit",
-                reason="emergency_immediate",
-                target_price=bar_close,
-                is_emergency=True,
-            )
-
-        if loss_pct >= _EMERGENCY_LOSS_CONFIRM_PCT:
-            position.consecutive_loss_bars += 1
-            if position.consecutive_loss_bars >= _EMERGENCY_BARS_NEEDED:
-                logger.warning(
-                    "Emergency exit (confirmed -7%% x%d) for %s %s @ %.2f",
-                    position.consecutive_loss_bars, position.direction,
-                    position.symbol, bar_close,
-                )
-                return ExitDecision(
-                    action="exit",
-                    reason="emergency_confirmed",
-                    target_price=bar_close,
-                    is_emergency=True,
-                )
-        else:
-            # Reset counter if loss recovered below threshold
-            position.consecutive_loss_bars = 0
-
-        return _HOLD
-
-    def _evaluate_sl(
-        self, position: HeldPosition, bar_close: float, atr: float,
-    ) -> ExitDecision:
-        """Standard stop-loss check with 2-stage SL upgrade.
-
-        Stage 1 (Breakeven): Once price has moved _STAGE1_BE_ACTIVATION_ATR
-        in our favour, the stop loss is moved to the entry price so the
-        trade can no longer result in a loss.
-
-        Stage 2 (Profit Protection): Once price has moved
-        _STAGE2_PROFIT_ACTIVATION_ATR in our favour, the stop loss is
-        moved to entry + _STAGE2_PROFIT_LOCK_ATR * ATR, locking in a
-        portion of the unrealised profit.
-
-        Stage 2 is checked first since it is the more favourable upgrade.
-        """
-        mult = _SL_ATR_MULT.get(position.strategy, {}).get(position.direction, 2.0)
-        sl_distance = mult * atr
-        if position.direction == "long":
-            sl_price = position.entry_price - sl_distance
-            # 2-stage SL upgrade
-            if position.highest_price >= position.entry_price + _STAGE2_PROFIT_ACTIVATION_ATR * atr:
-                # Stage 2: lock in profit
-                sl_price = max(sl_price, position.entry_price + _STAGE2_PROFIT_LOCK_ATR * atr)
-            elif position.highest_price >= position.entry_price + _STAGE1_BE_ACTIVATION_ATR * atr:
-                # Stage 1: breakeven
-                sl_price = max(sl_price, position.entry_price)
-            if bar_close <= sl_price:
-                logger.info(
-                    "SL triggered for LONG %s: close=%.2f <= sl=%.2f",
-                    position.symbol, bar_close, sl_price,
-                )
-                return ExitDecision(
-                    action="exit", reason="stop_loss", target_price=sl_price,
-                )
-        else:  # short
-            sl_price = position.entry_price + sl_distance
-            # 2-stage SL upgrade
-            if position.lowest_price <= position.entry_price - _STAGE2_PROFIT_ACTIVATION_ATR * atr:
-                # Stage 2: lock in profit
-                sl_price = min(sl_price, position.entry_price - _STAGE2_PROFIT_LOCK_ATR * atr)
-            elif position.lowest_price <= position.entry_price - _STAGE1_BE_ACTIVATION_ATR * atr:
-                # Stage 1: breakeven
-                sl_price = min(sl_price, position.entry_price)
-            if bar_close >= sl_price:
-                logger.info(
-                    "SL triggered for SHORT %s: close=%.2f >= sl=%.2f",
-                    position.symbol, bar_close, sl_price,
-                )
-                return ExitDecision(
-                    action="exit", reason="stop_loss", target_price=sl_price,
-                )
-        return _HOLD
-
-    def _evaluate_tp(
-        self,
-        position: HeldPosition,
-        bar_close: float,
-        indicators: dict,
-        atr: float,
-    ) -> ExitDecision:
-        """Take-profit check using strategy-specific targets.
-
-        Strategies with tp_atr_mult use a fixed ATR target from entry.
-        Strategies without it (None) use indicator-based signals (RSI/BB).
-        """
-        tp_atr_mult = _TP_ATR_MULT.get(position.strategy)
-        strategy = position.strategy
-
-        if tp_atr_mult is not None:
-            # Fixed ATR take-profit (ema_pullback)
-            if position.direction == "long":
-                tp_price = position.entry_price + tp_atr_mult * atr
-                if bar_close >= tp_price:
-                    logger.info(
-                        "TP hit (ATR x%.1f) for LONG %s: close=%.2f >= tp=%.2f",
-                        tp_atr_mult, position.symbol, bar_close, tp_price,
-                    )
-                    return ExitDecision(
-                        action="exit", reason="take_profit", target_price=tp_price,
-                    )
-            else:
-                tp_price = position.entry_price - tp_atr_mult * atr
-                if bar_close <= tp_price:
-                    return ExitDecision(
-                        action="exit", reason="take_profit", target_price=tp_price,
-                    )
-            return _HOLD
-
-        # Indicator-based TP
-        rsi = indicators.get("RSI_14")
-        bb = indicators.get("BBANDS_20")
-        pct_b = bb.get("pct_b", 0.5) if isinstance(bb, dict) else None
-
-        if strategy == "rsi_mean_reversion":
-            if position.direction == "long":
-                if (rsi is not None and rsi > 50.0) or (pct_b is not None and pct_b > 0.50):
-                    reason = f"tp_rsi_{rsi:.1f}" if rsi is not None else "tp_bb"
-                    return ExitDecision(
-                        action="exit", reason=reason, target_price=bar_close,
-                    )
-            else:  # short
-                if (rsi is not None and rsi < 50.0) or (pct_b is not None and pct_b < 0.50):
-                    reason = f"tp_rsi_{rsi:.1f}" if rsi is not None else "tp_bb"
-                    return ExitDecision(
-                        action="exit", reason=reason, target_price=bar_close,
-                    )
-
-        elif strategy == "consecutive_down":
-            # Long-only: exit when close > EMA(5) (bounce target)
-            ema_5 = indicators.get("EMA_5")
-            if ema_5 is not None and bar_close > ema_5:
-                return ExitDecision(
-                    action="exit", reason="tp_ema5", target_price=bar_close,
-                )
-
-        elif strategy == "adaptive_mean_reversion":
-            # Direction-specific ATR-based take profit
-            atr_tp_long = 2.5
-            atr_tp_short = 2.0
-            if position.direction == "long":
-                tp_price = position.entry_price + atr_tp_long * atr
-                if bar_close >= tp_price:
-                    return ExitDecision(
-                        action="exit", reason="take_profit", target_price=tp_price,
-                    )
-            else:
-                tp_price = position.entry_price - atr_tp_short * atr
-                if bar_close <= tp_price:
-                    return ExitDecision(
-                        action="exit", reason="take_profit", target_price=tp_price,
-                    )
-
-        # Auxiliary ATR TP for rsi_mean_reversion: cap gains at 2.0 ATR
-        # even if indicator-based TP hasn't triggered yet
-        if strategy == "rsi_mean_reversion":
-            atr_tp_mult = 2.0
-            if position.direction == "long":
-                atr_tp_price = position.entry_price + atr_tp_mult * atr
-                if bar_close >= atr_tp_price:
-                    return ExitDecision(
-                        action="exit", reason="take_profit", target_price=atr_tp_price,
-                    )
-            else:
-                atr_tp_price = position.entry_price - atr_tp_mult * atr
-                if bar_close <= atr_tp_price:
-                    return ExitDecision(
-                        action="exit", reason="take_profit", target_price=atr_tp_price,
-                    )
-
-        return _HOLD
-
-    def _evaluate_trailing(
-        self, position: HeldPosition, bar_close: float, atr: float,
-    ) -> ExitDecision:
-        """Trailing stop for strategies that use them (ema_cross_trend).
-
-        Activation conditions:
-        - Price must have moved at least activation ATR in our favour to start trailing.
-        - Trail stop is floored at entry price (trailing can never cause a loss).
-        """
-        if position.strategy not in _TRAILING_STRATEGIES:
-            return _HOLD
-
-        # Per-strategy activation threshold (default 1.5 ATR)
-        activation_atr = _TRAILING_ACTIVATION_ATR.get(position.strategy, 1.5)
-
-        if position.direction == "long":
-            if position.highest_price < position.entry_price + activation_atr * atr:
-                return _HOLD
-            trail_stop = max(
-                position.entry_price,
-                position.highest_price - _TRAILING_ATR_MULT * atr,
-            )
-            if bar_close <= trail_stop:
-                logger.info(
-                    "Trailing stop for LONG %s: close=%.2f <= trail=%.2f (high=%.2f)",
-                    position.symbol, bar_close, trail_stop, position.highest_price,
-                )
-                return ExitDecision(
-                    action="exit", reason="trailing_stop", target_price=trail_stop,
-                )
-        else:  # short
-            if position.lowest_price > position.entry_price - activation_atr * atr:
-                return _HOLD
-            trail_stop = min(
-                position.entry_price,
-                position.lowest_price + _TRAILING_ATR_MULT * atr,
-            )
-            if bar_close >= trail_stop:
-                logger.info(
-                    "Trailing stop for SHORT %s: close=%.2f >= trail=%.2f (low=%.2f)",
-                    position.symbol, bar_close, trail_stop, position.lowest_price,
-                )
-                return ExitDecision(
-                    action="exit", reason="trailing_stop", target_price=trail_stop,
-                )
-        return _HOLD
-
-    def _evaluate_time(self, position: HeldPosition) -> ExitDecision:
-        """Time-based exit when maximum hold period is reached.
-
-        Strategies not listed in _MAX_HOLD_DAYS have no time limit and
-        rely solely on SL/TP/trailing exits.
-        """
-        max_days = _MAX_HOLD_DAYS.get(position.strategy)
-        if max_days is None:
-            return _HOLD
-        if position.bars_held >= max_days:
+        old_count = len(self._unified._closed_today)
+        self._unified.on_new_trading_day(today_et)
+        if old_count and self._unified._last_clear_date == today_et:
             logger.info(
-                "Time exit for %s %s after %d bars (max=%d)",
-                position.strategy, position.symbol, position.bars_held, max_days,
+                "Re-entry block cleared for new trading day %s (%d symbols released)",
+                today_et, old_count,
             )
-            return ExitDecision(
-                action="exit", reason="time_exit", target_price=0.0,
-            )
-        return _HOLD
 
     # ------------------------------------------------------------------
-    # Utility
+    # Utility (kept for backward compatibility -- tests use these)
     # ------------------------------------------------------------------
 
     @staticmethod

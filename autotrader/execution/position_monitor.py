@@ -26,9 +26,11 @@ from autotrader.indicators.engine import IndicatorEngine
 
 _ET = ZoneInfo("America/New_York")
 
+from autotrader.trading.constants import MAX_LONG_POSITIONS
+
 logger = logging.getLogger("autotrader.execution.position_monitor")
 
-MAX_POSITIONS: int = 8
+MAX_POSITIONS: int = MAX_LONG_POSITIONS
 
 
 # Callback type: called when a position is closed by exit rules.

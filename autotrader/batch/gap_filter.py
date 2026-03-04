@@ -24,10 +24,12 @@ from autotrader.batch.types import Candidate, FilteredCandidate
 if TYPE_CHECKING:
     from autotrader.data.batch_fetcher import BatchFetcher
 
+from autotrader.trading.constants import DEFAULT_GAP_THRESHOLD
+
 logger = logging.getLogger(__name__)
 
-# Default gap threshold (absolute value)
-_DEFAULT_GAP_THRESHOLD = 0.03
+# Re-export with original name for backward compatibility
+_DEFAULT_GAP_THRESHOLD = DEFAULT_GAP_THRESHOLD
 
 
 class GapFilter:

@@ -36,13 +36,15 @@ from autotrader.indicators.base import IndicatorSpec
 from autotrader.strategy.breakout_momentum import BreakoutMomentum
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
 
+from autotrader.trading.constants import MIN_BARS_WARMUP
+
 logger = logging.getLogger(__name__)
 
 # Path to persist batch results for the dashboard
 _BATCH_RESULTS_PATH = os.path.join("data", "batch_results.json")
 
 # Minimum number of bars a symbol must have to be scanned
-_MIN_BARS_REQUIRED = 60
+_MIN_BARS_REQUIRED = MIN_BARS_WARMUP
 
 # Number of candidates to select
 _TOP_N = 12

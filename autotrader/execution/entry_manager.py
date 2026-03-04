@@ -9,14 +9,11 @@ Entry architecture:
       Long confirm: current price >= prev_close * (1 - GAP_TOLERANCE)
       Unconfirmed candidates are DISCARDED at 10:00 AM.
 
-Daily constraints enforced here:
-  - Max 3 new entries per day.
-  - Max 8 concurrent long positions.
-  - Max 3 concurrent short positions.
-  - Max 9 total positions.
-  - Per-strategy caps: BM=2, MR=4.
-  - Re-entry block checked via ExitRuleEngine.is_reentry_blocked().
-  - Regime-based entry blocking (breakout blocked, MR short blocked).
+Daily constraints enforced via ``EntryConstraintChecker`` from the
+unified trading core for common checks (re-entry, daily limit, total
+cap, direction caps, duplicate, strategy cap).  Live-specific checks
+(GDR entry limit, regime blocking, risk manager, allocation engine)
+are applied before/after the unified checker.
 """
 from __future__ import annotations
 
@@ -35,30 +32,25 @@ from autotrader.portfolio.allocation_engine import AllocationEngine
 from autotrader.portfolio.regime_detector import MarketRegime
 from autotrader.risk.gdr_manager import GDRManager
 from autotrader.risk.manager import RiskManager
+from autotrader.trading.entry_checker import EntryConstraintChecker
+from autotrader.trading.types import PositionInfo
 
 _ET = ZoneInfo("America/New_York")
 
 logger = logging.getLogger("autotrader.execution.entry_manager")
 
-# Entry group membership
-_GROUP_A_STRATEGIES: frozenset[str] = frozenset({"breakout_momentum", "rsi_mean_reversion"})
-_GROUP_B_STRATEGIES: frozenset[str] = frozenset()
-
-# Confirmation window gap tolerance (3 bps)
-_GAP_TOLERANCE: float = 0.003
-
-# Daily limits
-_MAX_DAILY_ENTRIES: int = 3
-_MAX_LONG_POSITIONS: int = 8             # Iter 29: increased from 6
-_MAX_SHORT_POSITIONS: int = 3
-_MAX_TOTAL_POSITIONS: int = 9            # Overall position cap
-
-# Per-strategy position caps (prevents single strategy from dominating)
-_MAX_STRATEGY_POSITIONS: dict[str, int] = {
-    "breakout_momentum": 2,              # BM: max 2 concurrent (LOCKED)
-    "rsi_mean_reversion": 4,             # MR: max 4 concurrent
-}
-_DEFAULT_STRATEGY_CAP: int = 2           # Fallback for unknown strategies
+# All trading constants imported from the SSOT module.
+from autotrader.trading.constants import (
+    GROUP_A_STRATEGIES as _GROUP_A_STRATEGIES,
+    GROUP_B_STRATEGIES as _GROUP_B_STRATEGIES,
+    GAP_TOLERANCE as _GAP_TOLERANCE,
+    MAX_DAILY_ENTRIES as _MAX_DAILY_ENTRIES,
+    MAX_LONG_POSITIONS as _MAX_LONG_POSITIONS,
+    MAX_SHORT_POSITIONS as _MAX_SHORT_POSITIONS,
+    MAX_TOTAL_POSITIONS as _MAX_TOTAL_POSITIONS,
+    MAX_STRATEGY_POSITIONS as _MAX_STRATEGY_POSITIONS,
+    DEFAULT_STRATEGY_CAP as _DEFAULT_STRATEGY_CAP,
+)
 
 
 @dataclass
@@ -77,6 +69,24 @@ class Candidate:
     prev_close: float
     atr: float
     indicators: dict
+
+
+def _positions_to_position_infos(positions: list[Position]) -> list[PositionInfo]:
+    """Convert live Position objects to lightweight PositionInfo snapshots.
+
+    The live ``Position`` type uses ``side`` for direction and may have
+    a private ``_strategy`` attribute.  ``PositionInfo`` requires
+    ``direction`` and ``strategy`` fields.
+    """
+    infos: list[PositionInfo] = []
+    for p in positions:
+        infos.append(PositionInfo(
+            symbol=p.symbol,
+            strategy=getattr(p, "_strategy", "") or "",
+            direction=p.side,
+            risk_pct=0.0,  # heat not tracked per-position in live system
+        ))
+    return infos
 
 
 class EntryManager:
@@ -114,6 +124,9 @@ class EntryManager:
         self._risk_manager = risk_manager
         self._exit_rule_engine = exit_rule_engine
         self._gdr_manager = gdr_manager
+
+        # Unified entry constraint checker for common checks
+        self._constraint_checker = EntryConstraintChecker()
 
         # Pending candidates by group
         self._group_a: list[Candidate] = []
@@ -350,13 +363,18 @@ class EntryManager:
         """Check all pre-entry constraints.
 
         Returns False (and logs the reason) if any constraint is violated.
-        Checks are ordered: re-entry -> daily limit -> total cap ->
-        direction caps -> duplicate -> per-strategy cap -> regime block ->
-        risk manager -> allocation engine.
+
+        Uses ``EntryConstraintChecker`` from the unified trading core for
+        the common constraint checks (re-entry, daily limit, total cap,
+        direction caps, duplicate, strategy cap), with live-specific
+        checks (GDR, regime blocking, risk manager, allocation engine)
+        applied before and after.
         """
         symbol = signal.symbol
         direction = signal.direction
         strategy_name = signal.strategy
+
+        # --- Pre-checks: live-specific ---
 
         # GDR entry limit check (per-strategy drawdown response)
         if self._gdr_manager is not None:
@@ -364,52 +382,57 @@ class EntryManager:
                 logger.info("GDR blocked entry for %s (%s)", symbol, strategy_name)
                 return False
 
-        # Re-entry block
+        # Re-entry block (checked via ExitRuleEngine, before unified checker)
         if self._exit_rule_engine.is_reentry_blocked(symbol):
             logger.debug("Skipping %s: re-entry blocked today", symbol)
             return False
 
-        # Daily entry limit
-        if self._daily_entry_count >= _MAX_DAILY_ENTRIES:
-            logger.info("Daily entry limit reached (%d)", _MAX_DAILY_ENTRIES)
-            return False
+        # --- Common constraint checks via unified checker ---
+        # Convert Position objects to PositionInfo for the checker
+        open_positions = _positions_to_position_infos(positions)
 
-        # Total position cap (before direction caps)
-        total_count = len(positions)
-        if total_count >= _MAX_TOTAL_POSITIONS:
-            logger.info(
-                "Total position cap reached (%d/%d)",
-                total_count, _MAX_TOTAL_POSITIONS,
-            )
-            return False
+        # Per-strategy daily entry counts from GDR manager
+        daily_strategy_entries: dict[str, int] = {}
+        gdr_tier = 0
+        gdr_max_entries = 99  # GDR entry limit already checked above
+        safety_net_active = False
+        safety_net_entries_today = 0
+        if self._gdr_manager is not None:
+            daily_strategy_entries = dict(self._gdr_manager._entries_today)
+            gdr_tier = self._gdr_manager.get_tier(strategy_name)
+            safety_net_active = self._gdr_manager.is_safety_net_active
+            safety_net_entries_today = self._gdr_manager._total_entries_today
 
-        # Direction position caps
-        long_count = sum(1 for p in positions if p.side == "long")
-        short_count = sum(1 for p in positions if p.side == "short")
-        if direction == "long" and long_count >= _MAX_LONG_POSITIONS:
-            logger.info("Max long positions reached (%d)", _MAX_LONG_POSITIONS)
-            return False
-        if direction == "short" and short_count >= _MAX_SHORT_POSITIONS:
-            logger.info("Max short positions reached (%d)", _MAX_SHORT_POSITIONS)
-            return False
+        # Calculate portfolio heat = sum(abs(market_value) / equity)
+        # This mirrors the backtest calculation in batch_simulator.py.
+        portfolio_heat = 0.0
+        if account.equity > 0 and positions:
+            for pos in positions:
+                portfolio_heat += abs(pos.market_value) / account.equity
 
-        # Duplicate position check
-        if any(p.symbol == symbol for p in positions):
-            logger.debug("Skipping %s: position already open", symbol)
-            return False
-
-        # Per-strategy position cap
-        strategy_count = sum(
-            1 for p in positions
-            if getattr(p, "_strategy", None) == strategy_name
+        result = self._constraint_checker.check(
+            symbol=symbol,
+            strategy=strategy_name,
+            direction=direction,
+            open_positions=open_positions,
+            daily_entries_count=self._daily_entry_count,
+            daily_strategy_entries=daily_strategy_entries,
+            closed_today=set(),  # Re-entry already checked above
+            gdr_tier=gdr_tier,
+            gdr_max_entries=gdr_max_entries,
+            safety_net_active=safety_net_active,
+            safety_net_entries_today=safety_net_entries_today,
+            portfolio_heat=portfolio_heat,
         )
-        cap = _MAX_STRATEGY_POSITIONS.get(strategy_name, _DEFAULT_STRATEGY_CAP)
-        if strategy_count >= cap:
+
+        if not result.allowed:
             logger.info(
-                "Strategy %s cap reached (%d/%d)",
-                strategy_name, strategy_count, cap,
+                "Entry blocked for %s %s (%s): %s",
+                direction, symbol, strategy_name, result.reason,
             )
             return False
+
+        # --- Post-checks: live-specific ---
 
         # Regime-based entry blocking
         from autotrader.portfolio.regime_detector import RegimeDetector
@@ -429,6 +452,10 @@ class EntryManager:
             return False
 
         # AllocationEngine: strategy weight check
+        strategy_count = sum(
+            1 for p in positions
+            if getattr(p, "_strategy", None) == strategy_name
+        )
         if not self._allocation_engine.should_enter(signal.strategy, regime, strategy_count):
             logger.debug(
                 "AllocationEngine blocked entry: strategy=%s, regime=%s",
@@ -568,8 +595,8 @@ class EntryManager:
     @staticmethod
     def _get_sl_mult(strategy: str, direction: str) -> float:
         """Return the SL ATR multiplier for a strategy/direction pair."""
-        from autotrader.execution.exit_rules import _SL_ATR_MULT
-        return _SL_ATR_MULT.get(strategy, {}).get(direction, 2.0)
+        from autotrader.trading.constants import SL_ATR_MULT
+        return SL_ATR_MULT.get(strategy, {}).get(direction, 2.0)
 
 
 # ---------------------------------------------------------------------------

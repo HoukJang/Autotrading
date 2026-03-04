@@ -571,12 +571,12 @@ class TestPerStrategyGDREdgeCases:
         assert bt._strategy_gdr_tier["breakout_momentum"] == 0
 
     def test_exact_threshold_boundary_tier1(self):
-        """Exactly at the Tier 1 boundary should NOT trigger Tier 1 (strict >)."""
+        """Exactly at the Tier 1 boundary should trigger Tier 1 (>= comparison)."""
         bt = _make_backtester(initial_capital=100_000)
         # breakout_momentum Tier 1 threshold = 4% of 100K = $4000 DD exactly
         bt._update_per_strategy_gdr("breakout_momentum", -4000.0)
-        # DD = 4000/100K = 0.04, threshold is > 0.04 -> Tier 0
-        assert bt._strategy_gdr_tier["breakout_momentum"] == 0
+        # DD = 4000/100K = 0.04, threshold is >= 0.04 -> Tier 1
+        assert bt._strategy_gdr_tier["breakout_momentum"] == 1
 
     def test_just_above_threshold_triggers_tier1(self):
         """Just above Tier 1 threshold should trigger Tier 1."""

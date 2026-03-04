@@ -1,34 +1,43 @@
 """Capital allocation engine based on market regime.
 
-Risk-based position sizing engine. Primary sizing uses per-trade risk
-percentage from the regime allocation table, capped by MAX_POSITION_PCT
-of equity. Short positions are reduced by SHORT_SIZE_RATIO.
+Thin wrapper around ``PositionSizer`` from the unified trading core.
+Determines effective risk percentage from the regime allocation table
+and GDR/safety-net state, then delegates position sizing to the
+unified ``PositionSizer``.
 
 Position caps are managed by EntryManager (not duplicated here).
 """
 from __future__ import annotations
 
 from autotrader.portfolio.regime_detector import MarketRegime, RegimeDetector
-
-SHORT_SIZE_RATIO: float = 0.65  # Short positions sized at 65% of long
+from autotrader.trading.constants import (
+    DEFAULT_BASE_RISK,
+    PORTFOLIO_SAFETY_NET_RISK,
+    SHORT_SIZE_RATIO,
+    MAX_POSITION_PCT as _MAX_POSITION_PCT,
+    MIN_POSITION_VALUE as _MIN_POSITION_VALUE,
+)
+from autotrader.trading.position_sizer import PositionSizer
 
 
 class AllocationEngine:
     """Risk-based position sizing engine driven by market regime.
 
-    Primary sizing uses the regime allocation table to determine
-    per-trade risk percentage, then sizes the position so that the
-    stop-loss distance consumes at most that risk amount. The result
-    is hard-capped at MAX_POSITION_PCT of equity per position.
-
-    Supports future Phase 4 hooks: GDR risk multiplier and safety net.
+    Delegates core sizing to ``PositionSizer`` from the unified trading
+    core.  This wrapper handles regime-based risk determination and the
+    fallback sizing path when no ATR or stop_distance is available.
     """
 
-    MIN_POSITION_VALUE: float = 200.0    # Minimum $200 per position
-    MAX_POSITION_PCT: float = 0.25       # Max 25% of equity per position (Iter 29)
+    MIN_POSITION_VALUE: float = _MIN_POSITION_VALUE
+    MAX_POSITION_PCT: float = _MAX_POSITION_PCT
 
     def __init__(self, regime_detector: RegimeDetector) -> None:
         self._detector = regime_detector
+        self._sizer = PositionSizer(
+            max_position_pct=_MAX_POSITION_PCT,
+            min_position_value=_MIN_POSITION_VALUE,
+            short_size_ratio=SHORT_SIZE_RATIO,
+        )
 
     def get_position_size(
         self,
@@ -70,39 +79,42 @@ class AllocationEngine:
 
         # Determine effective risk percentage
         if safety_net_active:
-            effective_risk_pct = 0.005  # 0.5% during safety net
+            effective_risk_pct = PORTFOLIO_SAFETY_NET_RISK
         else:
             alloc = self._detector.get_allocation(regime)
-            base_risk = alloc.get(strategy_name, 0.02)
+            base_risk = alloc.get(strategy_name, DEFAULT_BASE_RISK)
             # Ensure we only use numeric risk values, not boolean flags
             if not isinstance(base_risk, (int, float)):
-                base_risk = 0.02
+                base_risk = DEFAULT_BASE_RISK
             effective_risk_pct = base_risk * gdr_risk_mult
 
-        # Risk-based primary sizing
-        risk_per_trade = equity * effective_risk_pct
-
+        # Determine the effective stop distance for the PositionSizer
+        effective_stop_distance: float
         if stop_distance is not None and stop_distance > 0:
-            qty = int(risk_per_trade / stop_distance)
+            effective_stop_distance = stop_distance
         elif atr is not None and atr > 0:
-            qty = int(risk_per_trade / (2.0 * atr))
+            effective_stop_distance = 2.0 * atr
         else:
-            # Fallback: treat risk as position weight
+            # Fallback: treat risk as position weight.
+            # This path cannot be delegated to PositionSizer because
+            # the sizer requires a positive stop_distance.
             qty = int((equity * effective_risk_pct * 5) / price)
+            max_by_position = int((equity * self.MAX_POSITION_PCT) / price)
+            qty = min(qty, max_by_position)
+            if direction == "short":
+                qty = int(qty * SHORT_SIZE_RATIO)
+            if qty * price < self.MIN_POSITION_VALUE:
+                return 0
+            return max(0, qty)
 
-        # Hard cap: MAX_POSITION_PCT of equity
-        max_by_position = int((equity * self.MAX_POSITION_PCT) / price)
-        qty = min(qty, max_by_position)
-
-        # Short size reduction
-        if direction == "short":
-            qty = int(qty * SHORT_SIZE_RATIO)
-
-        # Min position value check
-        if qty * price < self.MIN_POSITION_VALUE:
-            return 0
-
-        return max(0, qty)
+        # Delegate to unified PositionSizer
+        return self._sizer.calculate(
+            equity=equity,
+            price=price,
+            stop_distance=effective_stop_distance,
+            direction=direction,
+            risk_pct=effective_risk_pct,
+        )
 
     def should_enter(
         self,

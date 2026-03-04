@@ -36,122 +36,71 @@ from typing import Literal
 from autotrader.batch.ranking import SignalRanker
 from autotrader.batch.types import Candidate, ScanResult
 from autotrader.core.types import Bar, MarketContext, Timeframe
-from autotrader.execution.exit_rules import (
-    ExitRuleEngine,
-    HeldPosition,
-    _MAX_HOLD_DAYS,
-    _SL_ATR_MULT,
-    _TP_ATR_MULT,
-    _TRAILING_STRATEGIES,
-    _TRAILING_ATR_MULT,
-    _TRAILING_ACTIVATION_ATR,
-    _STAGE1_BE_ACTIVATION_ATR,
-    _STAGE2_PROFIT_ACTIVATION_ATR,
-    _STAGE2_PROFIT_LOCK_ATR,
-    _EMERGENCY_LOSS_IMMEDIATE_PCT,
-)
+from autotrader.execution.exit_rules import ExitRuleEngine, HeldPosition
 from autotrader.indicators.base import IndicatorSpec
 from autotrader.indicators.engine import IndicatorEngine
 from autotrader.strategy.breakout_momentum import BreakoutMomentum
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
 from autotrader.backtest.regime_classifier import RegimeClassifier, Regime
 
+# Unified trading core (Phase 2)
+from autotrader.trading.entry_checker import EntryConstraintChecker
+from autotrader.trading.exit_engine import UnifiedExitEngine
+from autotrader.trading.gdr_engine import GDREngine
+from autotrader.trading.position_sizer import PositionSizer
+from autotrader.trading.types import ExitContext, PriceMode, PositionInfo
+
+# All shared trading constants from the SSOT module
+from autotrader.trading.constants import (
+    # Position limits
+    RISK_PER_TRADE_PCT as _RISK_PER_TRADE_PCT,
+    MAX_POSITION_PCT as _MAX_POSITION_PCT,
+    MAX_LONG_POSITIONS as _MAX_LONG_POSITIONS,
+    MAX_SHORT_POSITIONS as _MAX_SHORT_POSITIONS,
+    MAX_TOTAL_POSITIONS as _MAX_TOTAL_POSITIONS,
+    MAX_LOSS_PER_TRADE_PCT as _MAX_LOSS_PER_TRADE_PCT,
+    MAX_PORTFOLIO_HEAT_PCT as _MAX_PORTFOLIO_HEAT_PCT,
+    # Per-strategy GDR
+    PER_STRATEGY_GDR as _PER_STRATEGY_GDR,
+    STRATEGY_BASE_RISK as _STRATEGY_BASE_RISK,
+    DEFAULT_BASE_RISK as _DEFAULT_BASE_RISK,
+    STRATEGY_GDR_THRESHOLDS as _STRATEGY_GDR_THRESHOLDS,
+    GDR_RISK_MULT as _GDR_RISK_MULT,
+    GDR_STRATEGY_ENTRIES as _GDR_STRATEGY_ENTRIES,
+    MAX_DAILY_ENTRIES as _MAX_DAILY_ENTRIES,
+    # Portfolio safety net
+    PORTFOLIO_SAFETY_NET_DD as _PORTFOLIO_SAFETY_NET_DD,
+    PORTFOLIO_SAFETY_NET_RECOVERY as _PORTFOLIO_SAFETY_NET_RECOVERY,
+    PORTFOLIO_SAFETY_NET_ENTRIES as _PORTFOLIO_SAFETY_NET_ENTRIES,
+    PORTFOLIO_SAFETY_NET_RISK as _PORTFOLIO_SAFETY_NET_RISK,
+    # Legacy portfolio-level GDR
+    GDR_ROLLING_WINDOW as _GDR_ROLLING_WINDOW,
+    GDR_TIER1_DD as _GDR_TIER1_DD,
+    GDR_TIER2_DD as _GDR_TIER2_DD,
+    GDR_LEGACY_RISK_MULT as _GDR_LEGACY_RISK_MULT,
+    GDR_MAX_ENTRIES as _GDR_MAX_ENTRIES,
+    # Strategy caps and names
+    STRATEGY_NAMES as _STRATEGY_NAMES,
+    SOFT_STRATEGY_CAP as _SOFT_STRATEGY_CAP,
+    DEFAULT_STRATEGY_CAP as _DEFAULT_STRATEGY_CAP,
+    # Warmup
+    MIN_BARS_WARMUP as _MIN_BARS_WARMUP,
+    WARMUP_PRELOAD_BARS as _WARMUP_PRELOAD_BARS,
+    # Gap filter
+    DEFAULT_GAP_THRESHOLD as _DEFAULT_GAP_THRESHOLD,
+    # Exit rules (SL_ATR_MULT used for stop_distance in entry sizing)
+    SL_ATR_MULT as _SL_ATR_MULT,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constants matching live system configuration
+# Backtest-only constants (no live-system equivalent)
 # ---------------------------------------------------------------------------
-
-# Strategies in each entry group
-_GROUP_A: frozenset[str] = frozenset({"breakout_momentum", "rsi_mean_reversion"})
-_GROUP_B: frozenset[str] = frozenset()
-
-# Position sizing constants
-_RISK_PER_TRADE_PCT: float = 0.02       # 2% of equity at risk per trade (legacy default)
-_MAX_POSITION_PCT: float = 0.25         # hard cap: max 25% of equity per position
-_MAX_LONG_POSITIONS: int = 8            # hard cap on concurrent long positions (Iter 25: reverted to Iter 23)
-_MAX_SHORT_POSITIONS: int = 3           # hard cap on concurrent short positions
-_MAX_TOTAL_POSITIONS: int = 9           # overall position cap (Iter 25: reverted to Iter 23)
-_MAX_LOSS_PER_TRADE_PCT: float = 0.03   # hard cap: max 3% of equity loss per trade
-_MAX_PORTFOLIO_HEAT_PCT: float = 0.35   # max 35% of equity exposed (Iter 29: reverted to Iter 27)
-
-# --- Per-Strategy GDR Configuration ---
-_PER_STRATEGY_GDR: bool = True          # Toggle: True = per-strategy, False = portfolio-level
-
-# Per-strategy base risk (replaces single _RISK_PER_TRADE_PCT for all)
-_STRATEGY_BASE_RISK: dict[str, float] = {
-    "breakout_momentum": 0.020,          # 2.0% (default, overridden by regime)
-    "rsi_mean_reversion": 0.015,         # 1.5% (default, overridden by regime)
-}
-_DEFAULT_BASE_RISK: float = 0.02        # fallback for unknown strategies
-
-# Per-strategy GDR thresholds: (tier1_dd, tier2_dd)
-_STRATEGY_GDR_THRESHOLDS: dict[str, tuple[float, float]] = {
-    "breakout_momentum": (0.04, 0.08),   # Iter 25: reverted to Iter 23 (was 0.03, 0.06)
-    "rsi_mean_reversion": (0.02, 0.04),  # Iter 25: reverted to Iter 23 (was 0.015, 0.03)
-}
-
-# GDR Risk Multipliers (Tier 2 = HALT, 0 entries)
-_GDR_RISK_MULT: dict[int, float] = {
-    0: 1.0,    # Tier 0: normal
-    1: 0.5,    # Tier 1: reduced
-    2: 0.0,    # Tier 2: HALTED (no entries)
-}
-
-# Per-strategy entry limits per tier
-_GDR_STRATEGY_ENTRIES: dict[int, int] = {
-    0: 1,   # Tier 0: 1 entry per strategy per day
-    1: 1,   # Tier 1: 1 entry per strategy per day
-    2: 0,   # Tier 2: 0 entries (halted)
-}
-
-_MAX_DAILY_ENTRIES: int = 3             # portfolio-level total cap (Iter 29: reverted to Iter 27)
-
-# Portfolio Safety Net (overrides per-strategy GDR when total DD is extreme)
-_PORTFOLIO_SAFETY_NET_DD: float = 0.12          # 12% total portfolio DD (Iter 26: reverted to Iter 23)
-_PORTFOLIO_SAFETY_NET_RECOVERY: float = 0.08    # resume per-strategy GDR when DD < 8% (Iter 26: reverted to Iter 23)
-_PORTFOLIO_SAFETY_NET_ENTRIES: int = 1           # 1 entry total when safety net active
-_PORTFOLIO_SAFETY_NET_RISK: float = 0.005        # 0.5% risk when safety net active
-
-# --- Legacy Portfolio-Level GDR (backward compat when _PER_STRATEGY_GDR = False) ---
-_GDR_ROLLING_WINDOW: int = 60           # rolling peak lookback (trading days)
-_GDR_TIER1_DD: float = 0.15            # DD > 15% -> Tier 1 (legacy)
-_GDR_TIER2_DD: float = 0.25            # DD > 25% -> Tier 2 (legacy)
-
-_GDR_LEGACY_RISK_MULT: dict[int, float] = {
-    0: 1.0,    # Tier 0: normal  (RISK_PER_TRADE_PCT * 1.0 = 2%)
-    1: 0.5,    # Tier 1: reduced (RISK_PER_TRADE_PCT * 0.5 = 1%)
-    2: 0.25,   # Tier 2: minimal (RISK_PER_TRADE_PCT * 0.25 = 0.5%)
-}
-
-_GDR_MAX_ENTRIES: dict[int, int] = {
-    0: 2,   # Tier 0: 2 entries/day (same as legacy _MAX_DAILY_ENTRIES)
-    1: 1,   # Tier 1: 1 entry/day
-    2: 1,   # Tier 2: 1 entry/day
-}
-
-_STRATEGY_NAMES: list[str] = ["breakout_momentum", "rsi_mean_reversion"]
-
-# Soft per-strategy position cap (applied when 2+ strategies have pending signals)
-_SOFT_STRATEGY_CAP: dict[str, int] = {
-    "breakout_momentum": 2,      # BM: 2 positions max (LOCKED - Iter 30 confirmed cap 3 is worse)
-    "rsi_mean_reversion": 4,     # MR: 4 positions max (Panel #31: expanded from 3)
-}
-_DEFAULT_STRATEGY_CAP: int = 2          # fallback for unknown strategies
-
-# Minimum bars needed before a symbol can generate a valid signal
-_MIN_BARS_WARMUP: int = 60
-
-# Warmup preload: number of trading days loaded before the test period
-# so that indicators are already warmed up on day 1 of the real test.
-_WARMUP_PRELOAD_BARS: int = 80
 
 # Money market yield on idle (uninvested) cash
 _CASH_YIELD_ANNUAL: float = 0.0475        # 4.75% annual money market yield
 _CASH_YIELD_DAILY: float = _CASH_YIELD_ANNUAL / 252  # per trading day
-
-# Gap filter threshold (3%, tightened from 5%)
-_DEFAULT_GAP_THRESHOLD: float = 0.03
 
 # Slippage model: 3 basis points on entry and exit fills
 _SLIPPAGE_BPS: float = 0.0003
@@ -574,6 +523,12 @@ class BatchBacktester:
         self._indicator_specs = self._collect_indicator_specs()
         self._ranker = SignalRanker(top_n=top_n)
 
+        # Unified trading core components
+        self._unified_exit_engine = UnifiedExitEngine()
+        self._entry_checker = EntryConstraintChecker()
+        self._position_sizer = PositionSizer()
+        self._gdr_engine = GDREngine(initial_capital=initial_capital)
+
         # State reset on each run() call
         self._cash: float = initial_capital
         self._positions: dict[str, _SimPosition] = {}
@@ -589,17 +544,55 @@ class BatchBacktester:
         self._equity_history: deque[float] = deque(maxlen=_GDR_ROLLING_WINDOW)
         self._gdr_tier: int = 0
         self._realized_pnl: float = 0.0  # cumulative realized PnL for DD tracking
-        # Per-strategy GDR state
-        self._strategy_cumulative_pnl: dict[str, float] = {s: 0.0 for s in _STRATEGY_NAMES}
-        self._strategy_peak_pnl: dict[str, float] = {s: 0.0 for s in _STRATEGY_NAMES}
-        self._strategy_gdr_tier: dict[str, int] = {s: 0 for s in _STRATEGY_NAMES}
+        # Per-strategy GDR state (delegated to GDREngine, properties for compat)
         self._strategy_entries_today: dict[str, int] = {s: 0 for s in _STRATEGY_NAMES}
-        # Portfolio safety net state
+        # Portfolio safety net state (batch-specific rolling window)
         self._portfolio_safety_net_active: bool = False
         # Regime guard: symbols pending forced close on next day
         self._regime_guard_pending: set[str] = set()
         # Regime classifier state
         self._regime_classifier = RegimeClassifier()
+
+    # ------------------------------------------------------------------
+    # Backward-compatible properties for GDR state (delegated to GDREngine)
+    # ------------------------------------------------------------------
+
+    @property
+    def _strategy_cumulative_pnl(self) -> dict[str, float]:
+        """Cumulative PnL per strategy -- delegates to GDREngine.
+
+        Pre-populates all known strategy names with 0.0 for backward
+        compatibility (tests expect these keys to exist initially).
+        """
+        result = {s: 0.0 for s in _STRATEGY_NAMES}
+        result.update(self._gdr_engine._strategy_cumulative_pnl)
+        return result
+
+    @_strategy_cumulative_pnl.setter
+    def _strategy_cumulative_pnl(self, value: dict[str, float]) -> None:
+        self._gdr_engine._strategy_cumulative_pnl = dict(value)
+
+    @property
+    def _strategy_peak_pnl(self) -> dict[str, float]:
+        """Peak PnL per strategy -- delegates to GDREngine."""
+        result = {s: 0.0 for s in _STRATEGY_NAMES}
+        result.update(self._gdr_engine._strategy_peak_pnl)
+        return result
+
+    @_strategy_peak_pnl.setter
+    def _strategy_peak_pnl(self, value: dict[str, float]) -> None:
+        self._gdr_engine._strategy_peak_pnl = dict(value)
+
+    @property
+    def _strategy_gdr_tier(self) -> dict[str, int]:
+        """GDR tier per strategy -- delegates to GDREngine."""
+        result = {s: 0 for s in _STRATEGY_NAMES}
+        result.update(self._gdr_engine._strategy_tiers)
+        return result
+
+    @_strategy_gdr_tier.setter
+    def _strategy_gdr_tier(self, value: dict[str, int]) -> None:
+        self._gdr_engine._strategy_tiers = dict(value)
 
     # ------------------------------------------------------------------
     # Public API
@@ -944,46 +937,17 @@ class BatchBacktester:
                 )
 
         entries = 0
-        total_positions = len(self._positions)
 
         for sym, scan_result, prev_close in pending_signals:
             strategy_name = scan_result.strategy
+            direction = scan_result.direction
 
-            # Portfolio heat check: block new entries when total open position
-            # exposure exceeds _MAX_PORTFOLIO_HEAT_PCT of current equity.
-            current_equity = self._compute_equity(day_bars)
-            if current_equity > 0 and self._positions:
-                portfolio_heat = 0.0
-                for _sym, _pos in self._positions.items():
-                    _bar = day_bars.get(_sym)
-                    _price = _bar.close if _bar else _pos.held.entry_price
-                    portfolio_heat += abs(_pos.qty * _price) / current_equity
-                if portfolio_heat >= _MAX_PORTFOLIO_HEAT_PCT:
-                    logger.debug(
-                        "Portfolio heat %.2f%% >= limit %.2f%%, blocking new entry for %s",
-                        portfolio_heat * 100, _MAX_PORTFOLIO_HEAT_PCT * 100, sym,
-                    )
-                    continue
+            # -- Backtest-specific: bar data availability --
+            bar = day_bars.get(sym)
+            if bar is None:
+                continue
 
-            # Enforce overall portfolio-level daily entry limit
-            if entries >= effective_daily_entries:
-                break
-            if total_positions >= _MAX_TOTAL_POSITIONS:
-                break
-
-            # Per-strategy GDR entry limit check
-            if self._use_per_strategy_gdr and not self._portfolio_safety_net_active:
-                strat_tier = self._strategy_gdr_tier.get(strategy_name, 0)
-                strat_entry_limit = _GDR_STRATEGY_ENTRIES[strat_tier]
-                strat_entries_so_far = self._strategy_entries_today.get(strategy_name, 0)
-                if strat_entries_so_far >= strat_entry_limit:
-                    logger.debug(
-                        "Per-strategy GDR: %s at tier %d, entry limit %d reached, skipping %s",
-                        strategy_name, strat_tier, strat_entry_limit, sym,
-                    )
-                    continue
-
-            # Regime-based entry blocking
+            # -- Backtest-specific: regime-based entry blocking --
             if hasattr(self, '_regime_classifier'):
                 regime = self._regime_classifier.confirmed_regime
                 alloc = RegimeClassifier.get_allocation(regime)
@@ -994,50 +958,77 @@ class BatchBacktester:
                     )
                     continue
                 if (strategy_name == "rsi_mean_reversion"
-                        and scan_result.direction == "short"
+                        and direction == "short"
                         and alloc.get("mr_short_blocked")):
                     logger.debug(
                         "Regime %s: MR short blocked for %s",
                         regime.value, sym,
                     )
                     continue
-            bar = day_bars.get(sym)
-            if bar is None:
-                continue
 
-            # Re-entry block check
-            if sym in self._closed_today:
-                logger.debug("Entry skipped for %s: re-entry block (same day)", sym)
-                continue
+            # -- Legacy portfolio-level GDR daily entry cap (not covered by
+            #    the unified checker which uses per-strategy GDR) --
+            if not self._use_per_strategy_gdr:
+                if entries >= effective_daily_entries:
+                    break
 
-            # Already holding this symbol
-            if sym in self._positions:
-                continue
+            # -- UNIFIED: all standard entry constraints --
+            # Build lightweight position snapshots for the checker
+            current_equity = self._compute_equity(day_bars)
+            portfolio_heat = 0.0
+            if current_equity > 0 and self._positions:
+                for _sym, _pos in self._positions.items():
+                    _bar = day_bars.get(_sym)
+                    _price = _bar.close if _bar else _pos.held.entry_price
+                    portfolio_heat += abs(_pos.qty * _price) / current_equity
 
-            # Direction-based position cap
-            direction = scan_result.direction
-            longs = sum(1 for p in self._positions.values() if p.held.direction == "long")
-            shorts = sum(1 for p in self._positions.values() if p.held.direction == "short")
-            if direction == "long" and longs >= _MAX_LONG_POSITIONS:
-                continue
-            if direction == "short" and shorts >= _MAX_SHORT_POSITIONS:
-                continue
+            open_positions = [
+                PositionInfo(
+                    symbol=p.held.symbol,
+                    strategy=p.held.strategy,
+                    direction=p.held.direction,
+                    risk_pct=_RISK_PER_TRADE_PCT,
+                )
+                for p in self._positions.values()
+            ]
 
-            # Per-strategy position cap: always limit each strategy to
-            # its configured cap to prevent signal flooding.
-            strategy_count = sum(
-                1 for p in self._positions.values()
-                if p.held.strategy == strategy_name
+            # Determine GDR max entries for this strategy
+            if self._use_per_strategy_gdr:
+                gdr_max_entries = self._gdr_engine.get_max_entries(strategy_name)
+            else:
+                # Legacy mode: GDR entry limit handled above; set high to skip
+                gdr_max_entries = 999
+
+            result = self._entry_checker.check(
+                symbol=sym,
+                strategy=strategy_name,
+                direction=direction,
+                open_positions=open_positions,
+                daily_entries_count=entries,
+                daily_strategy_entries=self._strategy_entries_today,
+                closed_today=self._closed_today,
+                gdr_tier=self._gdr_engine.get_tier(strategy_name),
+                gdr_max_entries=gdr_max_entries,
+                safety_net_active=self._portfolio_safety_net_active,
+                safety_net_entries_today=entries,
+                portfolio_heat=portfolio_heat,
             )
-            cap = _SOFT_STRATEGY_CAP.get(strategy_name, _DEFAULT_STRATEGY_CAP)
-            if strategy_count >= cap:
+            if not result.allowed:
+                if result.reason in ("daily entry limit", "total position cap",
+                                     "portfolio heat limit"):
+                    # These are portfolio-level limits; no further entries
+                    # possible today regardless of remaining signals.
+                    logger.debug(
+                        "Portfolio-level limit reached (%s), stopping entries",
+                        result.reason,
+                    )
+                    break
                 logger.debug(
-                    "Strategy cap: %s already has %d/%d positions, skipping %s",
-                    strategy_name, strategy_count, cap, sym,
+                    "Entry blocked for %s: %s", sym, result.reason,
                 )
                 continue
 
-            # Apply gap filter: compare today's open to yesterday's close
+            # -- Backtest-specific: gap filter --
             gap_pct = (bar.open - prev_close) / prev_close if prev_close > 0 else 0.0
 
             if self._apply_gap_filter and abs(gap_pct) > self._gap_threshold:
@@ -1062,13 +1053,12 @@ class BatchBacktester:
             sl_mult = _SL_ATR_MULT.get(strategy_name, {}).get(direction, 2.0)
             stop_distance = sl_mult * atr
 
-            # Determine GDR risk multiplier based on mode
+            # Determine GDR risk multiplier (delegated to GDREngine)
             if self._use_per_strategy_gdr:
                 if self._portfolio_safety_net_active:
                     gdr_mult = 1.0  # safety net risk is handled in _calculate_qty
                 else:
-                    strat_tier = self._strategy_gdr_tier.get(strategy_name, 0)
-                    gdr_mult = _GDR_RISK_MULT[strat_tier]
+                    gdr_mult = self._gdr_engine.get_risk_multiplier(strategy_name)
             else:
                 gdr_mult = _GDR_LEGACY_RISK_MULT[self._gdr_tier]
 
@@ -1078,6 +1068,7 @@ class BatchBacktester:
                 stop_distance=stop_distance,
                 gdr_risk_mult=gdr_mult,
                 strategy=strategy_name,
+                direction=direction,
             )
 
             if qty <= 0:
@@ -1127,7 +1118,6 @@ class BatchBacktester:
 
             self._positions[sym] = sim_pos
             entries += 1
-            total_positions += 1
             # Track per-strategy entries for this day
             self._strategy_entries_today[strategy_name] = (
                 self._strategy_entries_today.get(strategy_name, 0) + 1
@@ -1150,10 +1140,10 @@ class BatchBacktester:
     ) -> tuple[int, float]:
         """Evaluate exit conditions for all held positions.
 
-        Uses daily high/low to approximate intraday SL/TP hits.
-        If both SL and TP would have been hit in the same day, the
-        disambiguation rule is: if open is closer to SL -> stopped out;
-        if open is closer to TP -> took profit.
+        Delegates SL/TP/trailing/time/emergency checks to UnifiedExitEngine
+        with PriceMode.INTRADAY (uses bar high/low for SL/TP approximation).
+        Backtest-specific logic (slippage, regime guard, max_loss_cap) remains
+        inline.
 
         Returns:
             (exits_count, daily_pnl)
@@ -1186,7 +1176,7 @@ class BatchBacktester:
             # Increment bars held counter
             held.bars_held += 1
 
-            # Update MFE/MAE tracking
+            # Update MFE/MAE tracking (sim_pos tracks independently of exit engine)
             sim_pos.update_extremes(bar.high, bar.low)
             held.update_price_extremes(bar.high, bar.low)
 
@@ -1197,39 +1187,55 @@ class BatchBacktester:
             else:
                 indicators = {}
 
-            # Apply entry day skip: on Day 1, only check emergency exits
-            is_entry_day = (held.entry_date_et == trading_date)
-            if is_entry_day and self._entry_day_skip:
-                # Only emergency -10% single-bar check on entry day
-                loss_pct = self._loss_pct(held, bar.close)
-                if loss_pct >= _EMERGENCY_LOSS_IMMEDIATE_PCT:
-                    exit_price = self._apply_slippage_to_fill(bar.close, held.direction, is_entry=False)
-                    to_close.append((sym, "emergency_immediate", exit_price))
-                continue
+            # Build ExitContext from HeldPosition for the unified exit engine
+            exit_ctx = self._to_exit_context(held, sim_pos)
 
-            # Day 2+: check SL/TP/trailing using daily high/low
-            exit_price, exit_reason = self._check_sl_tp_intraday(
-                held=held,
+            # Delegate to UnifiedExitEngine (INTRADAY mode for backtest)
+            decision = self._unified_exit_engine.evaluate(
+                ctx=exit_ctx,
                 bar=bar,
                 indicators=indicators,
-                bar_history=history,
+                current_date=trading_date,
+                price_mode=PriceMode.INTRADAY,
             )
 
-            if exit_price is not None and exit_reason is not None:
-                to_close.append((sym, exit_reason, exit_price))
-            elif _MAX_LOSS_PER_TRADE_PCT < 1.0:
-                # Equity-based hard cap: if unrealized loss exceeds threshold
-                # of equity, force exit. Only triggers when SL/TP did not fire.
-                unrealized_loss = self._unrealized_loss_dollars(sim_pos, bar.close)
-                equity = self._equity if self._equity > 0 else self._initial_capital
-                if unrealized_loss > equity * _MAX_LOSS_PER_TRADE_PCT:
-                    cap_exit_price = self._apply_slippage_to_fill(
-                        bar.close, held.direction, is_entry=False,
-                    )
-                    to_close.append((sym, "max_loss_cap", cap_exit_price))
+            # Apply state updates from exit engine back to HeldPosition
+            self._apply_exit_updates(held, sim_pos, decision.updated_context)
 
-            # Regime guard detection for mean reversion strategies (detect today, close tomorrow)
-            if held.strategy in ("rsi_mean_reversion",) and exit_price is None:
+            if decision.should_exit:
+                # Map unified exit reason to batch simulator reason names
+                mapped_reason = self._map_exit_reason(decision.reason)
+                # Apply slippage to the exit price
+                exit_price = self._apply_slippage_to_fill(
+                    decision.exit_price, held.direction, is_entry=False,
+                )
+                to_close.append((sym, mapped_reason, exit_price))
+            else:
+                # No SL/TP/trailing/time exit -- check equity-based hard cap
+                if _MAX_LOSS_PER_TRADE_PCT < 1.0:
+                    unrealized_loss = self._unrealized_loss_dollars(sim_pos, bar.close)
+                    equity = self._equity if self._equity > 0 else self._initial_capital
+                    if unrealized_loss > equity * _MAX_LOSS_PER_TRADE_PCT:
+                        cap_exit_price = self._apply_slippage_to_fill(
+                            bar.close, held.direction, is_entry=False,
+                        )
+                        to_close.append((sym, "max_loss_cap", cap_exit_price))
+
+            # Check max_hold_days override (backtest-specific; not in unified engine)
+            if (
+                not decision.should_exit
+                and self._max_hold_days_override is not None
+                and held.bars_held >= self._max_hold_days_override
+                and held.entry_date_et != trading_date
+            ):
+                override_price = self._apply_slippage_to_fill(
+                    bar.close, held.direction, is_entry=False,
+                )
+                to_close.append((sym, "time_exit", override_price))
+
+            # Regime guard detection for mean reversion strategies
+            # (detect today, close tomorrow) -- backtest-specific
+            if held.strategy in ("rsi_mean_reversion",) and not decision.should_exit:
                 current_adx = indicators.get("ADX_14")
                 if (
                     isinstance(current_adx, (int, float))
@@ -1276,7 +1282,7 @@ class BatchBacktester:
 
             # Update per-strategy GDR with the realized PnL (including commission)
             if self._use_per_strategy_gdr:
-                self._update_per_strategy_gdr(sim_pos.held.strategy, pnl)
+                self._gdr_engine.record_trade_pnl(sim_pos.held.strategy, pnl)
 
             logger.debug(
                 "Exit: %s %s %.0f @ %.2f (reason=%s, pnl=%.2f, bars=%d)",
@@ -1286,159 +1292,48 @@ class BatchBacktester:
 
         return exits, daily_pnl
 
-    def _check_sl_tp_intraday(
-        self,
+    # ------------------------------------------------------------------
+    # Exit context conversion helpers (HeldPosition <-> ExitContext)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _to_exit_context(held: HeldPosition, sim_pos: _SimPosition) -> ExitContext:
+        """Convert internal HeldPosition to unified ExitContext."""
+        return ExitContext(
+            symbol=held.symbol,
+            strategy=held.strategy,
+            direction=held.direction,
+            entry_price=held.entry_price,
+            entry_date=held.entry_date_et,
+            qty=int(held.qty),
+            entry_atr=held.entry_atr,
+            bars_held=held.bars_held,
+            trailing_high=held.highest_price,
+            trailing_low=held.lowest_price,
+            consecutive_loss_bars=held.consecutive_loss_bars,
+            mfe_price=sim_pos.mfe_price,
+            mae_price=sim_pos.mae_price,
+        )
+
+    @staticmethod
+    def _apply_exit_updates(
         held: HeldPosition,
-        bar: Bar,
-        indicators: dict,
-        bar_history: deque | None = None,
-    ) -> tuple[float | None, str | None]:
-        """Check if SL or TP would have been hit using the daily high/low.
+        sim_pos: _SimPosition,
+        ctx: ExitContext,
+    ) -> None:
+        """Apply exit engine's state updates back to HeldPosition."""
+        held.consecutive_loss_bars = ctx.consecutive_loss_bars
 
-        Returns:
-            (exit_price, reason) or (None, None) if no exit triggered.
-        """
-        atr = self._get_atr(indicators, held.entry_atr)
-        strategy = held.strategy
-        direction = held.direction
-
-        # --- Stop Loss check (with 2-stage SL upgrade) ---
-        sl_mult = _SL_ATR_MULT.get(strategy, {}).get(direction, 2.0)
-        sl_distance = sl_mult * atr
-        if direction == "long":
-            sl_price = held.entry_price - sl_distance
-            # 2-stage SL upgrade
-            if held.highest_price >= held.entry_price + _STAGE2_PROFIT_ACTIVATION_ATR * atr:
-                # Stage 2: lock in profit
-                sl_price = max(sl_price, held.entry_price + _STAGE2_PROFIT_LOCK_ATR * atr)
-            elif held.highest_price >= held.entry_price + _STAGE1_BE_ACTIVATION_ATR * atr:
-                # Stage 1: breakeven
-                sl_price = max(sl_price, held.entry_price)
-            sl_hit = bar.low <= sl_price
-        else:
-            sl_price = held.entry_price + sl_distance
-            # 2-stage SL upgrade
-            if held.lowest_price <= held.entry_price - _STAGE2_PROFIT_ACTIVATION_ATR * atr:
-                # Stage 2: lock in profit
-                sl_price = min(sl_price, held.entry_price - _STAGE2_PROFIT_LOCK_ATR * atr)
-            elif held.lowest_price <= held.entry_price - _STAGE1_BE_ACTIVATION_ATR * atr:
-                # Stage 1: breakeven
-                sl_price = min(sl_price, held.entry_price)
-            sl_hit = bar.high >= sl_price
-
-        # --- Take Profit check ---
-        tp_price: float | None = None
-        tp_hit = False
-        tp_atr_mult = _TP_ATR_MULT.get(strategy)
-        if tp_atr_mult is not None:
-            if direction == "long":
-                tp_price = held.entry_price + tp_atr_mult * atr
-                tp_hit = bar.high >= tp_price
-            else:
-                tp_price = held.entry_price - tp_atr_mult * atr
-                tp_hit = bar.low <= tp_price
-        else:
-            # Indicator-based TP (rsi/bb)
-            rsi = indicators.get("RSI_14")
-            bb = indicators.get("BBANDS_20")
-            pct_b = bb.get("pct_b", 0.5) if isinstance(bb, dict) else None
-
-            if strategy == "rsi_mean_reversion":
-                rsi_target = 50.0 if direction == "long" else 50.0
-                if direction == "long":
-                    tp_hit = (rsi is not None and rsi > rsi_target) or (pct_b is not None and pct_b > 0.50)
-                else:
-                    tp_hit = (rsi is not None and rsi < rsi_target) or (pct_b is not None and pct_b < 0.50)
-            elif strategy == "consecutive_down":
-                # TP: close > EMA(5)
-                ema_5 = indicators.get("EMA_5")
-                if ema_5 is not None and bar.close > ema_5:
-                    tp_hit = True
-
-            if tp_hit:
-                tp_price = bar.close  # indicator-based TP fills at close
-
-            # Auxiliary ATR TP for rsi_mean_reversion: cap at 2.0 ATR
-            if not tp_hit and strategy == "rsi_mean_reversion":
-                atr_tp_mult = 2.0
-                if direction == "long":
-                    atr_tp_price = held.entry_price + atr_tp_mult * atr
-                    if bar.high >= atr_tp_price:
-                        tp_hit = True
-                        tp_price = atr_tp_price
-                else:
-                    atr_tp_price = held.entry_price - atr_tp_mult * atr
-                    if bar.low <= atr_tp_price:
-                        tp_hit = True
-                        tp_price = atr_tp_price
-
-        # --- Trailing Stop check (for ema_pullback) ---
-        # Activation: only after price moved N ATR in our favour (per-strategy).
-        # Floor: trailing stop never goes below entry price (no trailing losses).
-        trailing_hit = False
-        trailing_price: float | None = None
-        if strategy in _TRAILING_STRATEGIES and held.bars_held >= 2:
-            activation_atr = _TRAILING_ACTIVATION_ATR.get(strategy, 1.5)
-            if direction == "long":
-                if held.highest_price >= held.entry_price + activation_atr * atr:
-                    trail_stop = max(
-                        held.entry_price,
-                        held.highest_price - _TRAILING_ATR_MULT * atr,
-                    )
-                    if bar.low <= trail_stop:
-                        trailing_hit = True
-                        trailing_price = trail_stop
-            else:
-                if held.lowest_price <= held.entry_price - activation_atr * atr:
-                    trail_stop = min(
-                        held.entry_price,
-                        held.lowest_price + _TRAILING_ATR_MULT * atr,
-                    )
-                    if bar.high >= trail_stop:
-                        trailing_hit = True
-                        trailing_price = trail_stop
-
-        # --- Time-based exit ---
-        max_hold = self._max_hold_days_override or _MAX_HOLD_DAYS.get(strategy)
-        time_hit = max_hold is not None and held.bars_held >= max_hold
-
-        # --- Determine which exit fires first ---
-        # Priority: SL > TP > Trailing > Time
-        # TP must be checked before trailing to avoid cutting winners
-        # that have already reached take-profit territory.
-        if sl_hit and tp_hit and tp_price is not None:
-            # Both SL and TP hit: use open proximity to disambiguate
-            if direction == "long":
-                open_to_sl = abs(bar.open - sl_price)
-                open_to_tp = abs(bar.open - tp_price)
-            else:
-                open_to_sl = abs(bar.open - sl_price)
-                open_to_tp = abs(bar.open - tp_price) if tp_price else float("inf")
-
-            if open_to_sl <= open_to_tp:
-                exit_p = self._apply_slippage_to_fill(sl_price, direction, is_entry=False)
-                return exit_p, "stop_loss"
-            else:
-                exit_p = self._apply_slippage_to_fill(tp_price, direction, is_entry=False)
-                return exit_p, "take_profit"
-
-        if sl_hit:
-            exit_p = self._apply_slippage_to_fill(sl_price, direction, is_entry=False)
-            return exit_p, "stop_loss"
-
-        if tp_hit and tp_price is not None:
-            exit_p = self._apply_slippage_to_fill(tp_price, direction, is_entry=False)
-            return exit_p, "take_profit"
-
-        if trailing_hit and trailing_price is not None:
-            exit_p = self._apply_slippage_to_fill(trailing_price, direction, is_entry=False)
-            return exit_p, "trailing_stop"
-
-        if time_hit:
-            exit_p = self._apply_slippage_to_fill(bar.close, direction, is_entry=False)
-            return exit_p, "time_exit"
-
-        return None, None
+    @staticmethod
+    def _map_exit_reason(reason: str) -> str:
+        """Map unified exit engine reason to batch simulator reason names."""
+        if reason == "sl_hit":
+            return "stop_loss"
+        if reason.startswith("tp_"):
+            return "take_profit"
+        # trailing_stop, time_exit, emergency_immediate, emergency_confirmed
+        # are the same in both systems
+        return reason
 
     def _force_close_all(
         self,
@@ -1645,12 +1540,11 @@ class BatchBacktester:
         self._equity_history = deque(maxlen=_GDR_ROLLING_WINDOW)
         self._gdr_tier = 0
         self._realized_pnl: float = 0.0  # cumulative realized PnL for DD tracking
-        # Per-strategy GDR state
-        self._strategy_cumulative_pnl = {s: 0.0 for s in _STRATEGY_NAMES}
-        self._strategy_peak_pnl = {s: 0.0 for s in _STRATEGY_NAMES}
-        self._strategy_gdr_tier = {s: 0 for s in _STRATEGY_NAMES}
+        # Reset unified trading core components
+        self._unified_exit_engine = UnifiedExitEngine()
+        self._gdr_engine = GDREngine(initial_capital=self._initial_capital)
         self._strategy_entries_today = {s: 0 for s in _STRATEGY_NAMES}
-        # Portfolio safety net state
+        # Portfolio safety net state (batch-specific rolling window)
         self._portfolio_safety_net_active = False
         # Regime guard state
         self._regime_guard_pending = set()
@@ -1698,51 +1592,13 @@ class BatchBacktester:
     def _update_per_strategy_gdr(self, strategy: str, pnl: float) -> None:
         """Update per-strategy GDR after a trade closes.
 
-        Tracks cumulative PnL per strategy, computes strategy-specific drawdown
-        relative to initial capital, and assigns per-strategy GDR tiers based on
-        strategy-specific thresholds.
+        Delegates to the unified GDREngine for tier assignment.
 
         Args:
             strategy: Name of the strategy that just closed a trade.
             pnl: Dollar PnL of the closed trade.
         """
-        if strategy not in self._strategy_cumulative_pnl:
-            # Unknown strategy -- initialize on the fly
-            self._strategy_cumulative_pnl[strategy] = 0.0
-            self._strategy_peak_pnl[strategy] = 0.0
-            self._strategy_gdr_tier[strategy] = 0
-
-        self._strategy_cumulative_pnl[strategy] += pnl
-
-        # Update rolling peak PnL for this strategy
-        current_pnl = self._strategy_cumulative_pnl[strategy]
-        if current_pnl > self._strategy_peak_pnl[strategy]:
-            self._strategy_peak_pnl[strategy] = current_pnl
-
-        # Compute strategy drawdown as fraction of initial capital
-        peak_pnl = self._strategy_peak_pnl[strategy]
-        dd_dollars = peak_pnl - current_pnl
-        dd_pct = dd_dollars / self._initial_capital if self._initial_capital > 0 else 0.0
-        dd_pct = max(0.0, dd_pct)
-
-        # Look up strategy-specific thresholds
-        thresholds = _STRATEGY_GDR_THRESHOLDS.get(strategy, (0.04, 0.08))
-        tier1_dd, tier2_dd = thresholds
-
-        prev_tier = self._strategy_gdr_tier.get(strategy, 0)
-        if dd_pct > tier2_dd:
-            new_tier = 2
-        elif dd_pct > tier1_dd:
-            new_tier = 1
-        else:
-            new_tier = 0
-
-        self._strategy_gdr_tier[strategy] = new_tier
-        if new_tier != prev_tier:
-            logger.info(
-                "Per-strategy GDR [%s]: tier %d -> %d (DD=%.2f%%, peak_pnl=%.0f, cum_pnl=%.0f)",
-                strategy, prev_tier, new_tier, dd_pct * 100, peak_pnl, current_pnl,
-            )
+        self._gdr_engine.record_trade_pnl(strategy, pnl)
 
     def _update_portfolio_safety_net(self) -> None:
         """Check portfolio-level drawdown for safety net activation.
@@ -1816,16 +1672,13 @@ class BatchBacktester:
         stop_distance: float,
         gdr_risk_mult: float = 1.0,
         strategy: str | None = None,
+        direction: str = "long",
     ) -> int:
         """Calculate position size using ATR-based risk budgeting.
 
-        Risk formula: qty = risk_per_trade_$ / stop_distance_per_share.
-        Capped at max_position_pct of equity.  GDR tier reduces effective
-        risk percentage via gdr_risk_mult (e.g. 0.5 -> half the normal risk).
-
-        When per-strategy GDR is active and the portfolio safety net is engaged,
-        the safety net risk override takes precedence over both the per-strategy
-        base risk and the GDR multiplier.
+        Computes the effective risk percentage (accounting for regime, GDR,
+        and safety-net overrides) then delegates to PositionSizer for the
+        actual sizing math.
 
         Args:
             equity: Current portfolio equity.
@@ -1833,6 +1686,7 @@ class BatchBacktester:
             stop_distance: Dollar distance from entry to stop-loss.
             gdr_risk_mult: GDR-adjusted risk multiplier.
             strategy: Strategy name (for per-strategy base risk lookup).
+            direction: Trade direction, "long" or "short".
 
         Returns:
             Integer number of shares (0 if price or stop_distance is zero).
@@ -1840,30 +1694,49 @@ class BatchBacktester:
         if fill_price <= 0 or stop_distance <= 0:
             return 0
 
+        # Compute effective risk percentage (regime + GDR + safety net)
+        effective_risk_pct = self._compute_effective_risk(
+            gdr_risk_mult=gdr_risk_mult,
+            strategy=strategy,
+        )
+
+        # Delegate to unified PositionSizer
+        return self._position_sizer.calculate(
+            equity=equity,
+            price=fill_price,
+            stop_distance=stop_distance,
+            direction=direction,
+            risk_pct=effective_risk_pct,
+        )
+
+    def _compute_effective_risk(
+        self,
+        gdr_risk_mult: float,
+        strategy: str | None,
+    ) -> float:
+        """Compute effective per-trade risk fraction.
+
+        Handles regime-based allocation, per-strategy GDR multiplier,
+        portfolio safety net override, and legacy portfolio-level GDR.
+
+        Returns:
+            Effective risk as a fraction of equity (e.g. 0.02 = 2%).
+        """
         if self._use_per_strategy_gdr and self._portfolio_safety_net_active:
-            # Portfolio safety net overrides everything
-            effective_risk_pct = _PORTFOLIO_SAFETY_NET_RISK
-        elif self._use_per_strategy_gdr and strategy is not None:
-            # Regime-based risk: dynamic base_risk from allocation table
+            return _PORTFOLIO_SAFETY_NET_RISK
+
+        if self._use_per_strategy_gdr and strategy is not None:
             if hasattr(self, '_regime_classifier'):
                 regime = self._regime_classifier.confirmed_regime
                 alloc = RegimeClassifier.get_allocation(regime)
                 base_risk = alloc.get(strategy, _STRATEGY_BASE_RISK.get(strategy, _DEFAULT_BASE_RISK))
             else:
                 base_risk = _STRATEGY_BASE_RISK.get(strategy, _DEFAULT_BASE_RISK)
-            effective_risk_pct = base_risk * gdr_risk_mult
-        else:
-            # Legacy portfolio-level GDR
-            base_risk = _STRATEGY_BASE_RISK.get(strategy, _RISK_PER_TRADE_PCT) if strategy else _RISK_PER_TRADE_PCT
-            effective_risk_pct = base_risk * gdr_risk_mult
+            return base_risk * gdr_risk_mult
 
-        risk_per_trade = equity * effective_risk_pct
-        qty_by_risk = int(risk_per_trade / stop_distance)
-
-        max_by_position = int((equity * _MAX_POSITION_PCT) / fill_price)
-        qty = min(qty_by_risk, max_by_position)
-
-        return max(0, qty)
+        # Legacy portfolio-level GDR
+        base_risk = _STRATEGY_BASE_RISK.get(strategy, _RISK_PER_TRADE_PCT) if strategy else _RISK_PER_TRADE_PCT
+        return base_risk * gdr_risk_mult
 
     def _apply_slippage_to_fill(
         self,
