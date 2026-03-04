@@ -1,13 +1,13 @@
 """Lightweight data types for the unified trading core.
 
 These types are used by GDREngine, EntryConstraintChecker, UnifiedExitEngine,
-and PositionSizer to decouple from heavy domain objects (Position,
-HeldPosition, etc.).
+PositionSizer, ExitRuleEngine, PositionMonitor, and OpenPositionTracker to
+decouple from heavy domain objects (Position, etc.).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import date, datetime
 from enum import Enum, auto
 from typing import Literal
 
@@ -132,3 +132,141 @@ class ExitDecision:
     reason: str
     exit_price: float
     updated_context: ExitContext
+
+
+# ---------------------------------------------------------------------------
+# HeldPosition -- mutable runtime state for position monitoring
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HeldPosition:
+    """Runtime state for a position being monitored by PositionMonitor.
+
+    This is the primary mutable position representation used across the live
+    execution layer (ExitRuleEngine, PositionMonitor, EntryManager) and the
+    portfolio tracking layer (OpenPositionTracker).  It unifies the former
+    ``HeldPosition`` (execution) and ``TrackedPosition`` (portfolio) types
+    into a single class.
+
+    Attributes:
+        symbol: Ticker symbol.
+        strategy: Strategy that opened the position.
+        direction: "long" or "short".
+        entry_price: Actual fill price (NOT signal price).
+        entry_atr: ATR value at the time of entry (used to anchor SL/TP).
+        entry_date_et: Calendar date of entry in US/Eastern timezone.
+        bars_held: Number of daily bars elapsed since entry (incremented by
+            PositionMonitor on each new daily bar).
+        qty: Number of shares held.
+        highest_price: Highest price observed since entry (for trailing stop
+            and MFE calculation).
+        lowest_price: Lowest price observed since entry (for trailing stop
+            and MAE calculation).
+        consecutive_loss_bars: Counter for emergency -7% confirmation logic.
+        entry_adx: ADX value at entry time (for exit guards).
+    """
+
+    symbol: str
+    strategy: str
+    direction: Literal["long", "short"]
+    entry_price: float
+    entry_atr: float
+    entry_date_et: date
+    bars_held: int = 0
+    qty: float = 0.0
+    highest_price: float = 0.0
+    lowest_price: float = float("inf")
+    consecutive_loss_bars: int = 0
+    entry_adx: float = 0.0
+
+    # Optional datetime of entry, stored for backward compat with the
+    # former TrackedPosition.entry_time field.  Not required by the exit
+    # engine (which uses entry_date_et).  Will be removed in Wave 2.
+    _entry_time: datetime | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # Initialise price extremes from entry price when not explicitly set.
+        if self.highest_price == 0.0:
+            self.highest_price = self.entry_price
+        if self.lowest_price == float("inf"):
+            self.lowest_price = self.entry_price
+
+    def update_price_extremes(self, high: float, low: float) -> None:
+        """Update MFE/MAE tracking with new bar high/low."""
+        self.highest_price = max(self.highest_price, high)
+        self.lowest_price = min(self.lowest_price, low)
+
+    def update(self, high: float, low: float, close: float) -> None:
+        """Update with new bar data and increment bar count.
+
+        Backward-compatible method matching the former TrackedPosition
+        interface.  Delegates to ``update_price_extremes`` and increments
+        ``bars_held``.
+
+        Args:
+            high: Bar high price.
+            low: Bar low price.
+            close: Bar close price (reserved for future use).
+        """
+        self.update_price_extremes(high, low)
+        self.bars_held += 1
+
+    # ------------------------------------------------------------------
+    # Backward-compatible aliases (bridge until Wave 2 completes main.py
+    # migration from TrackedPosition field names to HeldPosition names).
+    # ------------------------------------------------------------------
+
+    @property
+    def entry_time(self) -> datetime | None:
+        """Alias for ``_entry_time`` (backward compat with TrackedPosition)."""
+        return self._entry_time
+
+    @entry_time.setter
+    def entry_time(self, value: datetime | None) -> None:
+        self._entry_time = value
+
+    @property
+    def bar_count(self) -> int:
+        """Alias for ``bars_held`` (backward compat with TrackedPosition)."""
+        return self.bars_held
+
+    @bar_count.setter
+    def bar_count(self, value: int) -> None:
+        self.bars_held = value
+
+    @property
+    def quantity(self) -> float:
+        """Alias for ``qty`` (backward compat with TrackedPosition)."""
+        return self.qty
+
+    @quantity.setter
+    def quantity(self, value: float) -> None:
+        self.qty = value
+
+    @property
+    def mfe(self) -> float:
+        """Maximum Favorable Excursion (best unrealized profit fraction).
+
+        For long positions: (highest - entry) / entry
+        For short positions: (entry - lowest) / entry
+        """
+        if self.entry_price <= 0:
+            return 0.0
+        if self.direction == "long":
+            return (self.highest_price - self.entry_price) / self.entry_price
+        else:  # short
+            return (self.entry_price - self.lowest_price) / self.entry_price
+
+    @property
+    def mae(self) -> float:
+        """Maximum Adverse Excursion (worst unrealized loss fraction).
+
+        For long positions: (entry - lowest) / entry
+        For short positions: (highest - entry) / entry
+        """
+        if self.entry_price <= 0:
+            return 0.0
+        if self.direction == "long":
+            return (self.entry_price - self.lowest_price) / self.entry_price
+        else:  # short
+            return (self.highest_price - self.entry_price) / self.entry_price

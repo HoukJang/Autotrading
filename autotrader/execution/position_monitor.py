@@ -20,7 +20,8 @@ from typing import Callable, Coroutine, Any
 from zoneinfo import ZoneInfo
 
 from autotrader.core.types import Bar, Timeframe
-from autotrader.execution.exit_rules import ExitRuleEngine, HeldPosition
+from autotrader.execution.exit_rules import ExitRuleEngine
+from autotrader.trading.types import HeldPosition
 from autotrader.execution.order_manager import OrderManager
 from autotrader.indicators.engine import IndicatorEngine
 

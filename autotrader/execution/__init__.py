@@ -1,7 +1,7 @@
 """Execution engine for batch+intraday hybrid trading architecture.
 
 This package contains:
-- OrderManager: wraps AlpacaAdapter for order lifecycle management
+- OrderManager: wraps BrokerAdapter for order lifecycle management
 - EntryManager: MOO and confirmation-window entry logic
 - ExitRuleEngine: SL/TP, time-based, and re-entry block logic
 - PositionMonitor: real-time position streaming and exit evaluation

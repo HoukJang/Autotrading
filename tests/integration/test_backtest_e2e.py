@@ -148,7 +148,7 @@ class TestAutoTraderE2E:
         assert app._indicator_engine is not None
         assert app._strategy_engine is not None
         assert app._risk_manager is not None
-        assert app._bus is not None
+        assert app._batch_pipeline is not None  # EventBus removed; batch pipeline replaces it
 
     async def test_autotrader_start_stop(self):
         from autotrader.main import AutoTrader

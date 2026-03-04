@@ -19,6 +19,8 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 from autotrader.broker.base import BrokerAdapter
+from autotrader.core.exceptions import BrokerError
+from autotrader.core.exceptions import ConnectionError as BrokerConnectionError
 from autotrader.core.types import AccountInfo, Bar, Order, OrderResult, Position, Timeframe
 
 logger = logging.getLogger(__name__)
@@ -38,9 +40,12 @@ class AlpacaAdapter(BrokerAdapter):
         self.connected = False
 
     async def connect(self) -> None:
-        self._client = TradingClient(self._api_key, self._secret_key, paper=self._paper)
-        self.connected = True
-        logger.info("Connected to Alpaca (paper=%s)", self._paper)
+        try:
+            self._client = TradingClient(self._api_key, self._secret_key, paper=self._paper)
+            self.connected = True
+            logger.info("Connected to Alpaca (paper=%s)", self._paper)
+        except Exception as exc:
+            raise BrokerConnectionError("Alpaca", str(exc)) from exc
 
     async def disconnect(self) -> None:
         if self._stream:
@@ -51,7 +56,7 @@ class AlpacaAdapter(BrokerAdapter):
 
     async def submit_order(self, order: Order) -> OrderResult:
         if self._client is None:
-            raise RuntimeError("AlpacaAdapter not connected. Call connect() first.")
+            raise BrokerError("AlpacaAdapter not connected. Call connect() first.")
         side = _SIDE_MAP[order.side]
         tif = _TIF_MAP.get(order.time_in_force, TimeInForce.DAY)
 
@@ -71,7 +76,10 @@ class AlpacaAdapter(BrokerAdapter):
         else:
             raise ValueError(f"Unsupported order type: {order.order_type}")
 
-        result: Any = self._client.submit_order(req)
+        try:
+            result: Any = self._client.submit_order(req)
+        except Exception as exc:
+            raise BrokerError(f"Failed to submit order for {order.symbol}: {exc}") from exc
         result = await self._wait_for_fill(result, order.order_type)
         return OrderResult(
             order_id=str(result.id),
@@ -87,7 +95,7 @@ class AlpacaAdapter(BrokerAdapter):
     ) -> Any:
         """Poll Alpaca until the order reaches a terminal state."""
         if self._client is None:
-            raise RuntimeError("AlpacaAdapter not connected. Call connect() first.")
+            raise BrokerError("AlpacaAdapter not connected. Call connect() first.")
         terminal = {"filled", "cancelled", "canceled", "expired", "rejected"}
         status = str(order_response.status).lower().replace("orderstatus.", "")
         if status in terminal:
@@ -115,7 +123,7 @@ class AlpacaAdapter(BrokerAdapter):
 
     async def cancel_order(self, order_id: str) -> bool:
         if self._client is None:
-            raise RuntimeError("AlpacaAdapter not connected. Call connect() first.")
+            raise BrokerError("AlpacaAdapter not connected. Call connect() first.")
         try:
             self._client.cancel_order_by_id(order_id)
             return True
@@ -125,8 +133,11 @@ class AlpacaAdapter(BrokerAdapter):
 
     async def get_positions(self) -> list[Position]:
         if self._client is None:
-            raise RuntimeError("AlpacaAdapter not connected. Call connect() first.")
-        raw: Any = self._client.get_all_positions()
+            raise BrokerError("AlpacaAdapter not connected. Call connect() first.")
+        try:
+            raw: Any = self._client.get_all_positions()
+        except Exception as exc:
+            raise BrokerError(f"Failed to get positions: {exc}") from exc
         return [
             Position(
                 symbol=p.symbol,
@@ -141,8 +152,11 @@ class AlpacaAdapter(BrokerAdapter):
 
     async def get_account(self) -> AccountInfo:
         if self._client is None:
-            raise RuntimeError("AlpacaAdapter not connected. Call connect() first.")
-        a: Any = self._client.get_account()
+            raise BrokerError("AlpacaAdapter not connected. Call connect() first.")
+        try:
+            a: Any = self._client.get_account()
+        except Exception as exc:
+            raise BrokerError(f"Failed to get account info: {exc}") from exc
         return AccountInfo(
             account_id=str(a.id),
             buying_power=float(a.buying_power),

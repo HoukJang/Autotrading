@@ -1,24 +1,34 @@
-"""Tests for position lifecycle tracking with MFE/MAE calculation."""
-from datetime import datetime
+"""Tests for position lifecycle tracking with MFE/MAE calculation.
+
+After the HeldPosition/TrackedPosition merge, TrackedPosition is a type alias
+for HeldPosition.  These tests validate the unified type retains both the
+execution-layer behaviour (price extremes, bars_held) and the portfolio-layer
+computed properties (mfe, mae).
+"""
+from datetime import date, datetime
 
 import pytest
 
 from autotrader.portfolio.position_tracker import OpenPositionTracker, TrackedPosition
+from autotrader.trading.types import HeldPosition
 
 
 class TestTrackedPosition:
-    """Unit tests for TrackedPosition dataclass and computed properties."""
+    """Unit tests for TrackedPosition (HeldPosition) dataclass and computed properties."""
+
+    ENTRY_DATE = date(2026, 1, 15)
 
     def _make_position(
         self, direction: str = "long", entry_price: float = 100.0
-    ) -> TrackedPosition:
-        return TrackedPosition(
+    ) -> HeldPosition:
+        return HeldPosition(
             symbol="AAPL",
             strategy="rsi_mean_reversion",
             direction=direction,
             entry_price=entry_price,
-            entry_time=datetime(2026, 1, 15, 9, 30),
-            quantity=10,
+            entry_atr=2.0,
+            entry_date_et=self.ENTRY_DATE,
+            qty=10,
             highest_price=entry_price,
             lowest_price=entry_price,
         )
@@ -87,6 +97,20 @@ class TestTrackedPosition:
         pos = self._make_position("short", entry_price=100.0)
         assert pos.mfe == pytest.approx(0.0)
         assert pos.mae == pytest.approx(0.0)
+
+    def test_tracked_position_is_held_position_alias(self):
+        """TrackedPosition should be an alias for HeldPosition."""
+        assert TrackedPosition is HeldPosition
+
+    def test_bar_count_and_quantity_aliases(self):
+        """bar_count and quantity should alias bars_held and qty."""
+        pos = self._make_position("long", entry_price=100.0)
+        assert pos.bar_count == pos.bars_held
+        assert pos.quantity == pos.qty
+        pos.bars_held = 5
+        assert pos.bar_count == 5
+        pos.bar_count = 7
+        assert pos.bars_held == 7
 
 
 class TestOpenPositionTracker:

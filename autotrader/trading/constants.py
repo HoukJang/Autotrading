@@ -35,6 +35,7 @@ MAX_PORTFOLIO_HEAT_PCT: float = 0.35    # max 35% of equity exposed (Iter 29)
 
 # ---------------------------------------------------------------------------
 # 2. Per-strategy position caps
+# SSOT: values here must match strategy/registry.py StrategyMeta declarations
 # ---------------------------------------------------------------------------
 
 MAX_STRATEGY_POSITIONS: dict[str, int] = {
@@ -45,6 +46,7 @@ DEFAULT_STRATEGY_CAP: int = 2            # fallback for unknown strategies
 
 # Soft per-strategy cap (same values, used by batch_simulator when
 # 2+ strategies have pending signals on the same day)
+# SSOT: values here must match strategy/registry.py StrategyMeta declarations
 SOFT_STRATEGY_CAP: dict[str, int] = {
     "breakout_momentum": 2,              # LOCKED (Iter 30 confirmed cap 3 worse)
     "rsi_mean_reversion": 4,             # Panel #31: expanded from 3
@@ -64,6 +66,7 @@ RISK_PER_TRADE_PCT: float = 0.02         # 2% of equity at risk per trade
 MAX_LOSS_PER_TRADE_PCT: float = 0.03     # hard cap: max 3% of equity loss per trade
 
 # Per-strategy base risk (overridden by regime allocation table)
+# SSOT: values here must match strategy/registry.py StrategyMeta declarations
 STRATEGY_BASE_RISK: dict[str, float] = {
     "breakout_momentum": 0.020,          # 2.0%
     "rsi_mean_reversion": 0.015,         # 1.5%
@@ -77,6 +80,7 @@ DEFAULT_BASE_RISK: float = 0.02          # fallback for unknown strategies
 PER_STRATEGY_GDR: bool = True            # True = per-strategy, False = portfolio-level
 
 # Per-strategy GDR thresholds: (tier1_dd, tier2_dd)
+# SSOT: values here must match strategy/registry.py StrategyMeta declarations
 STRATEGY_GDR_THRESHOLDS: dict[str, tuple[float, float]] = {
     "breakout_momentum": (0.04, 0.08),   # Tier1: 4% DD, Tier2: 8% DD (HALTED)
     "rsi_mean_reversion": (0.02, 0.04),  # Tier1: 2% DD, Tier2: 4% DD (HALTED)
@@ -135,6 +139,7 @@ EMERGENCY_LOSS_IMMEDIATE_PCT: float = 0.10   # -10%: immediate single-bar exit
 EMERGENCY_BARS_NEEDED: int = 2               # bars at -7% before triggering
 
 # Strategy-specific SL ATR multipliers (by direction)
+# SSOT: values here must match strategy/registry.py StrategyMeta declarations
 SL_ATR_MULT: dict[str, dict[str, float]] = {
     "rsi_mean_reversion": {"long": 1.5, "short": 0.75},
     "consecutive_down": {"long": 2.0},
@@ -144,6 +149,7 @@ SL_ATR_MULT: dict[str, dict[str, float]] = {
 }
 
 # Strategy-specific TP ATR multipliers (None = use indicator-based TP)
+# SSOT: values here must match strategy/registry.py StrategyMeta declarations
 TP_ATR_MULT: dict[str, float | None] = {
     "rsi_mean_reversion": None,
     "consecutive_down": None,
@@ -153,6 +159,7 @@ TP_ATR_MULT: dict[str, float | None] = {
 }
 
 # Strategy-specific max hold days
+# SSOT: values here must match strategy/registry.py StrategyMeta declarations
 MAX_HOLD_DAYS: dict[str, int] = {
     "breakout_momentum": 15,             # 3 weeks max for momentum strategy
     "rsi_mean_reversion": 5,
@@ -216,3 +223,84 @@ GROUP_B_STRATEGIES: frozenset[str] = frozenset()
 
 # Confirmation window gap tolerance (3 bps)
 GAP_TOLERANCE: float = 0.003
+
+
+# ---------------------------------------------------------------------------
+# 14. Registry sync validation
+# ---------------------------------------------------------------------------
+
+
+def validate_registry_sync() -> list[str]:
+    """Validate that StrategyMetaRegistry declarations match SSOT constants.
+
+    Returns a list of mismatch descriptions.  An empty list means all
+    registered strategies are in sync with the constants defined above.
+
+    This function performs a lazy import of the strategy modules to
+    ensure their self-registration code has executed before validation.
+    """
+    # Lazy import: trigger strategy module loading so self-registration runs
+    import autotrader.strategy.breakout_momentum  # noqa: F401
+    import autotrader.strategy.rsi_mean_reversion  # noqa: F401
+    from autotrader.strategy.registry import StrategyMetaRegistry
+
+    errors: list[str] = []
+
+    for name, meta in StrategyMetaRegistry.all_strategies().items():
+        # MAX_STRATEGY_POSITIONS
+        if name in MAX_STRATEGY_POSITIONS:
+            if MAX_STRATEGY_POSITIONS[name] != meta.max_positions:
+                errors.append(
+                    f"{name}: MAX_STRATEGY_POSITIONS={MAX_STRATEGY_POSITIONS[name]} "
+                    f"!= meta.max_positions={meta.max_positions}"
+                )
+
+        # SOFT_STRATEGY_CAP
+        if name in SOFT_STRATEGY_CAP:
+            if SOFT_STRATEGY_CAP[name] != meta.soft_cap:
+                errors.append(
+                    f"{name}: SOFT_STRATEGY_CAP={SOFT_STRATEGY_CAP[name]} "
+                    f"!= meta.soft_cap={meta.soft_cap}"
+                )
+
+        # STRATEGY_BASE_RISK
+        if name in STRATEGY_BASE_RISK:
+            if abs(STRATEGY_BASE_RISK[name] - meta.base_risk) > 1e-9:
+                errors.append(
+                    f"{name}: STRATEGY_BASE_RISK={STRATEGY_BASE_RISK[name]} "
+                    f"!= meta.base_risk={meta.base_risk}"
+                )
+
+        # STRATEGY_GDR_THRESHOLDS
+        if name in STRATEGY_GDR_THRESHOLDS:
+            if STRATEGY_GDR_THRESHOLDS[name] != meta.gdr_thresholds:
+                errors.append(
+                    f"{name}: STRATEGY_GDR_THRESHOLDS={STRATEGY_GDR_THRESHOLDS[name]} "
+                    f"!= meta.gdr_thresholds={meta.gdr_thresholds}"
+                )
+
+        # SL_ATR_MULT
+        if name in SL_ATR_MULT:
+            if SL_ATR_MULT[name] != meta.sl_atr_mult:
+                errors.append(
+                    f"{name}: SL_ATR_MULT={SL_ATR_MULT[name]} "
+                    f"!= meta.sl_atr_mult={meta.sl_atr_mult}"
+                )
+
+        # TP_ATR_MULT
+        if name in TP_ATR_MULT:
+            if TP_ATR_MULT[name] != meta.tp_atr_mult:
+                errors.append(
+                    f"{name}: TP_ATR_MULT={TP_ATR_MULT[name]} "
+                    f"!= meta.tp_atr_mult={meta.tp_atr_mult}"
+                )
+
+        # MAX_HOLD_DAYS
+        if name in MAX_HOLD_DAYS:
+            if MAX_HOLD_DAYS[name] != meta.max_hold_days:
+                errors.append(
+                    f"{name}: MAX_HOLD_DAYS={MAX_HOLD_DAYS[name]} "
+                    f"!= meta.max_hold_days={meta.max_hold_days}"
+                )
+
+    return errors

@@ -17,7 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from autotrader.core.types import Bar, OrderResult, Timeframe
-from autotrader.execution.exit_rules import ExitDecision, ExitRuleEngine, HeldPosition
+from autotrader.execution.exit_rules import ExitDecision, ExitRuleEngine
+from autotrader.trading.types import HeldPosition
 from autotrader.execution.position_monitor import PositionMonitor, MAX_POSITIONS
 
 

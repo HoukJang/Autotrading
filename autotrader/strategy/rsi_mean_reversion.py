@@ -262,3 +262,26 @@ class RsiMeanReversion(Strategy):
                 "exit_reason": exit_reason,
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# Self-registration: declare strategy constants in the metadata registry
+# ---------------------------------------------------------------------------
+
+from autotrader.strategy.registry import StrategyMetaRegistry, StrategyMeta  # noqa: E402
+
+StrategyMetaRegistry.register(
+    RsiMeanReversion,
+    StrategyMeta(
+        name="rsi_mean_reversion",
+        display_name="RSI Mean Reversion",
+        max_positions=4,
+        soft_cap=4,
+        base_risk=0.015,
+        sl_atr_mult={"long": 1.5, "short": 0.75},
+        tp_atr_mult=None,
+        max_hold_days=5,
+        gdr_thresholds=(0.02, 0.04),
+        entry_group="A",
+    ),
+)

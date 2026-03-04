@@ -1,8 +1,8 @@
-"""OrderManager: concrete order lifecycle management wrapping AlpacaAdapter.
+"""OrderManager: order lifecycle management wrapping a BrokerAdapter.
 
 Responsible for:
 - Submitting market and limit entry orders
-- Submitting stop-loss orders as Alpaca-side safety nets
+- Submitting stop-loss orders as broker-side safety nets
 - Polling for fill prices with retries
 - Cancelling stale/pending orders
 - Calculating realised PnL on position close
@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
 
-from autotrader.broker.alpaca_adapter import AlpacaAdapter
+from autotrader.broker.base import BrokerAdapter
+from autotrader.core.exceptions import OrderError
 from autotrader.core.types import Order, OrderResult
 
 logger = logging.getLogger("autotrader.execution.order_manager")
@@ -43,9 +44,9 @@ class ActiveOrder:
 
 
 class OrderManager:
-    """Manages the full order lifecycle via AlpacaAdapter.
+    """Manages the full order lifecycle via a BrokerAdapter.
 
-    This class provides a higher-level interface above the raw AlpacaAdapter
+    This class provides a higher-level interface above the raw broker adapter
     for the execution engine.  It handles:
     - Entry order submission (market / limit)
     - Stop-loss order submission after fill confirmation
@@ -54,10 +55,10 @@ class OrderManager:
     - Retry logic on transient errors
 
     Args:
-        adapter: Initialised and connected AlpacaAdapter instance.
+        adapter: Initialised and connected BrokerAdapter instance.
     """
 
-    def __init__(self, adapter: AlpacaAdapter) -> None:
+    def __init__(self, adapter: BrokerAdapter) -> None:
         self._adapter = adapter
         # Keyed by Alpaca order_id -> ActiveOrder
         self._active_orders: dict[str, ActiveOrder] = {}
@@ -129,11 +130,9 @@ class OrderManager:
                         result.order_id, result.status, attempt,
                     )
                     return result
-            except Exception:
-                logger.exception(
-                    "Entry order submission failed for %s (attempt %d/%d)",
-                    symbol, attempt, _MAX_RETRIES,
-                )
+            except Exception as exc:
+                err = OrderError(symbol, f"Entry submission failed (attempt {attempt}/{_MAX_RETRIES}): {exc}")
+                logger.error("%s", err)
                 if attempt < _MAX_RETRIES:
                     await asyncio.sleep(_RETRY_DELAY * attempt)
 
@@ -189,8 +188,9 @@ class OrderManager:
             if parent_order_id and parent_order_id in self._active_orders:
                 self._active_orders[parent_order_id].sl_order_id = result.order_id
             return result
-        except Exception:
-            logger.exception("Stop-loss submission failed for %s @ %.2f", symbol, stop_price)
+        except Exception as exc:
+            err = OrderError(symbol, f"Stop-loss submission failed @ {stop_price:.2f}: {exc}")
+            logger.error("%s", err)
             return None
 
     async def submit_exit(
@@ -243,11 +243,9 @@ class OrderManager:
                 # Remove from active orders tracking
                 self._evict_symbol(symbol)
                 return result
-            except Exception:
-                logger.exception(
-                    "Exit order submission failed for %s (attempt %d/%d)",
-                    symbol, attempt, _MAX_RETRIES,
-                )
+            except Exception as exc:
+                err = OrderError(symbol, f"Exit submission failed (attempt {attempt}/{_MAX_RETRIES}): {exc}")
+                logger.error("%s", err)
                 if attempt < _MAX_RETRIES:
                     await asyncio.sleep(_RETRY_DELAY * attempt)
 

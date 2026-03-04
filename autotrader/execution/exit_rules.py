@@ -25,7 +25,7 @@ from typing import Literal
 
 from autotrader.core.types import Bar
 from autotrader.trading.exit_engine import UnifiedExitEngine
-from autotrader.trading.types import ExitContext, PriceMode
+from autotrader.trading.types import ExitContext, HeldPosition, PriceMode
 from autotrader.trading.types import ExitDecision as _UnifiedExitDecision
 
 logger = logging.getLogger("autotrader.execution.exit_rules")
@@ -49,53 +49,11 @@ from autotrader.trading.constants import (
 )
 
 
-@dataclass
-class HeldPosition:
-    """Runtime state for a position being monitored by PositionMonitor.
-
-    This is the primary data carrier between ExitRuleEngine and
-    PositionMonitor.  All fields are mutable because they are updated
-    bar-by-bar.
-
-    Attributes:
-        symbol: Ticker symbol.
-        strategy: Strategy that opened the position.
-        direction: "long" or "short".
-        entry_price: Actual fill price (NOT signal price).
-        entry_atr: ATR value at the time of entry (used to anchor SL/TP).
-        entry_date_et: Calendar date of entry in US/Eastern timezone.
-        bars_held: Number of daily bars elapsed since entry (incremented by
-            PositionMonitor on each new daily bar).
-        qty: Number of shares held.
-        highest_price: Highest price observed since entry (for trailing stop).
-        lowest_price: Lowest price observed since entry (for trailing stop).
-        consecutive_loss_bars: Counter for emergency -7% confirmation logic.
-    """
-
-    symbol: str
-    strategy: str
-    direction: Literal["long", "short"]
-    entry_price: float
-    entry_atr: float
-    entry_date_et: date
-    bars_held: int = 0
-    qty: float = 0.0
-    highest_price: float = 0.0
-    lowest_price: float = float("inf")
-    consecutive_loss_bars: int = 0
-    entry_adx: float = 0.0
-
-    def __post_init__(self) -> None:
-        # Initialise price extremes from entry price when not explicitly set.
-        if self.highest_price == 0.0:
-            self.highest_price = self.entry_price
-        if self.lowest_price == float("inf"):
-            self.lowest_price = self.entry_price
-
-    def update_price_extremes(self, high: float, low: float) -> None:
-        """Update MFE/MAE tracking with new bar high/low."""
-        self.highest_price = max(self.highest_price, high)
-        self.lowest_price = min(self.lowest_price, low)
+# HeldPosition is imported from autotrader.trading.types and re-exported
+# from this module for backward compatibility.  All existing callers that
+# do ``from autotrader.execution.exit_rules import HeldPosition`` continue
+# to work without changes.
+# (see: from autotrader.trading.types import ... HeldPosition ... above)
 
 
 @dataclass(frozen=True)

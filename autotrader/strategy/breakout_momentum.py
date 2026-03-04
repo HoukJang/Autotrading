@@ -260,3 +260,26 @@ class BreakoutMomentum(Strategy):
             return None
 
         return current_vol / avg_vol
+
+
+# ---------------------------------------------------------------------------
+# Self-registration: declare strategy constants in the metadata registry
+# ---------------------------------------------------------------------------
+
+from autotrader.strategy.registry import StrategyMetaRegistry, StrategyMeta  # noqa: E402
+
+StrategyMetaRegistry.register(
+    BreakoutMomentum,
+    StrategyMeta(
+        name="breakout_momentum",
+        display_name="Breakout Momentum",
+        max_positions=2,
+        soft_cap=2,
+        base_risk=0.020,
+        sl_atr_mult={"long": 2.5},
+        tp_atr_mult=4.0,
+        max_hold_days=15,
+        gdr_thresholds=(0.04, 0.08),
+        entry_group="A",
+    ),
+)
