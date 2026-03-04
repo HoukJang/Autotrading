@@ -176,20 +176,20 @@ class TestDrawdownRecoveryAfterReset:
         assert rm.validate(close_signal, account_94k, positions=[]) is True
 
 
-class TestGetDrawdownProperty:
-    """test_get_drawdown_property - returns correct drawdown percentage."""
+class TestDrawdownProperty:
+    """test_drawdown_property - returns correct drawdown percentage."""
 
     def test_no_drawdown_at_peak(self, default_config):
         rm = RiskManager(default_config)
         rm.update_peak(100_000.0)
-        assert rm.get_drawdown == pytest.approx(0.0)
+        assert rm.drawdown == pytest.approx(0.0)
 
     def test_10pct_drawdown(self, default_config):
         rm = RiskManager(default_config)
         rm.update_peak(100_000.0)
         # Simulate equity dropping to 90k
         rm._current_equity = 90_000.0
-        assert rm.get_drawdown == pytest.approx(0.10)
+        assert rm.drawdown == pytest.approx(0.10)
 
     def test_drawdown_after_validate_updates(self, default_config):
         rm = RiskManager(default_config)
@@ -198,21 +198,21 @@ class TestGetDrawdownProperty:
 
         account_85k = _make_account(85_000.0)
         rm.validate(_make_long_signal(), account_85k, positions=[])
-        assert rm.get_drawdown == pytest.approx(0.15)
+        assert rm.drawdown == pytest.approx(0.15)
 
     def test_drawdown_zero_when_uninitialized(self, default_config):
         rm = RiskManager(default_config)
         # peak_equity is 0 at init, should return 0.0
-        assert rm.get_drawdown == pytest.approx(0.0)
+        assert rm.drawdown == pytest.approx(0.0)
 
     def test_drawdown_after_reset(self, default_config):
         rm = RiskManager(default_config)
         rm.update_peak(100_000.0)
         rm._current_equity = 90_000.0
-        assert rm.get_drawdown == pytest.approx(0.10)
+        assert rm.drawdown == pytest.approx(0.10)
 
         rm.reset_peak_equity(90_000.0)
-        assert rm.get_drawdown == pytest.approx(0.0)
+        assert rm.drawdown == pytest.approx(0.0)
 
 
 class TestPeakEquityUpdatesUpward:

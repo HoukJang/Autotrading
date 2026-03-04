@@ -24,14 +24,19 @@ class RiskManager:
         self._daily_pnl += pnl
 
     def reset_daily(self) -> None:
-        self._daily_pnl = 0.0
-
-    def reset_daily_pnl(self) -> None:
         """Reset daily PnL accumulator to zero.
 
         Called at the start of each trading day to begin fresh daily tracking.
         """
         self._daily_pnl = 0.0
+
+    def reset_daily_pnl(self) -> None:
+        """Reset daily PnL accumulator to zero.
+
+        .. deprecated::
+            Use :meth:`reset_daily` instead.  Kept for backward compatibility.
+        """
+        self.reset_daily()
 
     def reset_peak_equity(self, current_equity: float) -> None:
         """Reset peak equity to given value and clear daily PnL.
@@ -53,7 +58,7 @@ class RiskManager:
             self._peak_equity = equity
 
     @property
-    def get_drawdown(self) -> float:
+    def drawdown(self) -> float:
         """Return current drawdown as a percentage (0.0 to 1.0).
 
         Returns:

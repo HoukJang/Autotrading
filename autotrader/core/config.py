@@ -67,7 +67,7 @@ class RiskConfig(BaseModel):
 
     model_config = ConfigDict(use_enum_values=True)
 
-    max_position_pct: float = 0.10
+    max_position_pct: float = 0.25  # SSOT: trading/constants.py MAX_POSITION_PCT
     daily_loss_limit_pct: float = 0.02
     max_drawdown_pct: float = 0.15
     max_open_positions: int = 8

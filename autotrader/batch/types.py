@@ -6,7 +6,7 @@ modules to pass structured data through the pipeline stages.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -31,7 +31,7 @@ class ScanResult:
     signal_strength: float
     indicators: dict[str, float | dict | None] = field(default_factory=dict)
     prev_close: float = 0.0
-    scanned_at: datetime = field(default_factory=datetime.utcnow)
+    scanned_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

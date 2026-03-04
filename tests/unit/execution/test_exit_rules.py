@@ -1021,12 +1021,12 @@ class TestTimeBasedExit:
         assert "trend_pullback" not in _MAX_HOLD_DAYS
 
     def test_max_hold_days_constants_match_spec(self):
-        """MAX_HOLD_DAYS should match spec values (no BM time limit, Iter 29: no TP)."""
+        """MAX_HOLD_DAYS should match spec values (H-3: BM 15 days added)."""
+        assert _MAX_HOLD_DAYS["breakout_momentum"] == 15
         assert _MAX_HOLD_DAYS["rsi_mean_reversion"] == 5
         assert _MAX_HOLD_DAYS["consecutive_down"] == 5
         assert _MAX_HOLD_DAYS["ema_cross_trend"] == 10
         assert "trend_pullback" not in _MAX_HOLD_DAYS
-        assert "breakout_momentum" not in _MAX_HOLD_DAYS
         assert "volume_divergence" not in _MAX_HOLD_DAYS
         assert "ema_pullback" not in _MAX_HOLD_DAYS
         assert "adx_breakout" not in _MAX_HOLD_DAYS

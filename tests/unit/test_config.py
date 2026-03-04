@@ -117,7 +117,7 @@ def test_risk_config_defaults():
     """Test default risk configuration values."""
     from autotrader.core.config import RiskConfig
     risk_cfg = RiskConfig()
-    assert risk_cfg.max_position_pct == 0.10
+    assert risk_cfg.max_position_pct == 0.25  # aligned with trading/constants.py SSOT
     assert risk_cfg.daily_loss_limit_pct == 0.02
     assert risk_cfg.max_drawdown_pct == 0.15
     assert risk_cfg.max_open_positions == 8

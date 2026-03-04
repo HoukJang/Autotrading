@@ -21,7 +21,7 @@ import json
 import logging
 import os
 from collections import defaultdict, deque
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -506,7 +506,10 @@ class AutoTrader:
                     direction="long" if pos.side == "long" else "short",
                     entry_price=pos.avg_entry_price,
                     entry_atr=atr,
-                    entry_date_et=today_et,  # Conservative: treat as entry day
+                    # Use yesterday so SL/TP/trailing exit rules are fully
+                    # active immediately on restart, instead of being skipped
+                    # for the entire first day.
+                    entry_date_et=today_et - timedelta(days=1),
                     qty=pos.quantity,
                     highest_price=pos.avg_entry_price,
                     lowest_price=pos.avg_entry_price,
@@ -756,7 +759,7 @@ class AutoTrader:
     async def _on_daily_reset(self, today_et: date) -> None:
         """Reset daily state at 9:20 AM ET, before gap_filter and market open."""
         logger.info("Daily reset: %s", today_et)
-        self._risk_manager.reset_daily_pnl()
+        self._risk_manager.reset_daily()
         self._exit_rule_engine.on_new_trading_day(today_et)
         if self._entry_manager is not None:
             self._entry_manager.on_new_trading_day(today_et)
@@ -1342,7 +1345,8 @@ class AutoTrader:
                             strength=1.0,
                             metadata={"exit_reason": f"regime_{review.reason}"},
                         )
-                        asyncio.ensure_future(self._process_regime_close(close_sig))
+                        task = asyncio.create_task(self._process_regime_close(close_sig))
+                        task.add_done_callback(self._handle_task_exception)
 
             # Check event-driven rotation
             vix_value = None
@@ -1360,7 +1364,16 @@ class AutoTrader:
                 logger.info("Event-driven rotation triggered: %s", reason)
                 self._event_rotation.mark_triggered()
                 if self._rotation_manager is not None:
-                    asyncio.ensure_future(self._execute_event_rotation(reason))
+                    task = asyncio.create_task(self._execute_event_rotation(reason))
+                    task.add_done_callback(self._handle_task_exception)
+
+    def _handle_task_exception(self, task: asyncio.Task) -> None:
+        """Log exceptions from fire-and-forget background tasks."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error("Background task failed: %s", exc, exc_info=exc)
 
     async def _process_regime_close(self, signal: Signal) -> None:
         """Process a regime-triggered close signal."""
@@ -1614,11 +1627,11 @@ class AutoTrader:
                 if not spy_bars:
                     continue
                 existing_ts = {b.timestamp for b in self._daily_bar_history[proxy]}
-                new_count = sum(
-                    1 for b in spy_bars
-                    if b.timestamp not in existing_ts
-                    and not self._daily_bar_history[proxy].append(b)  # type: ignore[func-returns-value]
-                )
+                new_count = 0
+                for b in spy_bars:
+                    if b.timestamp not in existing_ts:
+                        self._daily_bar_history[proxy].append(b)
+                        new_count += 1
                 if new_count > 0:
                     self._initialize_regime_from_daily()
                     self._last_regime_update_date = today
@@ -1793,7 +1806,7 @@ class _PaperOrderManager(OrderManager):
         return None
 
     async def submit_exit(self, symbol, side, qty, order_type="market", limit_price=None):
-        """Delegate to PaperBroker submit_order."""
+        """Delegate to PaperBroker submit_order and evict from active orders."""
         order = Order(
             symbol=symbol,
             side=side,
@@ -1804,6 +1817,8 @@ class _PaperOrderManager(OrderManager):
         )
         try:
             result = await self._broker_adapter.submit_order(order)
+            # Clean up active order tracking to prevent memory leak
+            self._evict_symbol(symbol)
             return result
         except Exception:
             logger.exception("PaperBroker exit submission failed for %s", symbol)

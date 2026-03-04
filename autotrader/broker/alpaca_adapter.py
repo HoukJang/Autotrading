@@ -50,7 +50,8 @@ class AlpacaAdapter(BrokerAdapter):
         logger.info("Disconnected from Alpaca")
 
     async def submit_order(self, order: Order) -> OrderResult:
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError("AlpacaAdapter not connected. Call connect() first.")
         side = _SIDE_MAP[order.side]
         tif = _TIF_MAP.get(order.time_in_force, TimeInForce.DAY)
 
@@ -85,7 +86,8 @@ class AlpacaAdapter(BrokerAdapter):
         max_wait: float = 30.0, poll_interval: float = 0.5,
     ) -> Any:
         """Poll Alpaca until the order reaches a terminal state."""
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError("AlpacaAdapter not connected. Call connect() first.")
         terminal = {"filled", "cancelled", "canceled", "expired", "rejected"}
         status = str(order_response.status).lower().replace("orderstatus.", "")
         if status in terminal:
@@ -112,7 +114,8 @@ class AlpacaAdapter(BrokerAdapter):
         return self._client.get_order_by_id(order_id)
 
     async def cancel_order(self, order_id: str) -> bool:
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError("AlpacaAdapter not connected. Call connect() first.")
         try:
             self._client.cancel_order_by_id(order_id)
             return True
@@ -121,7 +124,8 @@ class AlpacaAdapter(BrokerAdapter):
             return False
 
     async def get_positions(self) -> list[Position]:
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError("AlpacaAdapter not connected. Call connect() first.")
         raw: Any = self._client.get_all_positions()
         return [
             Position(
@@ -136,7 +140,8 @@ class AlpacaAdapter(BrokerAdapter):
         ]
 
     async def get_account(self) -> AccountInfo:
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError("AlpacaAdapter not connected. Call connect() first.")
         a: Any = self._client.get_account()
         return AccountInfo(
             account_id=str(a.id),
@@ -171,12 +176,15 @@ class AlpacaAdapter(BrokerAdapter):
         client = StockHistoricalDataClient(self._api_key, self._secret_key)
 
         # Alpaca uses '.' for share class indicators (e.g., BRK.B not BRK-B)
-        symbols = [s.replace("-", ".") for s in symbols]
+        # Build mapping to convert keys back to caller's original format
+        original_to_converted = {s: s.replace("-", ".") for s in symbols}
+        converted_to_original = {v: k for k, v in original_to_converted.items()}
+        api_symbols = list(original_to_converted.values())
 
         result: dict[str, list[Bar]] = {}
         batch_size = 50
-        for i in range(0, len(symbols), batch_size):
-            batch = symbols[i : i + batch_size]
+        for i in range(0, len(api_symbols), batch_size):
+            batch = api_symbols[i : i + batch_size]
             try:
                 feed_enum = DataFeed.IEX if self._feed == "iex" else DataFeed.SIP
                 request = StockBarsRequest(
@@ -194,7 +202,8 @@ class AlpacaAdapter(BrokerAdapter):
                         continue
                     if not alpaca_bars:
                         continue
-                    result[sym] = [self._convert_bar(ab, timeframe=Timeframe.DAILY) for ab in alpaca_bars]
+                    original_sym = converted_to_original.get(sym, sym)
+                    result[original_sym] = [self._convert_bar(ab, timeframe=Timeframe.DAILY) for ab in alpaca_bars]
             except Exception:
                 logger.exception("Historical bars batch fetch failed")
         return result
@@ -205,8 +214,14 @@ class AlpacaAdapter(BrokerAdapter):
         self._loop = asyncio.get_running_loop()
 
         async def _bridge(alpaca_bar: Any) -> None:
-            bar = self._convert_bar(alpaca_bar, timeframe=Timeframe.MINUTE)
-            asyncio.run_coroutine_threadsafe(callback(bar), self._loop)
+            try:
+                bar = self._convert_bar(alpaca_bar, timeframe=Timeframe.MINUTE)
+                await callback(bar)
+            except Exception:
+                logger.exception(
+                    "Bar callback failed for %s",
+                    getattr(alpaca_bar, "symbol", "unknown"),
+                )
 
         self._stream.subscribe_bars(_bridge, *symbols)
 
@@ -218,8 +233,14 @@ class AlpacaAdapter(BrokerAdapter):
             return
 
         async def _bridge(alpaca_bar: Any) -> None:
-            bar = self._convert_bar(alpaca_bar, timeframe=Timeframe.MINUTE)
-            asyncio.run_coroutine_threadsafe(callback(bar), self._loop)
+            try:
+                bar = self._convert_bar(alpaca_bar, timeframe=Timeframe.MINUTE)
+                await callback(bar)
+            except Exception:
+                logger.exception(
+                    "Bar callback failed for %s",
+                    getattr(alpaca_bar, "symbol", "unknown"),
+                )
 
         self._stream.subscribe_bars(_bridge, *symbols)
         logger.info("Added bar subscription for %d symbols: %s", len(symbols), symbols)
@@ -234,5 +255,6 @@ class AlpacaAdapter(BrokerAdapter):
         logger.info("Removed bar subscription for %d symbols: %s", len(symbols), symbols)
 
     def run_stream(self) -> None:
-        assert self._stream is not None
+        if self._stream is None:
+            raise RuntimeError("AlpacaAdapter stream not initialized. Call connect() first.")
         self._stream.run()

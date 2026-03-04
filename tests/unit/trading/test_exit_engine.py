@@ -381,16 +381,37 @@ class TestTimeExit:
         decision = engine.evaluate(ctx, bar, indicators, TODAY, PriceMode.BAR_CLOSE)
         assert decision.should_exit is False
 
+    def test_bm_time_exit_at_15_days(self):
+        """BM should trigger time_exit after 15 trading days (H-3 fix)."""
+        engine = UnifiedExitEngine()
+        ctx = _ctx(strategy=STRATEGY_BM, direction="long",
+                    entry_price=100.0, entry_atr=2.0,
+                    bars_held=15)
+        bar = _bar(close=100.0)
+        decision = engine.evaluate(ctx, bar, {}, TODAY, PriceMode.BAR_CLOSE)
+        assert decision.should_exit is True
+        assert decision.reason == "time_exit"
+
+    def test_bm_no_time_exit_before_15_days(self):
+        """BM should NOT trigger time_exit before 15 trading days."""
+        engine = UnifiedExitEngine()
+        ctx = _ctx(strategy=STRATEGY_BM, direction="long",
+                    entry_price=100.0, entry_atr=2.0,
+                    bars_held=14)
+        bar = _bar(close=100.0)
+        decision = engine.evaluate(ctx, bar, {}, TODAY, PriceMode.BAR_CLOSE)
+        assert decision.should_exit is False
+
     def test_no_time_exit_for_strategy_without_limit(self):
         """Strategies not in MAX_HOLD_DAYS have no time limit."""
         engine = UnifiedExitEngine()
-        # BM is not in MAX_HOLD_DAYS
-        ctx = _ctx(strategy=STRATEGY_BM, direction="long",
+        # Use an unknown strategy name (not in MAX_HOLD_DAYS)
+        ctx = _ctx(strategy="unknown_strategy", direction="long",
                     entry_price=100.0, entry_atr=2.0,
                     bars_held=100)
         bar = _bar(close=100.0)
         decision = engine.evaluate(ctx, bar, {}, TODAY, PriceMode.BAR_CLOSE)
-        # BM has no time limit, and close=100 is above SL of 95
+        # Unknown strategy has no time limit, and close=100 is above SL of 98
         assert decision.should_exit is False
 
 

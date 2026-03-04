@@ -664,7 +664,7 @@ class TestResetSafety:
 
         await app._on_daily_reset(TRADE_DATE)
 
-        app._risk_manager.reset_daily_pnl.assert_called_once()
+        app._risk_manager.reset_daily.assert_called_once()
         app._exit_rule_engine.on_new_trading_day.assert_called_once_with(TRADE_DATE)
         app._entry_manager.on_new_trading_day.assert_called_once_with(TRADE_DATE)
         app._gdr_manager.reset_daily_entries.assert_called_once()

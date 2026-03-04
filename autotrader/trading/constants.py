@@ -154,6 +154,7 @@ TP_ATR_MULT: dict[str, float | None] = {
 
 # Strategy-specific max hold days
 MAX_HOLD_DAYS: dict[str, int] = {
+    "breakout_momentum": 15,             # 3 weeks max for momentum strategy
     "rsi_mean_reversion": 5,
     "consecutive_down": 5,
     "ema_cross_trend": 10,
