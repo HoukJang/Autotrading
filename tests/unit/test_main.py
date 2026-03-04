@@ -1186,6 +1186,218 @@ class TestBatchToEntryCandidateConversion:
         # Zero ATR must be replaced with safe default 1.0
         assert entry_cand.atr == 1.0
 
+    def test_conversion_includes_entry_atr_in_signal_metadata(self):
+        """entry_atr must be injected into Signal.metadata during conversion.
+
+        EntryManager._submit_broker_sl() relies on signal.metadata['entry_atr']
+        to place broker-side stop-loss orders.  Without it, the SL is skipped
+        with a WARNING.
+        """
+        from autotrader.main import _batch_to_entry_candidate
+
+        batch_cand = _make_batch_candidate(
+            indicators={"RSI_14": 60.0, "ADX_14": 30.0, "ATR_14": 5.2},
+            metadata={"entry_group": "MOO", "sub_strategy": "breakout_momentum_long"},
+        )
+
+        entry_cand = _batch_to_entry_candidate(batch_cand)
+
+        # entry_atr must be present in signal metadata
+        assert "entry_atr" in entry_cand.signal.metadata
+        assert entry_cand.signal.metadata["entry_atr"] == pytest.approx(5.2)
+        # entry_atr must match the candidate atr
+        assert entry_cand.signal.metadata["entry_atr"] == entry_cand.atr
+
+    def test_conversion_preserves_original_metadata_fields(self):
+        """Original strategy metadata fields must be preserved alongside entry_atr."""
+        from autotrader.main import _batch_to_entry_candidate
+
+        batch_cand = _make_batch_candidate(
+            indicators={"ATR_14": 3.5},
+            metadata={"sub_strategy": "breakout_momentum_long", "adx": 32.0},
+        )
+
+        entry_cand = _batch_to_entry_candidate(batch_cand)
+
+        # Original fields preserved
+        assert entry_cand.signal.metadata["sub_strategy"] == "breakout_momentum_long"
+        assert entry_cand.signal.metadata["adx"] == 32.0
+        # New field added
+        assert entry_cand.signal.metadata["entry_atr"] == pytest.approx(3.5)
+
+    def test_conversion_entry_atr_defaults_to_1_when_atr_missing(self):
+        """When ATR_14 is missing, entry_atr in metadata defaults to 1.0."""
+        from autotrader.main import _batch_to_entry_candidate
+
+        batch_cand = _make_batch_candidate(
+            indicators={"RSI_14": 55.0},  # No ATR_14
+        )
+
+        entry_cand = _batch_to_entry_candidate(batch_cand)
+
+        assert entry_cand.signal.metadata["entry_atr"] == pytest.approx(1.0)
+        assert entry_cand.atr == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Test: TradeLogger entry logging from _on_moo() and _on_confirmation_window()
+# ---------------------------------------------------------------------------
+
+
+class TestEntryTradeLogging:
+    """Verify that TradeLogger.log_trade() is called when EntryManager opens positions.
+
+    Issue: The v3 EntryManager path (_on_moo / _on_confirmation_window) was
+    not calling TradeLogger, so live_trades.jsonl had 0 entries.
+    """
+
+    @pytest.fixture()
+    def app_with_trade_logger(self):
+        """Create an AutoTrader with a mocked trade logger and entry manager."""
+        settings = Settings()
+        app = AutoTrader(settings)
+        # Mock trade logger
+        app._trade_logger = MagicMock()
+        app._trade_logger.log_trade = MagicMock()
+        app._trade_logger.log_equity = MagicMock()
+        # Mock broker
+        app._broker = AsyncMock()
+        app._broker.get_account = AsyncMock(return_value=AccountInfo(
+            account_id="test", buying_power=100000.0,
+            portfolio_value=100000.0, cash=100000.0, equity=100000.0,
+        ))
+        app._broker.get_positions = AsyncMock(return_value=[])
+        app._broker.add_bar_subscription = AsyncMock()
+        # Mock entry manager with a single filled position
+        from autotrader.execution.exit_rules import HeldPosition
+        held = HeldPosition(
+            symbol="NFLX",
+            strategy="breakout_momentum",
+            direction="long",
+            entry_price=96.77,
+            entry_atr=3.5,
+            entry_date_et=datetime(2026, 3, 3).date(),
+            bars_held=0,
+            qty=79.0,
+            highest_price=96.77,
+            lowest_price=96.77,
+        )
+        app._entry_manager = MagicMock()
+        app._entry_manager.execute_moo = AsyncMock(return_value=[held])
+        app._entry_manager.execute_confirmation = AsyncMock(return_value=[held])
+        # Mock position monitor and open position tracker
+        app._position_monitor = MagicMock()
+        app._open_position_tracker = MagicMock()
+        # Ensure regime is set
+        app._current_regime = MarketRegime.UNCERTAIN
+        return app
+
+    @pytest.mark.asyncio
+    async def test_moo_calls_trade_logger_for_entry(self, app_with_trade_logger):
+        """_on_moo() must call TradeLogger.log_trade() for each opened position."""
+        app = app_with_trade_logger
+
+        await app._on_moo()
+
+        app._trade_logger.log_trade.assert_called_once()
+        record = app._trade_logger.log_trade.call_args[0][0]
+        assert record.symbol == "NFLX"
+        assert record.strategy == "breakout_momentum"
+        assert record.direction == "long"
+        assert record.side == "buy"
+        assert record.quantity == 79.0
+        assert record.price == pytest.approx(96.77)
+        assert record.pnl == 0.0  # Entry has no PnL
+        assert record.metadata["entry_atr"] == pytest.approx(3.5)
+
+    @pytest.mark.asyncio
+    async def test_confirmation_calls_trade_logger_for_entry(self, app_with_trade_logger):
+        """_on_confirmation_window() must call TradeLogger.log_trade() for each opened position."""
+        app = app_with_trade_logger
+
+        await app._on_confirmation_window()
+
+        app._trade_logger.log_trade.assert_called_once()
+        record = app._trade_logger.log_trade.call_args[0][0]
+        assert record.symbol == "NFLX"
+        assert record.direction == "long"
+        assert record.side == "buy"
+
+    @pytest.mark.asyncio
+    async def test_moo_does_not_log_when_no_trade_logger(self):
+        """_on_moo() must not fail when trade logger is None."""
+        settings = Settings()
+        app = AutoTrader(settings)
+        app._trade_logger = None
+        app._broker = AsyncMock()
+        app._broker.get_account = AsyncMock(return_value=AccountInfo(
+            account_id="test", buying_power=100000.0,
+            portfolio_value=100000.0, cash=100000.0, equity=100000.0,
+        ))
+        app._broker.get_positions = AsyncMock(return_value=[])
+        app._broker.add_bar_subscription = AsyncMock()
+
+        from autotrader.execution.exit_rules import HeldPosition
+        held = HeldPosition(
+            symbol="AAPL", strategy="breakout_momentum", direction="long",
+            entry_price=150.0, entry_atr=2.0,
+            entry_date_et=datetime(2026, 3, 3).date(),
+            bars_held=0, qty=10.0, highest_price=150.0, lowest_price=150.0,
+        )
+        app._entry_manager = MagicMock()
+        app._entry_manager.execute_moo = AsyncMock(return_value=[held])
+        app._position_monitor = MagicMock()
+        app._open_position_tracker = MagicMock()
+        app._current_regime = MarketRegime.UNCERTAIN
+
+        # Should not raise
+        await app._on_moo()
+
+    @pytest.mark.asyncio
+    async def test_moo_logs_multiple_entries(self):
+        """When multiple positions are opened, each gets a trade log entry."""
+        settings = Settings()
+        app = AutoTrader(settings)
+        app._trade_logger = MagicMock()
+        app._trade_logger.log_trade = MagicMock()
+        app._trade_logger.log_equity = MagicMock()
+        app._broker = AsyncMock()
+        app._broker.get_account = AsyncMock(return_value=AccountInfo(
+            account_id="test", buying_power=100000.0,
+            portfolio_value=100000.0, cash=100000.0, equity=100000.0,
+        ))
+        app._broker.get_positions = AsyncMock(return_value=[])
+        app._broker.add_bar_subscription = AsyncMock()
+
+        from autotrader.execution.exit_rules import HeldPosition
+        held1 = HeldPosition(
+            symbol="NFLX", strategy="breakout_momentum", direction="long",
+            entry_price=96.0, entry_atr=3.0,
+            entry_date_et=datetime(2026, 3, 3).date(),
+            bars_held=0, qty=50.0, highest_price=96.0, lowest_price=96.0,
+        )
+        held2 = HeldPosition(
+            symbol="LMT", strategy="breakout_momentum", direction="long",
+            entry_price=670.0, entry_atr=12.0,
+            entry_date_et=datetime(2026, 3, 3).date(),
+            bars_held=0, qty=7.0, highest_price=670.0, lowest_price=670.0,
+        )
+        app._entry_manager = MagicMock()
+        app._entry_manager.execute_moo = AsyncMock(return_value=[held1, held2])
+        app._position_monitor = MagicMock()
+        app._open_position_tracker = MagicMock()
+        app._current_regime = MarketRegime.UNCERTAIN
+
+        await app._on_moo()
+
+        assert app._trade_logger.log_trade.call_count == 2
+        symbols_logged = [
+            call[0][0].symbol
+            for call in app._trade_logger.log_trade.call_args_list
+        ]
+        assert "NFLX" in symbols_logged
+        assert "LMT" in symbols_logged
+
 
 # ---------------------------------------------------------------------------
 # Test: GapFilter + SignalRanker integration in _on_gap_filter()

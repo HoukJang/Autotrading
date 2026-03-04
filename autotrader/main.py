@@ -159,20 +159,27 @@ def _batch_to_entry_candidate(batch_cand: BatchCandidate) -> EntryCandidate:
     ``Signal``).  This helper bridges the two representations.
     """
     sr = batch_cand.scan_result
+    atr = sr.indicators.get("ATR_14", 1.0)
+    if not isinstance(atr, (int, float)) or atr <= 0:
+        atr = 1.0
+    atr = float(atr)
+
+    # Merge strategy metadata with entry_atr so that EntryManager can
+    # place broker-side stop-loss orders using the actual ATR value.
+    merged_metadata = dict(sr.metadata)
+    merged_metadata["entry_atr"] = atr
+
     signal = Signal(
         strategy=sr.strategy,
         symbol=sr.symbol,
         direction=sr.direction,
         strength=sr.signal_strength,
-        metadata=sr.metadata,
+        metadata=merged_metadata,
     )
-    atr = sr.indicators.get("ATR_14", 1.0)
-    if not isinstance(atr, (int, float)) or atr <= 0:
-        atr = 1.0
     return EntryCandidate(
         signal=signal,
         prev_close=sr.prev_close,
-        atr=float(atr),
+        atr=atr,
         indicators=sr.indicators,
     )
 
@@ -906,6 +913,8 @@ class AutoTrader:
                     entry_time=datetime.now(timezone.utc),
                     quantity=held.qty,
                 )
+                # Log entry trade to live_trades.jsonl
+                await self._log_entry_trade(held, account)
 
             # Subscribe to minute bars for newly opened positions
             if new_symbols:
@@ -949,6 +958,8 @@ class AutoTrader:
                     entry_time=datetime.now(timezone.utc),
                     quantity=held.qty,
                 )
+                # Log entry trade to live_trades.jsonl
+                await self._log_entry_trade(held, account)
 
             # Subscribe to minute bars for newly opened positions
             if new_symbols:
@@ -1534,6 +1545,36 @@ class AutoTrader:
                     prices[symbol] = history[-1].close
 
         return prices
+
+    async def _log_entry_trade(self, held: Any, account: AccountInfo) -> None:
+        """Record an entry (open) trade in the trade logger.
+
+        Called from ``_on_moo()`` and ``_on_confirmation_window()`` after
+        a position has been successfully opened via EntryManager.
+
+        Args:
+            held: HeldPosition object from EntryManager.
+            account: Account snapshot at the time of entry.
+        """
+        if self._trade_logger is None:
+            return
+        try:
+            record = LiveTradeRecord(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                symbol=held.symbol,
+                strategy=held.strategy,
+                direction=held.direction,
+                side="buy" if held.direction == "long" else "sell",
+                quantity=held.qty,
+                price=held.entry_price,
+                pnl=0.0,
+                regime=self._current_regime.value,
+                equity_after=account.equity,
+                metadata={"entry_atr": held.entry_atr},
+            )
+            self._trade_logger.log_trade(record)
+        except Exception:
+            logger.exception("Trade log write failed for %s entry", held.symbol)
 
     async def _log_equity_snapshot(self) -> None:
         """Write an equity snapshot to the trade logger."""
