@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -54,16 +55,28 @@ class TradeLogger:
         self._equity_path = Path(equity_log_path)
 
     def log_trade(self, record: LiveTradeRecord) -> None:
-        """Append a trade record to the JSONL log."""
+        """Append a trade record to the JSONL log.
+
+        Uses flush + fsync to ensure data is durably persisted to disk,
+        preventing truncated lines on process crash.
+        """
         self._trade_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._trade_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(record)) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
     def log_equity(self, snapshot: EquitySnapshot) -> None:
-        """Append an equity snapshot to the JSONL log."""
+        """Append an equity snapshot to the JSONL log.
+
+        Uses flush + fsync to ensure data is durably persisted to disk,
+        preventing truncated lines on process crash.
+        """
         self._equity_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._equity_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(snapshot)) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
     def read_trades(self) -> list[LiveTradeRecord]:
         """Read all trade records, skipping corrupt lines.

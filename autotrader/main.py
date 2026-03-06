@@ -1211,7 +1211,24 @@ class AutoTrader:
                 )
                 self._trade_logger.log_trade(record)
             except Exception:
-                logger.exception("Trade log write failed for %s exit", symbol)
+                logger.exception(
+                    "Trade log write failed for %s exit -- CRITICAL TRADE DATA "
+                    "for manual recovery: symbol=%s, strategy=%s, direction=%s, "
+                    "qty=%.0f, fill_price=%.2f, pnl=%.2f, reason=%s, "
+                    "regime=%s, mfe=%.3f, mae=%.3f, bars_held=%d",
+                    symbol,
+                    symbol,
+                    held.strategy,
+                    held.direction,
+                    held.qty,
+                    fill_price,
+                    pnl,
+                    reason,
+                    self._current_regime.value,
+                    mfe,
+                    mae,
+                    bars_held,
+                )
 
         logger.info(
             "Exit recorded: %s, reason=%s, pnl=%.2f, mfe=%.3f, mae=%.3f, bars=%d",

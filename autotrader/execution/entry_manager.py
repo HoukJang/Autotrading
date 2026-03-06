@@ -534,6 +534,28 @@ class EntryManager:
         if result is None or result.status not in ("filled", "partially_filled"):
             return None
 
+        # Cancel remaining quantity on partial fills to prevent ghost positions
+        if result.status == "partially_filled":
+            logger.warning(
+                "Partial fill for %s: filled %.0f of %.0f -- "
+                "cancelling remaining to prevent ghost position",
+                signal.symbol, result.filled_qty, qty,
+            )
+            try:
+                cancel_ok = await self._order_manager.cancel_order(result.order_id)
+                if not cancel_ok:
+                    logger.warning(
+                        "Failed to cancel remaining order %s for %s -- "
+                        "residual fill may create ghost position at broker",
+                        result.order_id, signal.symbol,
+                    )
+            except Exception:
+                logger.exception(
+                    "Error cancelling partial order %s for %s -- "
+                    "residual fill may create ghost position at broker",
+                    result.order_id, signal.symbol,
+                )
+
         return _EntryResult(
             order_id=result.order_id,
             fill_price=result.filled_price,
@@ -557,8 +579,9 @@ class EntryManager:
             atr = signal.metadata.get("entry_atr", 0.0) if signal.metadata else 0.0
 
         if atr <= 0:
-            logger.warning(
-                "Cannot place broker SL for %s: no ATR available (metadata=%s)",
+            logger.error(
+                "BROKER SL FAILED for %s: no ATR available -- position has NO "
+                "intraday stop-loss protection (metadata=%s)",
                 signal.symbol,
                 signal.metadata,
             )
@@ -572,15 +595,28 @@ class EntryManager:
             sl_side = "buy"
 
         if stop_price <= 0:
+            logger.error(
+                "BROKER SL FAILED for %s: computed stop_price=%.2f <= 0 -- "
+                "position has NO intraday stop-loss protection "
+                "(fill=%.2f, mult=%.1f, atr=%.4f, direction=%s)",
+                signal.symbol, stop_price, fill_price, mult, atr, direction,
+            )
             return
 
-        await self._order_manager.submit_stop_loss(
+        sl_result = await self._order_manager.submit_stop_loss(
             symbol=signal.symbol,
             side=sl_side,
             qty=qty,
             stop_price=round(stop_price, 2),
             parent_order_id=order_id,
         )
+        if sl_result is None:
+            logger.error(
+                "BROKER SL FAILED for %s: order submission returned None -- "
+                "position has NO intraday stop-loss protection "
+                "(stop_price=%.2f, qty=%.0f, direction=%s)",
+                signal.symbol, stop_price, qty, direction,
+            )
 
     def _create_held_position(
         self,

@@ -554,8 +554,15 @@ class BatchPipelineOrchestrator:
                 current_date_et=today_et,
                 current_prices=current_prices,
             )
-            new_symbols = []
-            for held in new_positions:
+        except Exception:
+            logger.exception("Confirmation window execution failed")
+            return
+
+        # Phase 2: Record each position independently -- one failure must
+        # not block recording of the remaining positions
+        new_symbols: list[str] = []
+        for held in new_positions:
+            try:
                 host._held_positions[held.symbol] = held
                 host._position_strategy_map[held.symbol] = held.strategy
                 new_symbols.append(held.symbol)
@@ -571,14 +578,24 @@ class BatchPipelineOrchestrator:
                 )
                 # Log entry trade to live_trades.jsonl
                 await self._log_entry_trade(held, account)
+            except Exception:
+                logger.exception(
+                    "Failed to record confirmation position for %s "
+                    "(BROKER HAS POSITION - manual reconciliation needed)",
+                    held.symbol,
+                )
 
-            # Subscribe to minute bars for newly opened positions
-            if new_symbols:
+        # Phase 3: Post-recording housekeeping
+        if new_symbols:
+            try:
                 await broker.add_bar_subscription(new_symbols, host._on_bar)
                 logger.info("Confirmation entries: %d positions opened, subscribed: %s", len(new_positions), new_symbols)
                 await host._log_equity_snapshot()
-        except Exception:
-            logger.exception("Confirmation window execution failed")
+            except Exception:
+                logger.exception(
+                    "Failed post-confirmation housekeeping after recording %s",
+                    new_symbols,
+                )
 
     async def on_entry_window_close(self) -> None:
         """Discard unconfirmed Group B candidates at 10:00 AM ET."""
