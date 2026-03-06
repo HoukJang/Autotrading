@@ -404,10 +404,10 @@ class EntryManager:
         safety_net_active = False
         safety_net_entries_today = 0
         if self._gdr_manager is not None:
-            daily_strategy_entries = dict(self._gdr_manager._entries_today)
+            daily_strategy_entries = self._gdr_manager.entries_today
             gdr_tier = self._gdr_manager.get_tier(strategy_name)
             safety_net_active = self._gdr_manager.is_safety_net_active
-            safety_net_entries_today = self._gdr_manager._total_entries_today
+            safety_net_entries_today = self._gdr_manager.total_entries_today
 
         # Calculate portfolio heat = sum(abs(market_value) / equity)
         # This mirrors the backtest calculation in batch_simulator.py.

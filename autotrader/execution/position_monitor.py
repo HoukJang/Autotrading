@@ -27,11 +27,11 @@ from autotrader.indicators.engine import IndicatorEngine
 
 _ET = ZoneInfo("America/New_York")
 
-from autotrader.trading.constants import MAX_LONG_POSITIONS
+from autotrader.trading.constants import MAX_TOTAL_POSITIONS
 
 logger = logging.getLogger("autotrader.execution.position_monitor")
 
-MAX_POSITIONS: int = MAX_LONG_POSITIONS
+MAX_POSITIONS: int = MAX_TOTAL_POSITIONS
 
 
 # Callback type: called when a position is closed by exit rules.
@@ -322,6 +322,7 @@ class PositionMonitor:
 
         # Remove from monitoring
         del self._positions[symbol]
+        self._bar_history.pop(symbol, None)
 
         logger.info(
             "Position closed: %s %s, reason=%s, fill=%.2f, qty=%.0f, pnl=%.2f",

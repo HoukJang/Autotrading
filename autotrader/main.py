@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -323,6 +324,7 @@ class AutoTrader:
 
         self._bar_count: int = 0
         self._last_prices: dict[str, float] = {}  # symbol -> last bar close
+        self._last_dump_time: float = 0.0  # monotonic time of last _dump_open_positions
 
     def _set_regime(self, regime: MarketRegime) -> None:
         """Callback for HistoryManager to set the current regime."""
@@ -1366,8 +1368,8 @@ class AutoTrader:
                     refreshed = 0
                     for pos in positions:
                         # Derive current price from market_value / quantity
-                        if pos.quantity > 0 and pos.market_value > 0:
-                            current = pos.market_value / pos.quantity
+                        if pos.quantity > 0 and abs(pos.market_value) > 0:
+                            current = abs(pos.market_value) / pos.quantity
                             self._last_prices[pos.symbol] = current
                             refreshed += 1
                     logger.info(
@@ -1408,8 +1410,11 @@ class AutoTrader:
         self._open_position_tracker.update_prices(
             bar.symbol, bar.high, bar.low, bar.close,
         )
-        # Dump updated position data every bar so dashboard stays fresh
-        self._dump_open_positions()
+        # Dump updated position data at most once every 30s to limit I/O
+        _now = time.monotonic()
+        if _now - self._last_dump_time >= 30.0:
+            self._dump_open_positions()
+            self._last_dump_time = _now
 
         # Forward bar to PositionMonitor for exit evaluation
         if self._position_monitor is not None:

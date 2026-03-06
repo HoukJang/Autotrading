@@ -112,5 +112,13 @@ class GDRManager:
         """Expose realized PnL for backward compatibility (tests access this)."""
         return self._engine._realized_pnl
 
+    @property
+    def entries_today(self) -> dict[str, int]:
+        return dict(self._entries_today)
+
+    @property
+    def total_entries_today(self) -> int:
+        return self._total_entries_today
+
     def get_strategy_pnl(self, strategy: str) -> float:
         return self._cumulative_pnl.get(strategy, 0.0)
