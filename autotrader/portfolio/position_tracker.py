@@ -104,7 +104,7 @@ class OpenPositionTracker:
         """
         pos = self._positions.get(symbol)
         if pos is not None:
-            pos.update(high, low, close)
+            pos.update_price_extremes(high, low)
 
     def close_position(self, symbol: str) -> HeldPosition | None:
         """Remove and return the tracked position on close.

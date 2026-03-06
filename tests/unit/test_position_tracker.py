@@ -159,7 +159,9 @@ class TestOpenPositionTracker:
         assert closed.entry_price == 100.0
         assert closed.highest_price == 110.0
         assert closed.lowest_price == 95.0
-        assert closed.bar_count == 1
+        # update_prices only tracks MFE/MAE, not bars_held (bars_held
+        # is incremented by PositionMonitor on daily bar boundaries only)
+        assert closed.bar_count == 0
         assert closed.mfe == pytest.approx(0.10)
         assert closed.mae == pytest.approx(0.05)
 
@@ -234,7 +236,7 @@ class TestOpenPositionTracker:
         assert aapl is not None
         assert msft is not None
         assert aapl.highest_price == 110.0
-        assert aapl.bar_count == 1
+        assert aapl.bar_count == 0  # update_prices only tracks MFE/MAE, not bars_held
         # MSFT untouched
         assert msft.highest_price == 200.0
         assert msft.bar_count == 0

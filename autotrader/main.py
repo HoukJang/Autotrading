@@ -910,8 +910,12 @@ class AutoTrader:
             ", ".join(catchup_events),
         )
 
+        async def _refresh_and_push() -> None:
+            await self._refresh_daily_bars()
+            await self._push_daily_bars_to_monitor()
+
         event_handlers: dict[str, Any] = {
-            "daily_bar_refresh": self._refresh_daily_bars,
+            "daily_bar_refresh": _refresh_and_push,
             "daily_reset": lambda: self._on_daily_reset(today_et),
             "gap_filter": self._on_gap_filter,
             "moo": self._on_moo,
@@ -1067,6 +1071,8 @@ class AutoTrader:
             if h >= _DAILY_BAR_REFRESH_HOUR and (h > _DAILY_BAR_REFRESH_HOUR or m >= _DAILY_BAR_REFRESH_MINUTE) and _fired["daily_bar_refresh"] != today_et:
                 _fired["daily_bar_refresh"] = today_et
                 await self._refresh_daily_bars()
+                # Push latest daily bars to PositionMonitor for exit evaluation
+                await self._push_daily_bars_to_monitor()
                 _state.mark_fired("daily_bar_refresh")
                 _state.save(self._state_path)
 
@@ -1266,8 +1272,18 @@ class AutoTrader:
 
         # Write trade record
         if self._trade_logger is not None and held is not None:
+            # Fetch equity separately so broker API failure cannot skip trade log
+            equity_after = 0.0
             try:
                 account = await self._broker.get_account()
+                equity_after = account.equity
+            except Exception:
+                logger.warning(
+                    "get_account() failed during %s exit; using equity_after=0.0 "
+                    "as fallback -- trade log will still be written",
+                    symbol,
+                )
+            try:
                 record = LiveTradeRecord(
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     symbol=symbol,
@@ -1278,7 +1294,7 @@ class AutoTrader:
                     price=fill_price,
                     pnl=pnl,
                     regime=self._current_regime.value,
-                    equity_after=account.equity,
+                    equity_after=equity_after,
                     metadata={"exit_reason": reason},
                     exit_reason=reason,
                     mfe=mfe,
@@ -1705,6 +1721,44 @@ class AutoTrader:
         Delegates to HistoryManager.refresh_daily_bars().
         """
         await self._history_manager.refresh_daily_bars()
+
+    async def _push_daily_bars_to_monitor(self) -> None:
+        """Push latest daily bars to PositionMonitor for exit rule evaluation.
+
+        Called after _refresh_daily_bars() completes.  For each monitored
+        position, finds the most recent daily bar and forwards it to
+        PositionMonitor.on_bar() so exit rules (trailing SL, time exit,
+        take-profit, staged profit lock) are evaluated once per trading day.
+        """
+        if self._position_monitor is None:
+            return
+
+        monitored = self._position_monitor.monitored_symbols
+        if not monitored:
+            return
+
+        pushed = 0
+        for symbol in monitored:
+            daily_bars = self._daily_bar_history.get(symbol)
+            if not daily_bars:
+                continue
+            latest_bar = daily_bars[-1]
+            # Only push if bar has DAILY timeframe (should be true from REST)
+            if latest_bar.timeframe != Timeframe.DAILY:
+                continue
+            await self._position_monitor.on_bar(latest_bar)
+            pushed += 1
+
+            # Check if exit was triggered (position removed from tracking)
+            if symbol not in self._held_positions:
+                self._last_prices.pop(symbol, None)
+                self._dump_open_positions()
+
+        if pushed > 0:
+            logger.info(
+                "Pushed %d daily bar(s) to PositionMonitor for exit evaluation",
+                pushed,
+            )
 
     def _initialize_regime_from_daily(self) -> None:
         """Walk SPY daily bars to classify regime.

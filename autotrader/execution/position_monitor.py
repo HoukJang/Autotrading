@@ -238,14 +238,82 @@ class PositionMonitor:
             )
             return
 
-        fill_price = result.filled_price
-        fill_qty = result.filled_qty
+        total_filled_qty = result.filled_qty
+        # Weighted-average price accumulator: sum(price * qty) / total_qty
+        weighted_price_sum = result.filled_price * result.filled_qty
 
-        # Compute PnL
+        # ------------------------------------------------------------------
+        # Handle partial fills: submit follow-up market order for remainder
+        # ------------------------------------------------------------------
+        if result.status == "partially_filled" and result.filled_qty < position.qty:
+            remaining_qty = position.qty - result.filled_qty
+            logger.warning(
+                "PARTIAL FILL on exit for %s %s: filled %.0f of %.0f, "
+                "submitting follow-up market order for remaining %.0f shares",
+                position.direction, symbol,
+                result.filled_qty, position.qty, remaining_qty,
+            )
+
+            followup_result = await self._order_manager.submit_exit(
+                symbol=symbol,
+                side=exit_side,
+                qty=remaining_qty,
+                order_type="market",
+            )
+
+            if followup_result is not None and followup_result.filled_qty > 0:
+                weighted_price_sum += (
+                    followup_result.filled_price * followup_result.filled_qty
+                )
+                total_filled_qty += followup_result.filled_qty
+
+                if followup_result.status == "partially_filled":
+                    still_remaining = position.qty - total_filled_qty
+                    logger.critical(
+                        "FOLLOW-UP EXIT ALSO PARTIAL for %s %s: "
+                        "total filled %.0f of %.0f, %.0f shares STILL AT BROKER "
+                        "with NO stop-loss -- MANUAL INTERVENTION REQUIRED",
+                        position.direction, symbol,
+                        total_filled_qty, position.qty, still_remaining,
+                    )
+                else:
+                    logger.info(
+                        "Follow-up exit filled for %s: %.0f shares @ %.2f",
+                        symbol, followup_result.filled_qty,
+                        followup_result.filled_price,
+                    )
+            else:
+                still_remaining = position.qty - total_filled_qty
+                logger.critical(
+                    "FOLLOW-UP EXIT FAILED for %s %s: "
+                    "only %.0f of %.0f shares exited, %.0f shares STILL AT BROKER "
+                    "with NO stop-loss -- MANUAL INTERVENTION REQUIRED",
+                    position.direction, symbol,
+                    total_filled_qty, position.qty, still_remaining,
+                )
+
+            # If we could not exit ALL shares, do NOT remove from tracking.
+            # The position stays monitored so the next daily bar retries the exit.
+            if total_filled_qty < position.qty:
+                # Update position qty to reflect only the residual shares
+                position.qty = position.qty - total_filled_qty
+                logger.warning(
+                    "Residual position kept in monitoring: %s %s, %.0f shares remaining",
+                    position.direction, symbol, position.qty,
+                )
+                return
+
+        # Compute weighted average fill price across all fills
+        fill_price = (
+            weighted_price_sum / total_filled_qty if total_filled_qty > 0
+            else result.filled_price
+        )
+
+        # Compute PnL on the total filled quantity
         pnl = self._order_manager.calculate_pnl(
             entry_price=position.entry_price,
             exit_price=fill_price,
-            qty=fill_qty,
+            qty=total_filled_qty,
             direction=position.direction,
         )
 
@@ -256,8 +324,9 @@ class PositionMonitor:
         del self._positions[symbol]
 
         logger.info(
-            "Position closed: %s %s, reason=%s, fill=%.2f, pnl=%.2f",
-            position.direction, symbol, decision.reason, fill_price, pnl,
+            "Position closed: %s %s, reason=%s, fill=%.2f, qty=%.0f, pnl=%.2f",
+            position.direction, symbol, decision.reason,
+            fill_price, total_filled_qty, pnl,
         )
 
         # Notify registered callbacks
