@@ -9,6 +9,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
@@ -421,7 +422,7 @@ def compute_risk_metrics(
     reentry_blocks: list[str] = []
 
     if not data.trades_df.empty and "timestamp" in data.trades_df.columns:
-        today = date.today()
+        today = datetime.now(ZoneInfo("America/New_York")).date()
         today_mask = data.trades_df["timestamp"].dt.date == today
 
         if "side" in data.trades_df.columns:
@@ -602,7 +603,7 @@ def _compute_today_pnl(trades_df: pd.DataFrame) -> float:
     """
     realized = 0.0
     if not trades_df.empty and "timestamp" in trades_df.columns:
-        today = date.today()
+        today = datetime.now(ZoneInfo("America/New_York")).date()
         today_mask = trades_df["timestamp"].dt.date == today
         if "side" in trades_df.columns:
             exit_mask = today_mask & (trades_df["side"] == "exit")

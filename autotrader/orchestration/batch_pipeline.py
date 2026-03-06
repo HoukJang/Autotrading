@@ -413,8 +413,12 @@ class BatchPipelineOrchestrator:
             )
 
         try:
-            with open(results_path, "w", encoding="utf-8") as f:
+            tmp_path = results_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, results_path)
             logger.info("[PIPELINE] Successfully wrote gap_filter_status to batch_results.json")
         except OSError:
             logger.warning("[PIPELINE] Could not write gap status to batch_results.json")
@@ -450,8 +454,12 @@ class BatchPipelineOrchestrator:
             )
 
         try:
-            with open(results_path, "w", encoding="utf-8") as f:
+            tmp_path = results_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, results_path)
             logger.info(
                 "[PIPELINE] Marked %d candidates as skipped in batch_results.json",
                 len(candidates_list),

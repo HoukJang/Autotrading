@@ -803,6 +803,18 @@ class AutoTrader:
                 self._position_strategy_map[pos.symbol] = strategy
                 if self._position_monitor is not None:
                     self._position_monitor.add_position(held)
+                    # Seed PositionMonitor's per-symbol bar history from
+                    # warmup data so exit evaluation has indicator context
+                    # instead of falling back to default ATR on first bar.
+                    warmup_bars = self._bar_history.get(pos.symbol)
+                    if warmup_bars:
+                        pm_history = self._position_monitor._bar_history.get(pos.symbol)
+                        if pm_history is not None:
+                            pm_history.extend(warmup_bars)
+                            logger.debug(
+                                "Seeded PositionMonitor bar history for %s with %d warmup bars",
+                                pos.symbol, len(warmup_bars),
+                            )
                 self._open_position_tracker.add_position(held)
                 loaded_count += 1
 

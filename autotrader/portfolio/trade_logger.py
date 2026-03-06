@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -53,30 +54,35 @@ class TradeLogger:
     def __init__(self, trade_log_path: str, equity_log_path: str) -> None:
         self._trade_path = Path(trade_log_path)
         self._equity_path = Path(equity_log_path)
+        self._write_lock = threading.Lock()
 
     def log_trade(self, record: LiveTradeRecord) -> None:
         """Append a trade record to the JSONL log.
 
         Uses flush + fsync to ensure data is durably persisted to disk,
-        preventing truncated lines on process crash.
+        preventing truncated lines on process crash. A threading lock
+        serialises concurrent writes from different threads.
         """
         self._trade_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._trade_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(asdict(record)) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        with self._write_lock:
+            with open(self._trade_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(asdict(record)) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
 
     def log_equity(self, snapshot: EquitySnapshot) -> None:
         """Append an equity snapshot to the JSONL log.
 
         Uses flush + fsync to ensure data is durably persisted to disk,
-        preventing truncated lines on process crash.
+        preventing truncated lines on process crash. A threading lock
+        serialises concurrent writes from different threads.
         """
         self._equity_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._equity_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(asdict(snapshot)) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        with self._write_lock:
+            with open(self._equity_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(asdict(snapshot)) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
 
     def read_trades(self) -> list[LiveTradeRecord]:
         """Read all trade records, skipping corrupt lines.
