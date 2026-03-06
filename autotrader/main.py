@@ -1243,7 +1243,13 @@ class AutoTrader:
         self._position_strategy_map.pop(symbol, None)
 
         # Unsubscribe from minute bars for this symbol
-        await self._broker.remove_bar_subscription([symbol])
+        try:
+            await self._broker.remove_bar_subscription([symbol])
+        except Exception:
+            logger.warning(
+                "Failed to unsubscribe %s from bar stream; continuing exit flow",
+                symbol,
+            )
 
         # Update MFE/MAE tracker
         tracked = self._open_position_tracker.close_position(symbol)
@@ -1755,7 +1761,9 @@ class AutoTrader:
                 symbol = candidate.signal.symbol
                 # Use position market value if in position
                 if symbol in pos_by_symbol:
-                    prices[symbol] = pos_by_symbol[symbol].market_value / pos_by_symbol[symbol].quantity
+                    qty = pos_by_symbol[symbol].quantity
+                    if qty != 0:
+                        prices[symbol] = pos_by_symbol[symbol].market_value / qty
                     continue
                 # Use last known bar close
                 history = self._bar_history.get(symbol)
@@ -1763,36 +1771,6 @@ class AutoTrader:
                     prices[symbol] = history[-1].close
 
         return prices
-
-    async def _log_entry_trade(self, held: Any, account: AccountInfo) -> None:
-        """Record an entry (open) trade in the trade logger.
-
-        Called from ``_on_moo()`` and ``_on_confirmation_window()`` after
-        a position has been successfully opened via EntryManager.
-
-        Args:
-            held: HeldPosition object from EntryManager.
-            account: Account snapshot at the time of entry.
-        """
-        if self._trade_logger is None:
-            return
-        try:
-            record = LiveTradeRecord(
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                symbol=held.symbol,
-                strategy=held.strategy,
-                direction=held.direction,
-                side="buy" if held.direction == "long" else "sell",
-                quantity=held.qty,
-                price=held.entry_price,
-                pnl=0.0,
-                regime=self._current_regime.value,
-                equity_after=account.equity,
-                metadata={"entry_atr": held.entry_atr},
-            )
-            self._trade_logger.log_trade(record)
-        except Exception:
-            logger.exception("Trade log write failed for %s entry", held.symbol)
 
     @staticmethod
     def _is_us_market_hours() -> bool:
@@ -1884,10 +1862,10 @@ class AutoTrader:
         tmp = path.with_suffix(".tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(
-                _json.dumps(records, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(_json.dumps(records, indent=2) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(str(tmp), str(path))
         except OSError:
             logger.debug("Failed to dump open positions to %s", path)

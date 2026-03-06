@@ -95,10 +95,10 @@ class SchedulerState:
                 name: asdict(rec) for name, rec in self.events.items()
             },
         }
-        tmp_path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(str(tmp_path), str(path))
 
     # ------------------------------------------------------------------

@@ -446,6 +446,8 @@ class NightlyScanner:
             tmp_path = self._results_path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(result.to_dict(), f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             # Atomic rename to avoid partial writes being read by dashboard
             os.replace(tmp_path, self._results_path)
             logger.info("BatchResult saved to %s", self._results_path)
