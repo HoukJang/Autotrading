@@ -72,6 +72,35 @@ def _fmt_price(price: float | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Fallback price loader
+# ---------------------------------------------------------------------------
+
+def _load_fallback_prices() -> dict[str, float]:
+    """Load prev_close prices from batch_results.json as fallback.
+
+    Returns {symbol: prev_close} for all candidates in the latest scan.
+    Used when open_positions.json is empty (process not running).
+    """
+    try:
+        import json as _json
+        from pathlib import Path
+
+        path = Path("data/batch_results.json")
+        if not path.exists():
+            return {}
+        raw = _json.loads(path.read_text(encoding="utf-8"))
+        prices: dict[str, float] = {}
+        for c in raw.get("candidates", []):
+            sym = c.get("symbol", "")
+            pc = c.get("prev_close")
+            if sym and pc and pc > 0:
+                prices[sym] = float(pc)
+        return prices
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
 # Consolidated position data extraction (single source of truth)
 # ---------------------------------------------------------------------------
 
@@ -79,11 +108,16 @@ def _extract_position_data(
     symbol: str,
     trades_df: pd.DataFrame | None,
     live: dict | None = None,
+    fallback_prices: dict[str, float] | None = None,
 ) -> PositionDisplayData:
     """Extract and consolidate position data from trades_df and live tracker.
 
     This is the single source of truth for position data extraction,
     used by both the table view and the card view.
+
+    Args:
+        fallback_prices: {symbol: prev_close} from batch_results.json,
+            used when live tracker is unavailable.
     """
     data = PositionDisplayData(symbol=symbol)
 
@@ -220,10 +254,33 @@ def _extract_position_data(
                 except ValueError:
                     pass
     else:
-        # Fallback: when live tracker is unavailable, use entry_price as
-        # current_price so the card shows a value instead of "Price unavailable"
-        if data.current_price is None and data.entry_price is not None:
+        # Fallback: use batch_results prev_close or entry_price
+        fb_price = (fallback_prices or {}).get(symbol)
+        if fb_price and fb_price > 0:
+            data.current_price = fb_price
+        elif data.current_price is None and data.entry_price is not None:
             data.current_price = data.entry_price
+
+        # Compute P&L from available prices
+        if (
+            data.entry_price is not None
+            and data.current_price is not None
+            and data.quantity is not None
+        ):
+            dir_lower = data.direction.lower() if data.direction != "--" else "long"
+            if dir_lower == "long":
+                pnl = (data.current_price - data.entry_price) * data.quantity
+            else:
+                pnl = (data.entry_price - data.current_price) * data.quantity
+            cost = data.entry_price * data.quantity
+            pnl_pct = pnl / cost if cost > 0 else 0.0
+            data.unrealized_pnl = round(pnl, 2)
+            data.unrealized_pnl_pct = round(pnl_pct, 4)
+            # MFE/MAE unavailable without tracker
+            data.mfe_dollar = 0.0
+            data.mfe_pct = 0.0
+            data.mae_dollar = 0.0
+            data.mae_pct = 0.0
 
     # --- Phase 3: Compute derived fields ---
     today = date.today()
@@ -286,8 +343,11 @@ def render_position_panel(data) -> None:
         return
 
     live_pos = load_open_positions()
+    fallback_prices = _load_fallback_prices() if not live_pos else {}
     for symbol in positions:
-        _render_position_card(symbol, trades_df, live_pos.get(symbol))
+        _render_position_card(
+            symbol, trades_df, live_pos.get(symbol), fallback_prices,
+        )
 
 
 def render_positions_tab(data) -> None:
@@ -336,11 +396,14 @@ def _render_open_positions_table(
 ) -> None:
     """Render a detailed DataFrame table of open positions."""
     live_pos = load_open_positions()
+    fallback_prices = _load_fallback_prices()
     rows = []
     today = date.today()
 
     for symbol in positions:
-        row = _extract_position_row(symbol, trades_df, today, live_pos.get(symbol))
+        row = _extract_position_row(
+            symbol, trades_df, today, live_pos.get(symbol), fallback_prices,
+        )
         rows.append(row)
 
     if not rows:
@@ -367,22 +430,26 @@ def _extract_position_row(
     trades_df: pd.DataFrame | None,
     today: date,
     live: dict | None = None,
+    fallback_prices: dict[str, float] | None = None,
 ) -> dict:
     """Extract a single position row dict for the positions table.
 
     Delegates data extraction to _extract_position_data() and formats
     the result as a flat dict suitable for DataFrame rendering.
     """
-    data = _extract_position_data(symbol, trades_df, live)
+    data = _extract_position_data(symbol, trades_df, live, fallback_prices)
 
     # Determine data completeness status
     is_ghost = data.strategy == "--" and data.entry_price is None
     is_stale = data.strategy != "--" and data.current_price is None
+    is_estimate = live is None and data.unrealized_pnl is not None
 
     if is_ghost:
         status = "No Data"
     elif is_stale:
         status = "Stale"
+    elif is_estimate:
+        status = "Est."
     else:
         status = ""
 
@@ -417,8 +484,8 @@ def _extract_position_row(
         "R": r_display,
         "MFE": _fmt_dollar_pct(data.mfe_dollar, data.mfe_pct),
         "MAE": _fmt_dollar_pct(
-            -abs(data.mae_dollar) if data.mae_dollar else None,
-            -abs(data.mae_pct) if data.mae_pct else None,
+            -abs(data.mae_dollar) if data.mae_dollar is not None else None,
+            -abs(data.mae_pct) if data.mae_pct is not None else None,
         ),
         "Days": data.days_held,
     }
@@ -439,6 +506,8 @@ def _style_position_table(row: pd.Series) -> list[str]:
             )
         elif status_val == "Stale":
             styles[idx] = f"color: #E2C344; font-weight: bold"
+        elif status_val == "Est.":
+            styles[idx] = f"color: #8899AA; font-weight: bold"
 
     if "Dir" in row.index:
         idx = row.index.get_loc("Dir")
@@ -496,8 +565,19 @@ def _render_daily_pnl_with_unrealized(
         live_pos = {}
         unrealized = 0.0
 
+    # Fallback: compute unrealized from batch_results prev_close
     has_tracked_positions = len(live_pos) > 0
     has_known_positions = bool(current_positions)
+    if not has_tracked_positions and has_known_positions and trades_df is not None:
+        fb_prices = _load_fallback_prices()
+        if fb_prices:
+            for sym in current_positions:
+                fb = fb_prices.get(sym)
+                if fb is None:
+                    continue
+                sym_data = _extract_position_data(sym, trades_df, fallback_prices=fb_prices)
+                if sym_data.unrealized_pnl is not None:
+                    unrealized += sym_data.unrealized_pnl
 
     if unrealized != 0.0 or has_tracked_positions or today_str in daily_data:
         daily_data[today_str] = daily_data.get(today_str, 0.0) + unrealized
@@ -883,13 +963,18 @@ def _render_empty_state(trades_df) -> None:
     st.markdown(empty_html, unsafe_allow_html=True)
 
 
-def _render_position_card(symbol: str, trades_df, live: dict | None = None) -> None:
+def _render_position_card(
+    symbol: str,
+    trades_df,
+    live: dict | None = None,
+    fallback_prices: dict[str, float] | None = None,
+) -> None:
     """Render a single compact position card for the sidebar panel.
 
     Delegates data extraction to _extract_position_data() and focuses
     solely on HTML rendering.
     """
-    data = _extract_position_data(symbol, trades_df, live)
+    data = _extract_position_data(symbol, trades_df, live, fallback_prices)
 
     # Unpack for rendering convenience
     strategy_key = data.strategy_key
