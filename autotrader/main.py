@@ -572,16 +572,20 @@ class AutoTrader:
                 if isinstance(atr_raw, (int, float)) and atr_raw > 0:
                     atr = float(atr_raw)
 
+            # Use today as entry date for newly discovered positions
+            # (we don't know the actual broker fill date at this point)
+            # Initialize price extremes using current market price to capture MFE/MAE
+            current_price = (pos.market_value / pos.quantity) if pos.quantity > 0 else pos.avg_entry_price
             held = HeldPosition(
                 symbol=pos.symbol,
                 strategy="unknown",
                 direction="long" if pos.side == "long" else "short",
                 entry_price=pos.avg_entry_price,
                 entry_atr=atr,
-                entry_date_et=today_et - timedelta(days=1),
+                entry_date_et=today_et,
                 qty=pos.quantity,
-                highest_price=pos.avg_entry_price,
-                lowest_price=pos.avg_entry_price,
+                highest_price=max(pos.avg_entry_price, current_price),
+                lowest_price=min(pos.avg_entry_price, current_price),
             )
             self._held_positions[pos.symbol] = held
             self._position_strategy_map[pos.symbol] = "unknown"
@@ -668,6 +672,7 @@ class AutoTrader:
                             "direction": record.get("direction", "long"),
                             "entry_price": record.get("price"),
                             "metadata": record.get("metadata") or {},
+                            "timestamp": record.get("timestamp"),
                         }
                     elif side == "exit":
                         symbol_meta.pop(symbol, None)
@@ -768,12 +773,22 @@ class AutoTrader:
                         if isinstance(atr_raw, (int, float)) and atr_raw > 0:
                             atr = float(atr_raw)
 
-                # Restore entry_date from trades file if available
-                entry_date = today_et - timedelta(days=1)
-                cached_ts = cached.get("metadata", {}).get("entry_timestamp")
-                if not cached_ts:
-                    # Try timestamp from the trade record itself
-                    pass  # entry_date stays as yesterday (safe default)
+                # Restore entry_date from trades file or snapshot
+                entry_date = today_et - timedelta(days=1)  # safe default
+                trade_ts_str = cached.get("timestamp")
+                if trade_ts_str:
+                    try:
+                        trade_ts = datetime.fromisoformat(trade_ts_str)
+                        if trade_ts.tzinfo is None:
+                            trade_ts = trade_ts.replace(tzinfo=timezone.utc)
+                        entry_date = trade_ts.astimezone(_ET).date()
+                    except (ValueError, TypeError):
+                        pass  # keep safe default
+                elif saved.get("entry_date_et"):
+                    try:
+                        entry_date = date.fromisoformat(saved["entry_date_et"])
+                    except (ValueError, TypeError):
+                        pass  # keep safe default
 
                 # Restore highest/lowest from saved snapshot if available
                 saved = saved_positions.get(pos.symbol, {})
@@ -784,6 +799,11 @@ class AutoTrader:
                     restored_highest = pos.avg_entry_price
                 if restored_lowest > pos.avg_entry_price:
                     restored_lowest = pos.avg_entry_price
+
+                # Restore bar_count from snapshot (sanity: must be < 30 for daily bars)
+                restored_bar_count = saved.get("bar_count", 0)
+                if not isinstance(restored_bar_count, int) or restored_bar_count > 30:
+                    restored_bar_count = 0
 
                 held = HeldPosition(
                     symbol=pos.symbol,
@@ -796,10 +816,13 @@ class AutoTrader:
                     highest_price=restored_highest,
                     lowest_price=restored_lowest,
                 )
+                held.bars_held = restored_bar_count
                 if saved:
                     logger.info(
-                        "Restored MFE/MAE state for %s: highest=%.2f, lowest=%.2f",
+                        "Restored position state for %s: highest=%.2f, lowest=%.2f, "
+                        "bar_count=%d, entry_date=%s",
                         pos.symbol, restored_highest, restored_lowest,
+                        restored_bar_count, entry_date,
                     )
                 self._held_positions[pos.symbol] = held
                 self._position_strategy_map[pos.symbol] = strategy

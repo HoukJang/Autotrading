@@ -512,15 +512,8 @@ class BatchPipelineOrchestrator:
                 host._position_strategy_map[held.symbol] = held.strategy
                 if host._position_monitor is not None:
                     host._position_monitor.add_position(held)
-                # Register with MFE/MAE tracker
-                host._open_position_tracker.open_position(
-                    symbol=held.symbol,
-                    strategy=held.strategy,
-                    direction=held.direction,
-                    entry_price=held.entry_price,
-                    entry_time=datetime.now(timezone.utc),
-                    quantity=held.qty,
-                )
+                # Register with MFE/MAE tracker (use same object to avoid divergence)
+                host._open_position_tracker.add_position(held)
                 # Log entry trade to live_trades.jsonl
                 await self._log_entry_trade(held, account)
                 recorded_symbols.append(held.symbol)
