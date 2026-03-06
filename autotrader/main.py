@@ -58,14 +58,13 @@ from autotrader.portfolio.position_tracker import OpenPositionTracker
 from autotrader.portfolio.regime_detector import MarketRegime, RegimeDetector
 from autotrader.portfolio.regime_position_reviewer import RegimePositionReviewer
 from autotrader.portfolio.regime_tracker import RegimeTracker
-from autotrader.portfolio.tracker import PortfolioTracker
 from autotrader.portfolio.trade_logger import EquitySnapshot, LiveTradeRecord, TradeLogger
 from autotrader.risk.gdr_manager import GDRManager
 from autotrader.risk.manager import RiskManager
-from autotrader.risk.position_sizer import PositionSizer
 from autotrader.rotation.event_driven import EventDrivenRotation
 from autotrader.rotation.manager import RotationManager
 from autotrader.scheduling import StartupCatchUpResolver
+from autotrader.scheduling.state import SchedulerState
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
 from autotrader.strategy.breakout_momentum import BreakoutMomentum
@@ -184,6 +183,11 @@ _DAILY_BAR_REFRESH_MINUTE: int = 0
 _DAILY_RESET_HOUR: int = 9     # 9:20 AM ET (before gap_filter at 9:25)
 _DAILY_RESET_MINUTE: int = 20
 
+# Upper bound for market-sensitive events (gap filter, MOO, confirmation).
+# These events depend on live market data (pre-market prices, order execution)
+# and must NOT fire outside market hours.  16:00 ET = market close.
+_MARKET_SESSION_END_HOUR: int = 16
+
 
 class AutoTrader:
     """Batch+intraday hybrid AutoTrader.
@@ -222,7 +226,6 @@ class AutoTrader:
         self._indicator_engine = IndicatorEngine()
         self._strategy_engine = StrategyEngine()
         self._risk_manager = RiskManager(settings.risk)
-        self._position_sizer = PositionSizer(settings.risk)
 
         # --- Regime detection ---
         self._regime_detector = RegimeDetector()
@@ -245,7 +248,6 @@ class AutoTrader:
         )
 
         # --- Position tracking ---
-        self._portfolio_tracker: PortfolioTracker | None = None
         self._open_position_tracker = OpenPositionTracker()
         self._position_strategy_map: dict[str, str] = {}
 
@@ -316,9 +318,11 @@ class AutoTrader:
         self._scheduler_task: asyncio.Task | None = None
         self._batch_scheduler_task: asyncio.Task | None = None
         self._daily_regime_task: asyncio.Task | None = None
+        self._reconciliation_task: asyncio.Task | None = None
         self._last_regime_update_date: date | None = None
 
         self._bar_count: int = 0
+        self._last_prices: dict[str, float] = {}  # symbol -> last bar close
 
     def _set_regime(self, regime: MarketRegime) -> None:
         """Callback for HistoryManager to set the current regime."""
@@ -333,10 +337,17 @@ class AutoTrader:
         logger.info("Starting %s (v3 batch+intraday)", self._settings.system.name)
 
         await self._broker.connect()
+
+        # Cancel all pending orders from previous session to prevent
+        # stale orders (e.g., queued market orders) from filling unexpectedly
+        try:
+            cancelled = await self._broker.cancel_all_orders()
+            logger.info("Startup: cancelled %d pending orders", cancelled)
+        except Exception as e:
+            logger.warning("Startup: failed to cancel pending orders: %s", e)
+
         account = await self._broker.get_account()
         logger.info("Account equity: %.2f", account.equity)
-
-        self._portfolio_tracker = PortfolioTracker(account.equity)
 
         # GDR Manager: per-strategy drawdown response for live trading
         self._gdr_manager = GDRManager(
@@ -351,7 +362,8 @@ class AutoTrader:
         await self._warm_up_from_history()
 
         # Write initial equity snapshot so the dashboard has data immediately
-        if self._trade_logger is not None:
+        # (only during market hours to avoid after-hours price distortions)
+        if self._trade_logger is not None and self._is_us_market_hours():
             try:
                 positions = await self._broker.get_positions()
                 snap = EquitySnapshot(
@@ -366,6 +378,8 @@ class AutoTrader:
                 logger.info("Initial equity snapshot written: %.2f", account.equity)
             except Exception:
                 logger.exception("Failed to write initial equity snapshot")
+        elif self._trade_logger is not None:
+            logger.info("Skipping initial equity snapshot (outside market hours)")
 
         # Initialise v3 execution engine
         self._initialise_execution_engine()
@@ -388,19 +402,11 @@ class AutoTrader:
         held_symbols = list(self._held_positions.keys())
         if held_symbols:
             logger.info("Subscribing to minute bars for %d held positions: %s", len(held_symbols), held_symbols)
-            await self._broker.subscribe_bars(held_symbols, self._on_bar)
-            if hasattr(self._broker, "run_stream"):
-                self._stream_task = asyncio.create_task(
-                    asyncio.to_thread(self._broker.run_stream)
-                )
         else:
-            logger.info("No held positions; minute bar stream not started (will start on first entry)")
-            # Initialize stream with empty subscription so it's ready for dynamic adds
-            await self._broker.subscribe_bars([], self._on_bar)
-            if hasattr(self._broker, "run_stream"):
-                self._stream_task = asyncio.create_task(
-                    asyncio.to_thread(self._broker.run_stream)
-                )
+            logger.info("No held positions; initializing stream with empty subscription")
+        await self._broker.subscribe_bars(held_symbols, self._on_bar)
+        if hasattr(self._broker, "run_stream"):
+            self._stream_task = asyncio.create_task(self._run_stream_with_retry())
 
         # Start batch+intraday scheduler
         self._batch_scheduler_task = asyncio.create_task(self._batch_intraday_scheduler())
@@ -423,6 +429,7 @@ class AutoTrader:
 
         # Cancel all background tasks
         for task_attr in (
+            "_reconciliation_task",
             "_daily_regime_task",
             "_batch_scheduler_task",
             "_scheduler_task",
@@ -474,27 +481,255 @@ class AutoTrader:
 
         logger.info("V3 execution engine initialised")
 
-    async def _load_existing_positions(self) -> None:
-        """Re-register any open positions from a previous session into PositionMonitor."""
+    async def _reconcile_positions(self, *, source: str = "startup") -> None:
+        """Compare broker positions with internal tracking and reconcile gaps.
+
+        Detects two types of discrepancies:
+        1. Broker-only positions: exist at the broker but not tracked internally.
+           These are registered into HeldPosition, PositionMonitor, and
+           OpenPositionTracker so they receive exit management.
+        2. Tracker-only positions: tracked internally but absent from the broker.
+           These are logged as WARNINGs but NOT automatically removed, since
+           they may represent a transient API delay.
+
+        A LiveTradeRecord with side="reconciliation_entry" is logged for each
+        newly discovered broker-only position.
+
+        Args:
+            source: Label for log messages ("startup" or "post_moo").
+        """
+        positions = await self._broker.get_positions()
+        broker_symbols = {pos.symbol for pos in positions} if positions else set()
+
+        tracked_symbols = set(self._open_position_tracker.open_symbols)
+
+        # --- Broker-only positions: register into internal tracking ---
+        untracked = broker_symbols - tracked_symbols
+        if untracked:
+            logger.warning(
+                "RECONCILIATION[%s]: %d broker position(s) NOT in internal tracking: %s. "
+                "Loading into monitor with strategy='unknown'.",
+                source, len(untracked), sorted(untracked),
+            )
+
+        # --- Tracker-only positions: warn but do not auto-remove ---
+        orphaned = tracked_symbols - broker_symbols
+        if orphaned:
+            logger.warning(
+                "RECONCILIATION[%s]: %d internal position(s) NOT at broker: %s. "
+                "These may indicate a missed fill or API delay. "
+                "NOT auto-removing -- manual review recommended.",
+                source, len(orphaned), sorted(orphaned),
+            )
+
+        if not untracked:
+            return
+
+        today_et = datetime.now(timezone.utc).astimezone(_ET).date()
+        account = await self._broker.get_account()
+
+        for pos in positions:
+            if pos.symbol not in untracked:
+                continue
+
+            logger.warning(
+                "RECONCILIATION[%s]: loading untracked position %s "
+                "(qty=%.0f, side=%s, entry=%.2f) with strategy='unknown'",
+                source, pos.symbol, pos.quantity, pos.side, pos.avg_entry_price,
+            )
+
+            # Use ATR from indicator history if available
+            history = self._bar_history.get(pos.symbol)
+            atr = 1.0
+            if history and len(history) >= 14:
+                indicators = self._indicator_engine.compute(history)
+                atr_raw = indicators.get("ATR_14")
+                if isinstance(atr_raw, (int, float)) and atr_raw > 0:
+                    atr = float(atr_raw)
+
+            held = HeldPosition(
+                symbol=pos.symbol,
+                strategy="unknown",
+                direction="long" if pos.side == "long" else "short",
+                entry_price=pos.avg_entry_price,
+                entry_atr=atr,
+                entry_date_et=today_et - timedelta(days=1),
+                qty=pos.quantity,
+                highest_price=pos.avg_entry_price,
+                lowest_price=pos.avg_entry_price,
+            )
+            self._held_positions[pos.symbol] = held
+            self._position_strategy_map[pos.symbol] = "unknown"
+            if self._position_monitor is not None:
+                self._position_monitor.add_position(held)
+            self._open_position_tracker.add_position(held)
+
+            # Log reconciliation entry trade record
+            if self._trade_logger is not None:
+                try:
+                    record = LiveTradeRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        symbol=pos.symbol,
+                        strategy="unknown",
+                        direction="long" if pos.side == "long" else "short",
+                        side="reconciliation_entry",
+                        quantity=pos.quantity,
+                        price=pos.avg_entry_price,
+                        pnl=0.0,
+                        regime=self._current_regime.value,
+                        equity_after=account.equity,
+                        metadata={"reconciliation_source": source},
+                    )
+                    self._trade_logger.log_trade(record)
+                except Exception:
+                    logger.exception(
+                        "Trade log write failed for reconciliation entry %s",
+                        pos.symbol,
+                    )
+
+            # Subscribe to minute bars for the newly discovered position
+            if source != "startup":
+                try:
+                    await self._broker.add_bar_subscription(
+                        [pos.symbol], self._on_bar,
+                    )
+                    logger.info(
+                        "RECONCILIATION[%s]: subscribed to minute bars for %s",
+                        source, pos.symbol,
+                    )
+                except Exception:
+                    logger.exception(
+                        "RECONCILIATION[%s]: failed to subscribe bars for %s",
+                        source, pos.symbol,
+                    )
+
+        self._dump_open_positions()
+
+    def _restore_strategy_map_from_trades(self) -> None:
+        """Restore _position_strategy_map from live_trades.jsonl on startup.
+
+        Reads entry/exit records to determine which positions are currently
+        open and what their strategy + metadata was.  This ensures that
+        positions loaded from the broker have correct strategy assignments
+        instead of 'unknown'.
+        """
+        import json as _json
+
+        trades_path = Path("data/live_trades.jsonl")
+        if not trades_path.exists():
+            logger.debug("No live_trades.jsonl found for strategy map restoration")
+            return
+
+        symbol_meta: dict[str, dict] = {}
         try:
-            positions = await self._broker.get_positions()
-            if not positions:
-                return
+            with open(trades_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = _json.loads(line)
+                    except (ValueError, _json.JSONDecodeError):
+                        continue
 
-            account = await self._broker.get_account()
-            logger.info("Loading %d existing open positions into monitor", len(positions))
+                    side = record.get("side", "")
+                    symbol = record.get("symbol", "")
+                    if not symbol:
+                        continue
 
-            today_et = datetime.now(timezone.utc).astimezone(_ET).date()
-            for pos in positions:
+                    if side in ("entry", "reconciliation_entry"):
+                        symbol_meta[symbol] = {
+                            "strategy": record.get("strategy", "unknown"),
+                            "direction": record.get("direction", "long"),
+                            "entry_price": record.get("price"),
+                            "metadata": record.get("metadata") or {},
+                        }
+                    elif side == "exit":
+                        symbol_meta.pop(symbol, None)
+        except OSError:
+            logger.warning("Failed to read live_trades.jsonl for strategy restoration")
+            return
+
+        if symbol_meta:
+            for sym, meta in symbol_meta.items():
+                strategy = meta["strategy"]
+                if strategy and strategy != "unknown":
+                    self._position_strategy_map[sym] = strategy
+            logger.info(
+                "Restored strategy map for %d symbols from trades: %s",
+                len(symbol_meta),
+                {s: m["strategy"] for s, m in symbol_meta.items()},
+            )
+        self._trades_meta_cache = symbol_meta
+
+    async def _load_existing_positions(self) -> None:
+        """Re-register any open positions from a previous session into PositionMonitor.
+
+        Three-phase approach:
+          Phase 0 - Restore strategy map from live_trades.jsonl.
+          Phase 1 - Fetch positions from broker (with 1 retry).
+          Phase 2 - Per-position registration (individual failures don't block others).
+          Phase 3 - Post-registration setup (dump state + start monitor).
+        """
+        # Phase 0: Restore strategy map from trades file
+        self._restore_strategy_map_from_trades()
+
+        # Phase 1: Fetch from broker with retry
+        positions = None
+        for attempt in range(2):
+            try:
+                positions = await self._broker.get_positions()
+                break
+            except Exception:
+                if attempt == 0:
+                    logger.warning(
+                        "Broker position fetch failed, retrying in 5s..."
+                    )
+                    await asyncio.sleep(5)
+                else:
+                    logger.exception(
+                        "Broker position fetch failed after retry"
+                    )
+                    return
+
+        if not positions:
+            logger.info("No existing positions at broker")
+            self._dump_open_positions()  # Clear stale file
+            return
+
+        logger.info("Loading %d existing open positions into monitor", len(positions))
+
+        # Phase 2: Per-position registration
+        # For startup, pre-register ALL broker positions (not just untracked)
+        # because no positions are tracked yet at startup.
+        today_et = datetime.now(timezone.utc).astimezone(_ET).date()
+        loaded_count = 0
+        trades_cache = getattr(self, "_trades_meta_cache", {})
+        for pos in positions:
+            try:
                 strategy = self._position_strategy_map.get(pos.symbol, "unknown")
-                # Use ATR from indicator history if available
-                history = self._bar_history.get(pos.symbol)
+
+                # Restore ATR from trades metadata cache (Phase 0),
+                # fall back to indicator history, then default 1.0
+                cached = trades_cache.get(pos.symbol, {})
+                cached_meta = cached.get("metadata", {})
                 atr = 1.0
-                if history and len(history) >= 14:
-                    indicators = self._indicator_engine.compute(history)
-                    atr_raw = indicators.get("ATR_14")
-                    if isinstance(atr_raw, (int, float)) and atr_raw > 0:
-                        atr = float(atr_raw)
+                if cached_meta.get("entry_atr"):
+                    atr = float(cached_meta["entry_atr"])
+                else:
+                    history = self._bar_history.get(pos.symbol)
+                    if history and len(history) >= 14:
+                        indicators = self._indicator_engine.compute(history)
+                        atr_raw = indicators.get("ATR_14")
+                        if isinstance(atr_raw, (int, float)) and atr_raw > 0:
+                            atr = float(atr_raw)
+
+                # Restore entry_date from trades file if available
+                entry_date = today_et - timedelta(days=1)
+                cached_ts = cached.get("metadata", {}).get("entry_timestamp")
+                if not cached_ts:
+                    # Try timestamp from the trade record itself
+                    pass  # entry_date stays as yesterday (safe default)
 
                 held = HeldPosition(
                     symbol=pos.symbol,
@@ -502,39 +737,85 @@ class AutoTrader:
                     direction="long" if pos.side == "long" else "short",
                     entry_price=pos.avg_entry_price,
                     entry_atr=atr,
-                    # Use yesterday so SL/TP/trailing exit rules are fully
-                    # active immediately on restart, instead of being skipped
-                    # for the entire first day.
-                    entry_date_et=today_et - timedelta(days=1),
+                    entry_date_et=entry_date,
                     qty=pos.quantity,
                     highest_price=pos.avg_entry_price,
                     lowest_price=pos.avg_entry_price,
                 )
                 self._held_positions[pos.symbol] = held
+                self._position_strategy_map[pos.symbol] = strategy
                 if self._position_monitor is not None:
                     self._position_monitor.add_position(held)
+                self._open_position_tracker.add_position(held)
+                loaded_count += 1
 
-            # Subscribe to minute bars for held positions
-            if held_symbols := list(self._held_positions.keys()):
-                await self._broker.add_bar_subscription(held_symbols, self._on_bar)
-                logger.info("Subscribed to minute bars for %d existing positions", len(held_symbols))
+                # Auto-write reconciliation_entry for positions missing from trade log
+                if pos.symbol not in trades_cache and self._trade_logger is not None:
+                    try:
+                        account = await self._broker.get_account()
+                        record = LiveTradeRecord(
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            symbol=pos.symbol,
+                            strategy=strategy,
+                            direction="long" if pos.side == "long" else "short",
+                            side="reconciliation_entry",
+                            quantity=pos.quantity,
+                            price=pos.avg_entry_price,
+                            pnl=0.0,
+                            regime=self._current_regime.value,
+                            equity_after=account.equity,
+                            metadata={
+                                "entry_atr": atr,
+                                "reconciliation_source": "startup_auto",
+                            },
+                        )
+                        self._trade_logger.log_trade(record)
+                        logger.info(
+                            "Auto-reconciliation: wrote entry for %s "
+                            "(qty=%.0f, price=%.2f, strategy=%s)",
+                            pos.symbol, pos.quantity, pos.avg_entry_price, strategy,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to write reconciliation entry for %s",
+                            pos.symbol,
+                        )
+            except Exception:
+                logger.exception("Failed to load position %s, skipping", pos.symbol)
 
-            # Start the position monitor
+        # Note: bar subscription is handled by start() after this method returns.
+        # Do NOT call add_bar_subscription here -- _stream is not yet initialized.
+
+        logger.info(
+            "Successfully loaded %d / %d positions", loaded_count, len(positions)
+        )
+
+        # Phase 3: Post-registration setup
+        try:
+            self._dump_open_positions()
+        except Exception:
+            logger.exception("Failed to dump open positions file")
+
+        try:
             if self._position_monitor is not None:
                 await self._position_monitor.start()
-
         except Exception:
-            logger.exception("Failed to load existing positions")
+            logger.exception("Failed to start position monitor")
 
     # -----------------------------------------------------------------------
     # Batch+intraday scheduler
     # -----------------------------------------------------------------------
 
-    async def _run_startup_catchup(self, fired: dict[str, date | None]) -> None:
+    async def _run_startup_catchup(
+        self,
+        fired: dict[str, date | None],
+        state: SchedulerState,
+    ) -> None:
         """Execute catch-up for events missed due to late system start.
 
         Uses StartupCatchUpResolver to determine which events should be
-        replayed, then executes them in dependency order.
+        replayed, then executes them in dependency order.  Events already
+        recorded in *state* are excluded from catch-up.
         """
         now_et = datetime.now(timezone.utc).astimezone(_ET)
         today_et = now_et.date()
@@ -543,7 +824,11 @@ class AutoTrader:
         is_market_day = now_et.weekday() < 5  # Mon-Fri
 
         resolver = StartupCatchUpResolver()
-        catchup_events = resolver.resolve(now_et, today_is_market_day=is_market_day)
+        catchup_events = resolver.resolve(
+            now_et,
+            today_is_market_day=is_market_day,
+            already_fired=state.fired_event_names(),
+        )
 
         if not catchup_events:
             logger.info("Startup catch-up: no missed events to replay")
@@ -565,19 +850,40 @@ class AutoTrader:
             "nightly_scan": self._on_nightly_scan,
         }
 
+        # Market-sensitive events must only fire within market hours.
+        # Same guard as the main polling loop (_MARKET_SESSION_END_HOUR).
+        _MARKET_SENSITIVE_EVENTS = {"gap_filter", "moo", "confirmation", "entry_close"}
+        h_now = now_et.hour
+
         for event_name in catchup_events:
             handler = event_handlers.get(event_name)
             if handler is None:
                 logger.warning("No handler for catch-up event: %s", event_name)
                 continue
+
+            # Guard: skip market-sensitive events outside market hours
+            if event_name in _MARKET_SENSITIVE_EVENTS and h_now >= _MARKET_SESSION_END_HOUR:
+                logger.info(
+                    "Catch-up: skipping %s (outside market hours, h=%d)",
+                    event_name, h_now,
+                )
+                fired[event_name] = today_et
+                state.mark_fired(event_name, result="skipped")
+                state.save(self._state_path)
+                continue
+
             try:
                 logger.info("Catch-up: executing %s", event_name)
                 result = handler()
                 if asyncio.iscoroutine(result):
                     await result
                 fired[event_name] = today_et
+                state.mark_fired(event_name, result="success")
+                state.save(self._state_path)
             except Exception:
                 logger.exception("Catch-up failed for event: %s", event_name)
+                state.mark_fired(event_name, result="failed")
+                state.save(self._state_path)
 
     def _load_last_batch_result(self) -> None:
         """Load the most recent batch result from disk if still fresh.
@@ -616,6 +922,16 @@ class AutoTrader:
 
     async def __batch_intraday_scheduler_impl(self) -> None:
         """Internal implementation of the batch+intraday scheduler loop."""
+        # --- Persistent state: know exactly what ran today ---
+        self._state_path = Path("data/scheduler_state.json")
+        _state = SchedulerState.load(self._state_path)
+        _now_et = datetime.now(timezone.utc).astimezone(_ET)
+        _today_str = _now_et.date().isoformat()
+
+        if _state.date != _today_str:
+            _state = SchedulerState.fresh(_today_str)
+
+        # Build legacy _fired dict from persistent state
         _fired: dict[str, date | None] = {
             "daily_bar_refresh": None,
             "daily_reset": None,
@@ -625,40 +941,110 @@ class AutoTrader:
             "entry_close": None,
             "nightly_scan": None,
         }
+        _fired.update(_state.to_fired_dict())
 
         # --- Phase 0: Restore last batch result from disk (survives restart) ---
         if self._last_batch_result is None:
             self._load_last_batch_result()
 
-        # --- Phase 1: Startup catch-up ---
-        await self._run_startup_catchup(_fired)
+        # --- Phase 1: Startup catch-up (persistent state filters already-fired) ---
+        await self._run_startup_catchup(_fired, _state)
+
+        # Mark past events not caught up as "skipped" so the polling
+        # loop does not re-fire them with stale/wrong data.
+        _event_schedule = {
+            "daily_bar_refresh": (_DAILY_BAR_REFRESH_HOUR, _DAILY_BAR_REFRESH_MINUTE),
+            "daily_reset": (_DAILY_RESET_HOUR, _DAILY_RESET_MINUTE),
+            "gap_filter": (_GAP_FILTER_HOUR, _GAP_FILTER_MINUTE),
+            "moo": (_MOO_HOUR, _MOO_MINUTE),
+            "confirmation": (_CONFIRMATION_HOUR, _CONFIRMATION_MINUTE),
+            "entry_close": (_ENTRY_WINDOW_CLOSE_HOUR, _ENTRY_WINDOW_CLOSE_MINUTE),
+            "nightly_scan": (_NIGHTLY_SCAN_HOUR, _NIGHTLY_SCAN_MINUTE),
+        }
+        _today_et = _now_et.date()
+        _h, _m = _now_et.hour, _now_et.minute
+        for _evt, (_eh, _em) in _event_schedule.items():
+            if not _state.is_fired(_evt) and (_h > _eh or (_h == _eh and _m >= _em)):
+                _state.mark_fired(_evt, result="skipped")
+                _fired[_evt] = _today_et
+                logger.info("Marked past event as skipped: %s (h=%d)", _evt, _h)
+        _state.save(self._state_path)
 
         # --- Phase 2: Normal polling loop ---
+        _loop_count = 0
         while self._running:
             await asyncio.sleep(30)
+            _loop_count += 1
             now_et = datetime.now(timezone.utc).astimezone(_ET)
             today_et = now_et.date()
             h, m = now_et.hour, now_et.minute
+
+            # Day rollover: reset persistent state for the new day
+            if _state.date != today_et.isoformat():
+                _state = SchedulerState.fresh(today_et.isoformat())
+                for k in _fired:
+                    _fired[k] = None
+
+            # Heartbeat every ~5 minutes (10 iterations x 30s)
+            if _loop_count % 10 == 0:
+                fired_summary = {k: (str(v) if v else "None") for k, v in _fired.items()}
+                logger.debug(
+                    "Scheduler heartbeat: h=%d m=%d, positions=%d, state_date=%s, fired=%s",
+                    h, m, len(self._held_positions), _state.date, fired_summary,
+                )
 
             # 9:00 AM: Pre-market daily bar refresh via REST API
             if h >= _DAILY_BAR_REFRESH_HOUR and (h > _DAILY_BAR_REFRESH_HOUR or m >= _DAILY_BAR_REFRESH_MINUTE) and _fired["daily_bar_refresh"] != today_et:
                 _fired["daily_bar_refresh"] = today_et
                 await self._refresh_daily_bars()
+                _state.mark_fired("daily_bar_refresh")
+                _state.save(self._state_path)
 
             # 9:20 AM: Daily reset (must run before gap_filter and MOO)
             if h >= _DAILY_RESET_HOUR and (h > _DAILY_RESET_HOUR or m >= _DAILY_RESET_MINUTE) and _fired["daily_reset"] != today_et:
                 _fired["daily_reset"] = today_et
                 await self._on_daily_reset(today_et)
+                _state.mark_fired("daily_reset")
+                _state.save(self._state_path)
 
-            # 9:25 AM: Gap filter
+            # 9:25 AM: Gap filter (requires live pre-market prices; skip outside market session)
             if h >= _GAP_FILTER_HOUR and (h > _GAP_FILTER_HOUR or m >= _GAP_FILTER_MINUTE) and _fired["gap_filter"] != today_et:
-                _fired["gap_filter"] = today_et
-                await self._on_gap_filter()
+                if h < _MARKET_SESSION_END_HOUR:
+                    logger.info(
+                        "[GAP_FILTER] FIRING at h=%d m=%d (market hours OK, "
+                        "_fired=%s, state_fired=%s)",
+                        h, m, _fired["gap_filter"], _state.is_fired("gap_filter"),
+                    )
+                    _fired["gap_filter"] = today_et
+                    await self._on_gap_filter()
+                    _state.mark_fired("gap_filter")
+                else:
+                    logger.warning(
+                        "[GAP_FILTER] SKIPPED: outside market hours h=%d >= %d "
+                        "(would have fired with stale prices!)",
+                        h, _MARKET_SESSION_END_HOUR,
+                    )
+                    _fired["gap_filter"] = today_et
+                    _state.mark_fired("gap_filter", result="skipped")
+                    self._batch_pipeline.mark_candidates_skipped("outside_market_hours")
+                _state.save(self._state_path)
+            elif _loop_count % 10 == 0 and not _state.is_fired("gap_filter"):
+                logger.debug(
+                    "[GAP_FILTER] not yet: h=%d m=%d, need h>=%d m>=%d",
+                    h, m, _GAP_FILTER_HOUR, _GAP_FILTER_MINUTE,
+                )
 
-            # 9:30 AM: Group A MOO entries
+            # 9:30 AM: Group A MOO entries (requires market to be open; skip outside market session)
             if h >= _MOO_HOUR and (h > _MOO_HOUR or m >= _MOO_MINUTE) and _fired["moo"] != today_et:
-                _fired["moo"] = today_et
-                await self._on_moo()
+                if h < _MARKET_SESSION_END_HOUR:
+                    _fired["moo"] = today_et
+                    await self._on_moo()
+                    _state.mark_fired("moo")
+                else:
+                    logger.info("MOO entries skipped: outside market hours (h=%d)", h)
+                    _fired["moo"] = today_et
+                    _state.mark_fired("moo", result="skipped")
+                _state.save(self._state_path)
 
             # 9:45 AM: Group B confirmation window
             if (
@@ -669,16 +1055,26 @@ class AutoTrader:
             ):
                 _fired["confirmation"] = today_et
                 await self._on_confirmation_window()
+                _state.mark_fired("confirmation")
+                _state.save(self._state_path)
 
-            # 10:00 AM: Close entry window
+            # 10:00 AM: Close entry window (only meaningful during market session)
             if h >= _ENTRY_WINDOW_CLOSE_HOUR and (h > _ENTRY_WINDOW_CLOSE_HOUR or m >= _ENTRY_WINDOW_CLOSE_MINUTE) and _fired["entry_close"] != today_et:
-                _fired["entry_close"] = today_et
-                await self._on_entry_window_close()
+                if h < _MARKET_SESSION_END_HOUR:
+                    _fired["entry_close"] = today_et
+                    await self._on_entry_window_close()
+                    _state.mark_fired("entry_close")
+                else:
+                    _fired["entry_close"] = today_et
+                    _state.mark_fired("entry_close", result="skipped")
+                _state.save(self._state_path)
 
             # 8:00 PM: Nightly scan
             if h >= _NIGHTLY_SCAN_HOUR and (h > _NIGHTLY_SCAN_HOUR or m >= _NIGHTLY_SCAN_MINUTE) and _fired["nightly_scan"] != today_et:
                 _fired["nightly_scan"] = today_et
                 await self._on_nightly_scan()
+                _state.mark_fired("nightly_scan")
+                _state.save(self._state_path)
 
     # -----------------------------------------------------------------------
     # Scheduled event handlers (delegate to batch pipeline)
@@ -695,41 +1091,65 @@ class AutoTrader:
             self._gdr_manager.reset_daily_entries()
 
     async def _on_gap_filter(self) -> None:
-        """Apply gap filter to last batch result at 9:25 AM ET.
-
-        Delegates to BatchPipelineOrchestrator.
-        """
+        """Apply gap filter to last batch result at 9:25 AM ET."""
+        logger.info("[SCHEDULER] _on_gap_filter() -> delegating to batch_pipeline")
         await self._batch_pipeline.on_gap_filter()
+        logger.info("[SCHEDULER] _on_gap_filter() complete")
 
     async def _on_moo(self) -> None:
-        """Execute Group A market-on-open orders at 9:30 AM ET.
-
-        Delegates to BatchPipelineOrchestrator.
-        """
+        """Execute Group A market-on-open orders at 9:30 AM ET."""
+        logger.info("[SCHEDULER] _on_moo() -> delegating to batch_pipeline")
         await self._batch_pipeline.on_moo()
+        logger.info("[SCHEDULER] _on_moo() complete")
+        self._schedule_post_moo_reconciliation()
+
+    def _schedule_post_moo_reconciliation(self) -> None:
+        """Schedule a position reconciliation 5 minutes after MOO.
+
+        Creates an asyncio task that waits 300 seconds, then runs
+        _reconcile_positions() to detect any fills that arrived at the
+        broker but were not captured by the internal tracking system
+        (e.g., partial fills, race conditions with rapid order execution).
+
+        The task reference is stored in self._reconciliation_task so it
+        can be awaited or cancelled during shutdown.
+        """
+        async def _delayed_reconcile() -> None:
+            try:
+                await asyncio.sleep(300)
+                logger.info("[RECONCILIATION] post-MOO reconciliation starting (T+5min)")
+                await self._reconcile_positions(source="post_moo")
+                logger.info("[RECONCILIATION] post-MOO reconciliation complete")
+            except asyncio.CancelledError:
+                logger.info("[RECONCILIATION] post-MOO reconciliation cancelled")
+            except Exception:
+                logger.exception(
+                    "[RECONCILIATION] post-MOO reconciliation failed "
+                    "(system continues normally)"
+                )
+
+        self._reconciliation_task = asyncio.create_task(_delayed_reconcile())
+        logger.info("[SCHEDULER] post-MOO reconciliation scheduled in 300s")
 
     async def _on_confirmation_window(self) -> None:
-        """Execute Group B confirmation entries between 9:45 and 10:00 AM ET.
-
-        Delegates to BatchPipelineOrchestrator.
-        """
+        """Execute Group B confirmation entries between 9:45 and 10:00 AM ET."""
+        logger.info("[SCHEDULER] _on_confirmation_window() -> delegating to batch_pipeline")
         await self._batch_pipeline.on_confirmation_window()
+        logger.info("[SCHEDULER] _on_confirmation_window() complete")
 
     async def _on_entry_window_close(self) -> None:
-        """Discard unconfirmed Group B candidates at 10:00 AM ET.
-
-        Delegates to BatchPipelineOrchestrator.
-        """
+        """Discard unconfirmed Group B candidates at 10:00 AM ET."""
+        logger.info("[SCHEDULER] _on_entry_window_close() -> delegating to batch_pipeline")
         await self._batch_pipeline.on_entry_window_close()
+        logger.info("[SCHEDULER] _on_entry_window_close() complete")
 
     async def _on_nightly_scan(self) -> None:
-        """Run the nightly batch scan at 8:00 PM ET.
-
-        Delegates to BatchPipelineOrchestrator.
-        """
+        """Run the nightly batch scan at 8:00 PM ET."""
+        logger.info("[SCHEDULER] _on_nightly_scan() -> delegating to batch_pipeline")
         await self._batch_pipeline.on_nightly_scan(
             refresh_daily_bars=self._refresh_daily_bars,
         )
+        logger.info("[SCHEDULER] _on_nightly_scan() complete")
 
     # -----------------------------------------------------------------------
     # Position exit callback (from PositionMonitor)
@@ -768,17 +1188,6 @@ class AutoTrader:
         if self._gdr_manager is not None and held is not None:
             self._gdr_manager.record_trade_pnl(held.strategy, pnl)
 
-        # Update portfolio tracker
-        if self._portfolio_tracker is not None and held is not None:
-            side = "sell" if held.direction == "long" else "buy"
-            self._portfolio_tracker.record_trade(
-                symbol=symbol,
-                side=side,
-                qty=held.qty,
-                price=fill_price,
-                pnl=pnl,
-            )
-
         # Write trade record
         if self._trade_logger is not None and held is not None:
             try:
@@ -787,8 +1196,8 @@ class AutoTrader:
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     symbol=symbol,
                     strategy=held.strategy,
-                    direction="close",
-                    side="sell" if held.direction == "long" else "buy",
+                    direction=held.direction,
+                    side="exit",
                     quantity=held.qty,
                     price=fill_price,
                     pnl=pnl,
@@ -809,6 +1218,39 @@ class AutoTrader:
             symbol, reason, pnl, mfe, mae, bars_held,
         )
 
+        # Update open positions file for dashboard
+        self._dump_open_positions()
+
+    # -----------------------------------------------------------------------
+    # WebSocket stream with auto-reconnect
+    # -----------------------------------------------------------------------
+
+    async def _run_stream_with_retry(self) -> None:
+        """Run the WebSocket bar stream with automatic reconnection."""
+        _RETRY_DELAYS = [5, 10, 30, 60]  # escalating backoff
+        attempt = 0
+        while self._running:
+            try:
+                logger.info("WebSocket stream starting (attempt %d)", attempt + 1)
+                await asyncio.to_thread(self._broker.run_stream)
+                # run_stream() returned normally (e.g., clean shutdown)
+                if not self._running:
+                    break
+                logger.warning("WebSocket stream ended unexpectedly, reconnecting...")
+            except Exception:
+                logger.exception("WebSocket stream error (attempt %d)", attempt + 1)
+            delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
+            logger.info("Reconnecting WebSocket in %ds...", delay)
+            await asyncio.sleep(delay)
+            # Re-create stream and re-subscribe held symbols
+            try:
+                held = list(self._held_positions.keys())
+                await self._broker.subscribe_bars(held, self._on_bar)
+                logger.info("Re-subscribed to %d symbols after reconnect", len(held))
+            except Exception:
+                logger.exception("Failed to re-subscribe after reconnect")
+            attempt += 1
+
     # -----------------------------------------------------------------------
     # Minute bar handler (held positions only)
     # -----------------------------------------------------------------------
@@ -821,10 +1263,22 @@ class AutoTrader:
         - Forwarding bars to PositionMonitor for exit evaluation
         - Periodic equity snapshot logging
         """
+        # Log first bar per symbol for debugging (then every 60th bar ~= 1 hour)
+        if self._bar_count <= 2 or self._bar_count % 60 == 0:
+            logger.info(
+                "Bar received: %s close=%.2f high=%.2f low=%.2f (bar #%d)",
+                bar.symbol, bar.close, bar.high, bar.low, self._bar_count,
+            )
+
+        # Track last price for unrealized P&L calculation
+        self._last_prices[bar.symbol] = bar.close
+
         # MFE/MAE tracking for open positions
         self._open_position_tracker.update_prices(
             bar.symbol, bar.high, bar.low, bar.close,
         )
+        # Dump updated position data every bar so dashboard stays fresh
+        self._dump_open_positions()
 
         # Forward bar to PositionMonitor for exit evaluation
         if self._position_monitor is not None:
@@ -911,14 +1365,6 @@ class AutoTrader:
                     mae = tracked.mae
                     bars_held = tracked.bar_count
 
-            if self._portfolio_tracker is not None:
-                self._portfolio_tracker.record_trade(
-                    symbol=order.symbol,
-                    side=order.side,
-                    qty=result.filled_qty,
-                    price=result.filled_price,
-                    pnl=pnl,
-                )
             self._risk_manager.record_pnl(pnl)
 
             if self._trade_logger is not None:
@@ -1230,9 +1676,25 @@ class AutoTrader:
         except Exception:
             logger.exception("Trade log write failed for %s entry", held.symbol)
 
+    @staticmethod
+    def _is_us_market_hours() -> bool:
+        """Return True if current UTC time falls within US equity market hours.
+
+        Market hours: Mon-Fri 09:30-16:00 ET (14:30-21:00 UTC in EST,
+        13:30-20:00 UTC in EDT).  We use a conservative window of
+        13:30-21:00 UTC to cover both DST variants.
+        """
+        now = datetime.now(timezone.utc)
+        if now.weekday() >= 5:  # Sat/Sun
+            return False
+        minutes = now.hour * 60 + now.minute
+        return 13 * 60 + 30 <= minutes <= 21 * 60
+
     async def _log_equity_snapshot(self) -> None:
-        """Write an equity snapshot to the trade logger."""
+        """Write an equity snapshot and dump open position details to disk."""
         if self._trade_logger is None:
+            return
+        if not self._is_us_market_hours():
             return
         try:
             account = await self._broker.get_account()
@@ -1248,6 +1710,69 @@ class AutoTrader:
             self._trade_logger.log_equity(snap)
         except Exception:
             logger.exception("Equity snapshot write failed")
+
+        # Dump live position details (MFE/MAE, qty, etc.) for dashboard
+        self._dump_open_positions()
+
+    def _dump_open_positions(self) -> None:
+        """Write current open position details to data/open_positions.json.
+
+        The dashboard reads this file to show real-time MFE/MAE and
+        position sizes for held positions.
+        """
+        import json as _json
+
+        tracker = self._open_position_tracker
+        records = []
+        for symbol in tracker.open_symbols:
+            held = tracker.get_position(symbol)
+            if held is None:
+                continue
+            current_price = self._last_prices.get(symbol)
+            if current_price is None:
+                # Fallback: use last daily bar close (available at startup)
+                daily_bars = self._daily_bar_history.get(symbol)
+                if daily_bars:
+                    current_price = daily_bars[-1].close
+            if current_price is None:
+                current_price = held.entry_price
+            if held.direction == "long":
+                pnl_per_share = current_price - held.entry_price
+            else:
+                pnl_per_share = held.entry_price - current_price
+            unrealized_pnl = round(pnl_per_share * held.qty, 2)
+            unrealized_pnl_pct = round(pnl_per_share / held.entry_price, 6) if held.entry_price > 0 else 0.0
+            records.append({
+                "symbol": held.symbol,
+                "strategy": held.strategy,
+                "direction": held.direction,
+                "entry_price": held.entry_price,
+                "current_price": round(current_price, 2),
+                "qty": held.qty,
+                "unrealized_pnl": unrealized_pnl,
+                "unrealized_pnl_pct": unrealized_pnl_pct,
+                "highest_price": held.highest_price,
+                "lowest_price": held.lowest_price,
+                "mfe_pct": round(held.mfe, 6),
+                "mae_pct": round(held.mae, 6),
+                "mfe_dollar": round(held.mfe * held.entry_price * held.qty, 2),
+                "mae_dollar": round(held.mae * held.entry_price * held.qty, 2),
+                "bar_count": held.bar_count,
+                "entry_atr": held.entry_atr,
+                "entry_date_et": held.entry_date_et.isoformat(),
+            })
+
+        path = Path("data/open_positions.json")
+        tmp = path.with_suffix(".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(
+                _json.dumps(records, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(str(tmp), str(path))
+        except OSError:
+            logger.debug("Failed to dump open positions to %s", path)
 
     async def _daily_regime_scheduler(self) -> None:
         """Refresh regime from latest SPY daily bar once per day after 9 PM ET."""

@@ -179,6 +179,7 @@ class RsiMeanReversion(Strategy):
                 metadata={
                     "sub_strategy": "mr_long",
                     "stop_loss": stop_loss,
+                    "entry_atr": round(atr, 4),
                     "entry_adx": adx,
                 },
             )
@@ -206,6 +207,7 @@ class RsiMeanReversion(Strategy):
                 metadata={
                     "sub_strategy": "mr_short",
                     "stop_loss": stop_loss,
+                    "entry_atr": round(atr, 4),
                     "entry_adx": adx,
                 },
             )

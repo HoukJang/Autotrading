@@ -15,6 +15,8 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from autotrader.dashboard.utils.metrics import max_consecutive_losses
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -59,6 +61,8 @@ class DashboardData:
     max_drawdown: float = 0.0
     profit_factor: float = 0.0
     last_update: str = ""
+    spy_adx: float | None = None
+    capital_deployed_pct: float = 0.0
 
 
 @dataclass
@@ -88,6 +92,11 @@ class RiskMetrics:
     entries_today: int = 0
     max_entries_today: int = 3
     reentry_blocks: list[str] = field(default_factory=list)
+    worst_case_loss: float = 0.0
+    worst_case_pct: float = 0.0
+    worst_case_positions: list[dict] = field(default_factory=list)
+    can_enter_new: bool = True
+    entry_checks: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +264,7 @@ def load_batch_candidates(path: str = "data/batch_candidates.json") -> pd.DataFr
 def compute_metrics(
     trades_df: pd.DataFrame,
     equity_df: pd.DataFrame,
+    batch_raw: dict | None = None,
 ) -> DashboardData:
     """Derive all dashboard metrics from raw trade and equity data.
 
@@ -277,6 +287,13 @@ def compute_metrics(
             positions_raw if isinstance(positions_raw, list) else []
         )
 
+    # -- Batch-derived fields ------------------------------------------------
+    spy_adx = batch_raw.get("spy_adx") if batch_raw else None
+    open_positions = load_open_positions()
+    if open_positions:
+        current_positions = list(open_positions.keys())
+    capital_deployed_pct = _compute_capital_deployed(open_positions, current_equity)
+
     # -- Last update timestamp ---------------------------------------------
     last_update = _resolve_last_update(trades_df, equity_df)
 
@@ -298,18 +315,26 @@ def compute_metrics(
             max_drawdown=_compute_max_drawdown(equity_df),
             profit_factor=0.0,
             last_update=last_update,
+            spy_adx=spy_adx,
+            capital_deployed_pct=capital_deployed_pct,
         )
 
-    # -- Trade statistics --------------------------------------------------
-    pnl_series = trades_df["pnl"]
+    # -- Trade statistics (only count closed/exit trades for metrics) ------
+    if "side" in trades_df.columns:
+        close_trades = trades_df[trades_df["side"] == "exit"]
+    else:
+        close_trades = trades_df
+
+    pnl_series = close_trades["pnl"] if not close_trades.empty else pd.Series(dtype=float)
     winning_mask = pnl_series > 0
     losing_mask = pnl_series < 0
+    total_trades = len(close_trades)
     winning_trades = int(winning_mask.sum())
     total_pnl = float(pnl_series.sum())
 
     # Profit factor
-    winning_sum = float(pnl_series[winning_mask].sum())
-    losing_sum = float(pnl_series[losing_mask].sum())
+    winning_sum = float(pnl_series[winning_mask].sum()) if not pnl_series.empty else 0.0
+    losing_sum = float(pnl_series[losing_mask].sum()) if not pnl_series.empty else 0.0
     if winning_sum == 0.0:
         profit_factor = 0.0
     elif losing_sum == 0.0:
@@ -339,6 +364,8 @@ def compute_metrics(
         max_drawdown=max_drawdown,
         profit_factor=profit_factor,
         last_update=last_update,
+        spy_adx=spy_adx,
+        capital_deployed_pct=capital_deployed_pct,
     )
 
 
@@ -348,6 +375,7 @@ def compute_risk_metrics(
     daily_loss_limit_pct: float = 0.02,
     max_positions: int = 8,
     max_entries_today: int = 3,
+    open_positions: dict | None = None,
 ) -> RiskMetrics:
     """Calculate current risk utilization metrics.
 
@@ -376,26 +404,17 @@ def compute_risk_metrics(
     # -- Position direction breakdown --------------------------------------
     long_count = 0
     short_count = 0
-    open_positions_count = len(data.current_positions)
 
-    if not data.trades_df.empty and "direction" in data.trades_df.columns:
-        # Find the most recent trade entry direction per open symbol
-        for symbol in data.current_positions:
-            sym_trades = data.trades_df[data.trades_df["symbol"] == symbol]
-            if sym_trades.empty:
-                continue
-            if "side" in sym_trades.columns:
-                entries = sym_trades[sym_trades["side"] == "entry"]
-            else:
-                entries = sym_trades
-
-            if not entries.empty:
-                last_entry = entries.iloc[-1]
-                direction = str(last_entry.get("direction", "")).lower() if hasattr(last_entry, "get") else str(last_entry["direction"]).lower()
-                if direction == "long":
-                    long_count += 1
-                elif direction == "short":
-                    short_count += 1
+    if open_positions:
+        for sym, pos in open_positions.items():
+            direction = str(pos.get("direction", "")).lower()
+            if direction == "long":
+                long_count += 1
+            elif direction == "short":
+                short_count += 1
+        open_positions_count = len(open_positions)
+    else:
+        open_positions_count = len(data.current_positions)
 
     # -- Today's entries count ---------------------------------------------
     entries_today = 0
@@ -418,6 +437,24 @@ def compute_risk_metrics(
             if not today_exits.empty and "symbol" in today_exits.columns:
                 reentry_blocks = today_exits["symbol"].unique().tolist()
 
+    # -- Worst-case and entry gate checks -----------------------------------
+    worst_case_loss, worst_case_pct, worst_case_positions = _compute_worst_case(
+        open_positions or {}, data.current_equity
+    )
+    heat_pct = _compute_portfolio_heat(open_positions or {}, data.current_equity)
+    can_enter_new, entry_checks = _compute_entry_checks(
+        dd_pct=current_drawdown_pct,
+        dd_limit=max_drawdown_limit_pct,
+        daily_loss_pct=today_loss_pct,
+        daily_limit=daily_loss_limit_pct,
+        open_count=open_positions_count,
+        max_pos=max_positions,
+        entries_today=entries_today,
+        max_entries=max_entries_today,
+        heat_pct=heat_pct,
+        regime=data.current_regime,
+    )
+
     return RiskMetrics(
         current_drawdown_pct=current_drawdown_pct,
         max_drawdown_limit_pct=max_drawdown_limit_pct,
@@ -430,6 +467,11 @@ def compute_risk_metrics(
         entries_today=entries_today,
         max_entries_today=max_entries_today,
         reentry_blocks=reentry_blocks,
+        worst_case_loss=worst_case_loss,
+        worst_case_pct=worst_case_pct,
+        worst_case_positions=worst_case_positions,
+        can_enter_new=can_enter_new,
+        entry_checks=entry_checks,
     )
 
 
@@ -459,7 +501,7 @@ def per_strategy_metrics(trades_df: pd.DataFrame) -> dict[str, dict]:
             avg_bars_held = float(bars.mean()) if not bars.isna().all() else 0.0
 
         # Max consecutive losses
-        max_consec_losses = _max_consecutive_losses(pnls)
+        max_consec_losses = max_consecutive_losses(pnls)
 
         result[str(strategy)] = {
             "trade_count": count,
@@ -554,13 +596,32 @@ def _compute_max_drawdown(equity_df: pd.DataFrame) -> float:
 
 
 def _compute_today_pnl(trades_df: pd.DataFrame) -> float:
-    """Sum PnL for trades whose timestamp falls on today's date."""
-    if trades_df.empty or "timestamp" not in trades_df.columns:
-        return 0.0
+    """Sum realized PnL for today's exits + unrealized PnL on open positions.
 
-    today = date.today()
-    today_mask = trades_df["timestamp"].dt.date == today
-    return float(trades_df.loc[today_mask, "pnl"].sum())
+    This gives the true "how much did my account move today" figure.
+    """
+    realized = 0.0
+    if not trades_df.empty and "timestamp" in trades_df.columns:
+        today = date.today()
+        today_mask = trades_df["timestamp"].dt.date == today
+        if "side" in trades_df.columns:
+            exit_mask = today_mask & (trades_df["side"] == "exit")
+        else:
+            exit_mask = today_mask
+        realized = float(trades_df.loc[exit_mask, "pnl"].sum())
+
+    # Add unrealized from open positions
+    unrealized = _compute_unrealized_pnl()
+    return realized + unrealized
+
+
+def _compute_unrealized_pnl() -> float:
+    """Sum unrealized PnL from all open positions via open_positions.json."""
+    try:
+        live_pos = load_open_positions()
+        return sum(p.get("unrealized_pnl", 0.0) for p in live_pos.values())
+    except Exception:
+        return 0.0
 
 
 def _resolve_last_update(
@@ -586,14 +647,141 @@ def _resolve_last_update(
     return str(latest)
 
 
-def _max_consecutive_losses(pnl_series: pd.Series) -> int:
-    """Count the longest streak of consecutive losing trades."""
-    max_streak = 0
-    current_streak = 0
-    for pnl in pnl_series:
-        if pnl < 0:
-            current_streak += 1
-            max_streak = max(max_streak, current_streak)
+# ---------------------------------------------------------------------------
+# Worst-case / heat / entry-gate helpers
+# ---------------------------------------------------------------------------
+def _compute_capital_deployed(positions: dict[str, dict], equity: float) -> float:
+    """Fraction of equity deployed in open positions."""
+    if not positions or equity <= 0:
+        return 0.0
+    total_value = sum(
+        abs(p.get("qty", 0)) * (p.get("current_price") or p.get("entry_price", 0))
+        for p in positions.values()
+    )
+    return min(1.0, total_value / equity)
+
+
+def _compute_worst_case(
+    positions: dict[str, dict], equity: float,
+) -> tuple[float, float, list[dict]]:
+    """Compute total loss if every open position hits its stop-loss simultaneously."""
+    from autotrader.trading.constants import SL_ATR_MULT
+
+    if not positions or equity <= 0:
+        return 0.0, 0.0, []
+
+    details: list[dict] = []
+    total_loss = 0.0
+
+    for sym, pos in positions.items():
+        entry = pos.get("entry_price", 0)
+        atr = pos.get("entry_atr", 0)
+        qty = abs(pos.get("qty", 0))
+        direction = pos.get("direction", "long").lower()
+        strategy = pos.get("strategy", "unknown")
+
+        if entry <= 0 or qty == 0:
+            continue
+
+        sl_mult = SL_ATR_MULT.get(strategy, {}).get(direction, 2.0)
+
+        if atr and atr > 0:
+            if direction == "long":
+                sl_price = entry - sl_mult * atr
+                loss = max(0.0, (entry - sl_price) * qty)
+            else:
+                sl_price = entry + sl_mult * atr
+                loss = max(0.0, (sl_price - entry) * qty)
         else:
-            current_streak = 0
-    return max_streak
+            loss = entry * qty * 0.05  # fallback 5%
+
+        total_loss += loss
+        details.append({"symbol": sym, "loss": round(-loss, 2)})
+
+    worst_pct = total_loss / equity if equity > 0 else 0.0
+    return round(total_loss, 2), round(worst_pct, 4), details
+
+
+def _compute_portfolio_heat(positions: dict[str, dict], equity: float) -> float:
+    """Compute portfolio heat = total risk / equity."""
+    worst_loss, _, _ = _compute_worst_case(positions, equity)
+    return worst_loss / equity if equity > 0 else 0.0
+
+
+def _compute_entry_checks(
+    dd_pct: float,
+    dd_limit: float,
+    daily_loss_pct: float,
+    daily_limit: float,
+    open_count: int,
+    max_pos: int,
+    entries_today: int,
+    max_entries: int,
+    heat_pct: float,
+    regime: str,
+) -> tuple[bool, list[dict]]:
+    """Run 6 entry gate checks and return (can_enter, check_details)."""
+    from autotrader.trading.constants import MAX_PORTFOLIO_HEAT_PCT
+
+    checks: list[dict] = [
+        {
+            "name": "DD Headroom",
+            "ok": dd_pct < dd_limit * 0.8,
+            "detail": f"{dd_pct*100:.1f}% / {dd_limit*100:.0f}% limit",
+        },
+        {
+            "name": "Daily Loss",
+            "ok": daily_loss_pct < daily_limit,
+            "detail": f"{daily_loss_pct*100:.2f}% / {daily_limit*100:.1f}% limit",
+        },
+        {
+            "name": "Position Slots",
+            "ok": open_count < max_pos,
+            "detail": f"{open_count} / {max_pos}",
+        },
+        {
+            "name": "Daily Entries",
+            "ok": entries_today < max_entries,
+            "detail": f"{entries_today} / {max_entries}",
+        },
+        {
+            "name": "Portfolio Heat",
+            "ok": heat_pct < MAX_PORTFOLIO_HEAT_PCT,
+            "detail": f"{heat_pct*100:.1f}% / {MAX_PORTFOLIO_HEAT_PCT*100:.0f}% limit",
+        },
+        {
+            "name": "Regime",
+            "ok": regime not in ("HIGH_VOLATILITY", "HIGH_VOL"),
+            "detail": regime,
+        },
+    ]
+    can_enter = all(c["ok"] for c in checks)
+    return can_enter, checks
+
+
+# ---------------------------------------------------------------------------
+# Open position details (live MFE/MAE from tracker)
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=15)
+def load_open_positions(path: str = "data/open_positions.json") -> dict[str, dict]:
+    """Load live open-position details dumped by AutoTrader.
+
+    Returns a dict keyed by symbol with fields:
+    entry_price, qty, mfe, mae, mfe_dollar, mae_dollar, bar_count, etc.
+
+    Empty dict when file is missing or malformed.
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        return {}
+
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, ValueError, OSError):
+        return {}
+
+    if not isinstance(raw, list):
+        return {}
+
+    return {r["symbol"]: r for r in raw if isinstance(r, dict) and "symbol" in r}

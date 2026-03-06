@@ -18,24 +18,12 @@ from autotrader.dashboard.theme import (
 )
 from autotrader.dashboard.utils.chart_helpers import get_chart_layout
 from autotrader.dashboard.utils.formatters import fmt_currency, fmt_pct, fmt_pnl
+from autotrader.dashboard.utils.metrics import max_consecutive_losses
 
 
 # ------------------------------------------------------------------
 # Metric computation helpers
 # ------------------------------------------------------------------
-
-
-def _max_consecutive_losses(pnl_series: pd.Series) -> int:
-    """Return the length of the longest consecutive-loss streak."""
-    if pnl_series.empty:
-        return 0
-    is_loss = (pnl_series < 0).astype(int)
-    groups = is_loss.ne(is_loss.shift()).cumsum()
-    streaks = is_loss.groupby(groups).agg(["sum", "count"])
-    loss_streaks = streaks.loc[streaks["sum"] == streaks["count"], "count"]
-    if loss_streaks.empty:
-        return 0
-    return int(loss_streaks.max())
 
 
 def _compute_strategy_metrics(close_df: pd.DataFrame) -> pd.DataFrame:
@@ -60,7 +48,7 @@ def _compute_strategy_metrics(close_df: pd.DataFrame) -> pd.DataFrame:
         total_pnl = sdf["pnl"].sum()
         avg_pnl = sdf["pnl"].mean()
         avg_bars = float(sdf["bars_held"].mean()) if "bars_held" in sdf.columns else 0.0
-        max_cl = _max_consecutive_losses(sdf["pnl"].reset_index(drop=True))
+        max_cl = max_consecutive_losses(sdf["pnl"].reset_index(drop=True))
 
         rows.append(
             {
@@ -423,6 +411,160 @@ def _render_pnl_by_symbol(close_df: pd.DataFrame) -> None:
 
 
 # ------------------------------------------------------------------
+# Empty state / progress helpers
+# ------------------------------------------------------------------
+
+
+def _render_analysis_empty_state(trade_count: int) -> None:
+    """Show progress toward each analysis section's minimum trade requirement."""
+    st.subheader("Strategy Analysis")
+
+    thresholds = [
+        ("Performance Table", 1),
+        ("Win Rate Analysis", 10),
+        ("Regime Heatmap", 20),
+        ("Statistical Confidence (n>=30)", 30),
+    ]
+
+    st.markdown(
+        f'<div style="background:{COLORS["bg_card"]};border-radius:8px;padding:20px">'
+        f'<div style="color:{COLORS["text_secondary"]};font-size:1em;margin-bottom:16px">'
+        f'Analysis Progress ({trade_count} trades completed)</div>',
+        unsafe_allow_html=True,
+    )
+
+    for label, min_trades in thresholds:
+        pct = min(100, trade_count / min_trades * 100) if min_trades > 0 else 100
+        done = trade_count >= min_trades
+        color = COLORS["profit"] if done else COLORS["text_muted"]
+        status = "Ready" if done else f"{min_trades - trade_count} more needed"
+        st.markdown(
+            f'<div style="margin-bottom:10px">'
+            f'<div style="display:flex;justify-content:space-between;font-size:0.85em;margin-bottom:3px">'
+            f'<span style="color:{COLORS["text_secondary"]}">{label}</span>'
+            f'<span style="color:{color}">{status}</span></div>'
+            f'<div style="background:{COLORS["bg_section"]};border-radius:3px;height:5px;overflow:hidden">'
+            f'<div style="background:{color};width:{pct:.0f}%;height:100%;border-radius:3px"></div>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_section_progress(section_name: str, current: int, required: int) -> None:
+    """Show a mini progress indicator for a section not yet available."""
+    remaining = max(0, required - current)
+    pct = min(100, current / required * 100) if required > 0 else 100
+    st.markdown(
+        f'<div style="background:{COLORS["bg_card"]};border-radius:8px;padding:14px 16px;'
+        f'opacity:0.6">'
+        f'<div style="color:{COLORS["text_muted"]};font-size:0.9em;margin-bottom:6px">'
+        f'{section_name} -- {remaining} more trades needed</div>'
+        f'<div style="background:{COLORS["bg_section"]};border-radius:3px;height:4px;overflow:hidden">'
+        f'<div style="background:{COLORS["text_muted"]};width:{pct:.0f}%;height:100%"></div>'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ------------------------------------------------------------------
+# Section 7: Regime Timeline
+# ------------------------------------------------------------------
+
+
+def _render_regime_timeline(equity_df: pd.DataFrame) -> None:
+    """Render a horizontal regime timeline showing regime changes over time."""
+    st.subheader("Regime Timeline")
+
+    if equity_df.empty or "regime" not in equity_df.columns:
+        st.caption("No regime data available for timeline.")
+        return
+
+    df = equity_df.copy()
+    if "timestamp" not in df.columns:
+        st.caption("No timestamp data for timeline.")
+        return
+
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    # Find contiguous regime spans
+    spans = []
+    start_idx = 0
+    for i in range(1, len(df)):
+        if df.iloc[i]["regime"] != df.iloc[start_idx]["regime"]:
+            spans.append({
+                "regime": str(df.iloc[start_idx]["regime"]),
+                "start": df.iloc[start_idx]["timestamp"],
+                "end": df.iloc[i - 1]["timestamp"],
+                "days": i - start_idx,
+            })
+            start_idx = i
+    # Last span
+    spans.append({
+        "regime": str(df.iloc[start_idx]["regime"]),
+        "start": df.iloc[start_idx]["timestamp"],
+        "end": df.iloc[-1]["timestamp"],
+        "days": len(df) - start_idx,
+    })
+
+    if not spans:
+        st.caption("No regime spans detected.")
+        return
+
+    fig = go.Figure()
+
+    for span in spans:
+        regime = span["regime"]
+        color = REGIME_COLORS.get(regime, REGIME_COLORS.get("UNCERTAIN", "#6B7280"))
+        fig.add_trace(
+            go.Bar(
+                x=[span["days"]],
+                y=["Regime"],
+                orientation="h",
+                name=regime,
+                marker_color=color,
+                opacity=0.7,
+                text=[f"{regime} ({span['days']}d)"],
+                textposition="inside",
+                textfont={"color": COLORS["text_primary"], "size": 11},
+                hovertemplate=f"{regime}<br>{span['days']} days<br>"
+                              f"From: {span['start']}<br>To: {span['end']}<extra></extra>",
+                showlegend=False,
+            )
+        )
+
+    fig.update_layout(
+        **get_chart_layout(
+            height=120,
+            barmode="stack",
+            showlegend=False,
+            xaxis={"title": "Trading Days", "showgrid": False},
+            yaxis={"title": "", "showticklabels": False},
+        )
+    )
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=30))
+    st.plotly_chart(fig, use_container_width=True, key="regime_timeline")
+
+    # Legend
+    seen = set()
+    legend_parts = []
+    for span in spans:
+        r = span["regime"]
+        if r not in seen:
+            seen.add(r)
+            color = REGIME_COLORS.get(r, "#6B7280")
+            legend_parts.append(
+                f'<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px">'
+                f'<span style="display:inline-block;width:10px;height:10px;background:{color};'
+                f'border-radius:2px"></span>'
+                f'<span style="color:{COLORS["text_muted"]};font-size:0.8em">{r}</span></span>'
+            )
+    if legend_parts:
+        st.markdown("".join(legend_parts), unsafe_allow_html=True)
+
+
+# ------------------------------------------------------------------
 # Public entry point
 # ------------------------------------------------------------------
 
@@ -432,9 +574,7 @@ def render_strategy_analysis(
 ) -> None:
     """Render the strategy analysis tab with metrics, charts, and heatmap."""
     if trades_df is None or trades_df.empty:
-        st.info(
-            "No trades recorded yet. Start live trading to see strategy analysis."
-        )
+        _render_analysis_empty_state(0)
         return
 
     df = trades_df.copy()
@@ -442,32 +582,44 @@ def render_strategy_analysis(
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-    # Only close trades carry realized PnL
-    if "direction" in df.columns:
-        close_df = df.loc[df["direction"] == "close"].copy()
-    elif "side" in df.columns:
+    # Only close/exit trades carry realized PnL
+    if "side" in df.columns:
         close_df = df.loc[df["side"] == "exit"].copy()
+    elif "direction" in df.columns:
+        close_df = df.loc[df["direction"] == "close"].copy()
     else:
         close_df = df.copy()
 
-    # Section 1: Performance table
-    metrics = _compute_strategy_metrics(close_df)
-    _render_performance_table(metrics)
+    trade_count = len(close_df)
+
+    # Section 1: Performance table (needs 1+ trades)
+    if trade_count >= 1:
+        metrics = _compute_strategy_metrics(close_df)
+        _render_performance_table(metrics)
+    else:
+        _render_analysis_empty_state(trade_count)
+        return
 
     st.divider()
 
-    # Section 2: Per-regime performance
+    # Section 2: Per-regime performance (needs 1+ trades)
     _render_regime_performance(close_df)
 
     st.divider()
 
-    # Section 3: Cumulative PnL + bar chart
-    _render_cumulative_pnl(close_df)
+    # Section 3: Cumulative PnL + bar chart (needs 2+ trades)
+    if trade_count >= 2:
+        _render_cumulative_pnl(close_df)
+    else:
+        _render_section_progress("Cumulative PnL", trade_count, 2)
 
     st.divider()
 
-    # Section 4: Regime-Strategy heatmap
-    _render_regime_heatmap(close_df)
+    # Section 4: Regime-Strategy heatmap (needs 20+ trades)
+    if trade_count >= 20:
+        _render_regime_heatmap(close_df)
+    else:
+        _render_section_progress("Regime Heatmap", trade_count, 20)
 
     st.divider()
 
@@ -478,3 +630,8 @@ def render_strategy_analysis(
 
     # Section 6: PnL by symbol
     _render_pnl_by_symbol(close_df)
+
+    st.divider()
+
+    # Section 7: Regime Timeline (new)
+    _render_regime_timeline(equity_df)

@@ -1,25 +1,5 @@
 import pytest
-from autotrader.portfolio.tracker import PortfolioTracker
 from autotrader.portfolio.performance import calculate_metrics
-
-
-class TestPortfolioTracker:
-    def test_record_trade(self):
-        tracker = PortfolioTracker(initial_equity=100_000.0)
-        tracker.record_trade(symbol="AAPL", side="buy", qty=10, price=150.0, pnl=0.0)
-        assert len(tracker.trades) == 1
-
-    def test_equity_curve(self):
-        tracker = PortfolioTracker(initial_equity=100_000.0)
-        tracker.record_trade("AAPL", "sell", 10, 155.0, pnl=50.0)
-        tracker.update_equity(100_050.0)
-        assert tracker.equity_curve[-1] == 100_050.0
-
-    def test_daily_pnl(self):
-        tracker = PortfolioTracker(initial_equity=100_000.0)
-        tracker.record_trade("AAPL", "sell", 10, 155.0, pnl=50.0)
-        tracker.record_trade("MSFT", "sell", 5, 300.0, pnl=-30.0)
-        assert tracker.total_pnl == pytest.approx(20.0)
 
 
 class TestPerformanceMetrics:

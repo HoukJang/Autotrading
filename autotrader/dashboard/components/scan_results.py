@@ -11,6 +11,7 @@ import pandas as pd
 
 from autotrader.dashboard.theme import COLORS, STRATEGY_NAMES
 from autotrader.dashboard.utils.chart_helpers import get_chart_layout
+from autotrader.trading.constants import RISK_PER_TRADE_PCT, SL_ATR_MULT
 
 
 # Entry group color mapping
@@ -25,10 +26,11 @@ _GAP_STATUS_COLORS = {
     "passed": COLORS["profit"],
     "filtered": COLORS["loss"],
     "pending": COLORS["warning"],
+    "skipped": COLORS["neutral"],
 }
 
 
-def render_scan_results(batch_data) -> None:
+def render_scan_results(batch_data, dashboard_data=None) -> None:
     """Render the nightly scan results tab.
 
     Displays scan summary KPIs, a sortable candidates table with color
@@ -65,7 +67,14 @@ def render_scan_results(batch_data) -> None:
     if candidates_df.empty:
         st.info("No candidates selected in the last scan.")
     else:
-        _render_candidates_table(candidates_df)
+        # Collect held symbols from dashboard state and open_positions.json
+        held_symbols: set[str] = set()
+        if dashboard_data is not None:
+            held_symbols.update(getattr(dashboard_data, "current_positions", []))
+        from autotrader.dashboard.data_loader import load_open_positions
+        held_symbols.update(load_open_positions().keys())
+
+        _render_candidates_table(candidates_df, held_symbols=held_symbols)
 
     st.divider()
 
@@ -74,6 +83,11 @@ def render_scan_results(batch_data) -> None:
         _render_score_distribution(all_scores, candidates_df)
     else:
         st.caption("Score distribution data not available.")
+
+    # -- Risk preview for candidates ----------------------------------------
+    if dashboard_data is not None and not candidates_df.empty:
+        st.divider()
+        _render_risk_preview(candidates_df, dashboard_data)
 
 
 def _render_empty_scan_placeholder() -> None:
@@ -133,18 +147,55 @@ def _render_scan_summary(
         st.metric("Candidates Selected", str(selected_count), delta=delta_text)
 
 
-def _render_candidates_table(candidates_df: pd.DataFrame) -> None:
+def _render_candidates_table(
+    candidates_df: pd.DataFrame,
+    held_symbols: set[str] | None = None,
+) -> None:
     """Render the sortable, color-coded candidates table."""
     df = candidates_df.copy()
 
     # Normalize column presence
     expected_cols = [
         "rank", "symbol", "strategy", "direction", "score",
-        "entry_group", "sl_price", "tp_price", "atr", "gap_filter_status",
+        "entry_group", "est_qty", "est_size",
+        "sl_price", "tp_price", "atr", "gap_filter_status",
     ]
     for col in expected_cols:
         if col not in df.columns:
             df[col] = "--"
+
+    # Compute estimated position size from risk model:
+    # qty = floor(equity * risk_pct / (sl_mult * atr))
+    # size = qty * prev_close
+    _ESTIMATE_EQUITY = 100_000  # default equity assumption for display
+    _raw_atr = pd.to_numeric(candidates_df.get("atr", pd.Series(dtype=float)), errors="coerce")
+    _raw_prev = pd.to_numeric(candidates_df.get("prev_close", pd.Series(dtype=float)), errors="coerce")
+    _raw_strat = candidates_df.get("strategy", pd.Series(dtype=str))
+    _raw_dir = candidates_df.get("direction", pd.Series(dtype=str))
+
+    est_qty_list = []
+    est_size_list = []
+    for i in range(len(df)):
+        atr_val = _raw_atr.iloc[i] if i < len(_raw_atr) else None
+        prev_val = _raw_prev.iloc[i] if i < len(_raw_prev) else None
+        strat = str(_raw_strat.iloc[i]) if i < len(_raw_strat) else ""
+        dirn = str(_raw_dir.iloc[i]).lower() if i < len(_raw_dir) else "long"
+
+        if pd.notna(atr_val) and atr_val > 0:
+            sl_mult = SL_ATR_MULT.get(strat, {}).get(dirn, 2.0)
+            risk_per_share = sl_mult * atr_val
+            qty = int(_ESTIMATE_EQUITY * RISK_PER_TRADE_PCT / risk_per_share)
+            est_qty_list.append(str(qty))
+            if pd.notna(prev_val) and prev_val > 0:
+                est_size_list.append(f"${qty * prev_val:,.0f}")
+            else:
+                est_size_list.append("--")
+        else:
+            est_qty_list.append("--")
+            est_size_list.append("--")
+
+    df["est_qty"] = est_qty_list
+    df["est_size"] = est_size_list
 
     # Map strategy keys to display names
     if "strategy" in df.columns:
@@ -178,11 +229,25 @@ def _render_candidates_table(candidates_df: pd.DataFrame) -> None:
         "direction": "Dir",
         "score": "Score",
         "entry_group": "Entry Group",
+        "est_qty": "Est.Qty",
+        "est_size": "Est.Size",
         "sl_price": "SL",
         "tp_price": "TP",
         "atr": "ATR",
         "gap_filter_status": "Gap Filter",
     })
+
+    # Add "Status" column indicating already-held positions
+    if held_symbols and "symbol" in candidates_df.columns:
+        display.insert(
+            2,  # After Rank and Symbol
+            "Status",
+            candidates_df["symbol"].map(
+                lambda s: "HELD" if s in held_symbols else ""
+            ).values,
+        )
+    else:
+        display.insert(2, "Status", "")
 
     def _style_candidates(row: pd.Series) -> list[str]:
         styles = [""] * len(row)
@@ -208,6 +273,15 @@ def _render_candidates_table(candidates_df: pd.DataFrame) -> None:
             elif direction in ("short", "sell"):
                 styles[idx] = f"color: {COLORS['loss']}"
 
+        if "Status" in row.index:
+            idx = row.index.get_loc("Status")
+            if str(row["Status"]).upper() == "HELD":
+                styles[idx] = (
+                    f"background-color: {COLORS['warning']}22; "
+                    f"color: {COLORS['warning']}; "
+                    f"font-weight: bold"
+                )
+
         return styles
 
     st.dataframe(
@@ -216,23 +290,20 @@ def _render_candidates_table(candidates_df: pd.DataFrame) -> None:
         hide_index=True,
     )
 
-    # Entry group legend
-    col_leg1, col_leg2, col_leg3, _ = st.columns([1, 1, 1, 3])
-    with col_leg1:
-        st.markdown(
-            f'<span style="color:{COLORS["profit"]};font-size:0.85em">MOO = Market-On-Open order</span>',
-            unsafe_allow_html=True,
-        )
-    with col_leg2:
-        st.markdown(
-            f'<span style="color:{COLORS["info"]};font-size:0.85em">Confirm = Wait for confirmation</span>',
-            unsafe_allow_html=True,
-        )
-    with col_leg3:
-        st.markdown(
-            f'<span style="color:{COLORS["warning"]};font-size:0.85em">Pending = Gap check in progress</span>',
-            unsafe_allow_html=True,
-        )
+    # Legend: gap filter status (in lifecycle order)
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+    gap_legend = [
+        (col1, COLORS["warning"], "Pending = Gap check in progress"),
+        (col2, COLORS["profit"], "Passed = Gap check OK"),
+        (col3, COLORS["loss"], "Filtered = Gap too large"),
+        (col4, COLORS["neutral"], "Skipped = Outside market hours"),
+    ]
+    for col, color, text in gap_legend:
+        with col:
+            st.markdown(
+                f'<span style="color:{color};font-size:0.85em">{text}</span>',
+                unsafe_allow_html=True,
+            )
 
 
 def _render_score_distribution(
@@ -304,6 +375,84 @@ def _render_score_distribution(
             st.metric("Mean Score", f"{statistics.mean(all_scores):.3f}")
         with col_median:
             st.metric("Median Score", f"{statistics.median(all_scores):.3f}")
+
+
+def _render_risk_preview(candidates_df: pd.DataFrame, dashboard_data) -> None:
+    """Simulate risk impact if all scan candidates are entered."""
+    st.subheader("Risk Preview (If All Candidates Entered)")
+
+    current_positions = getattr(dashboard_data, "current_positions", [])
+    current_equity = getattr(dashboard_data, "current_equity", 0.0)
+    current_count = len(current_positions)
+
+    new_count = len(candidates_df)
+    projected_total = current_count + new_count
+
+    # Count longs and shorts in candidates
+    new_longs = 0
+    new_shorts = 0
+    projected_risk = 0.0
+    if "direction" in candidates_df.columns:
+        new_longs = int((candidates_df["direction"].str.lower() == "long").sum())
+        new_shorts = new_count - new_longs
+
+    # Estimate risk from candidates
+    if "atr" in candidates_df.columns and "strategy" in candidates_df.columns:
+        for _, row in candidates_df.iterrows():
+            atr_val = pd.to_numeric(row.get("atr", 0), errors="coerce") or 0
+            strat = str(row.get("strategy", ""))
+            dirn = str(row.get("direction", "long")).lower()
+            if atr_val > 0 and current_equity > 0:
+                sl_mult = SL_ATR_MULT.get(strat, {}).get(dirn, 2.0)
+                risk_per_share = sl_mult * atr_val
+                qty = int(current_equity * RISK_PER_TRADE_PCT / risk_per_share) if risk_per_share > 0 else 0
+                projected_risk += risk_per_share * qty
+
+    heat_pct = (projected_risk / current_equity * 100) if current_equity > 0 else 0.0
+
+    # Direction bias
+    total_new = new_longs + new_shorts
+    if total_new > 0:
+        bias = f"{new_longs/total_new*100:.0f}% L / {new_shorts/total_new*100:.0f}% S"
+    else:
+        bias = "--"
+
+    # 4-column KPI
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        color = COLORS["warning"] if projected_total > 8 else COLORS["info"]
+        st.markdown(
+            f'<div style="background:{COLORS["bg_card"]};border-radius:8px;padding:12px;text-align:center">'
+            f'<div style="color:{COLORS["text_muted"]};font-size:0.8em">Projected Positions</div>'
+            f'<div style="color:{color};font-size:1.5em;font-weight:700">{projected_total}</div>'
+            f'<div style="color:{COLORS["text_muted"]};font-size:0.75em">{current_count} current + {new_count} new</div>'
+            f'</div>', unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f'<div style="background:{COLORS["bg_card"]};border-radius:8px;padding:12px;text-align:center">'
+            f'<div style="color:{COLORS["text_muted"]};font-size:0.8em">New Longs / Shorts</div>'
+            f'<div style="font-size:1.5em;font-weight:700">'
+            f'<span style="color:{COLORS["profit"]}">{new_longs}</span> / '
+            f'<span style="color:{COLORS["loss"]}">{new_shorts}</span></div>'
+            f'</div>', unsafe_allow_html=True,
+        )
+    with c3:
+        heat_color = COLORS["loss"] if heat_pct > 35 else (COLORS["warning"] if heat_pct > 25 else COLORS["profit"])
+        st.markdown(
+            f'<div style="background:{COLORS["bg_card"]};border-radius:8px;padding:12px;text-align:center">'
+            f'<div style="color:{COLORS["text_muted"]};font-size:0.8em">Projected Heat</div>'
+            f'<div style="color:{heat_color};font-size:1.5em;font-weight:700">+{heat_pct:.1f}%</div>'
+            f'<div style="color:{COLORS["text_muted"]};font-size:0.75em">additional risk</div>'
+            f'</div>', unsafe_allow_html=True,
+        )
+    with c4:
+        st.markdown(
+            f'<div style="background:{COLORS["bg_card"]};border-radius:8px;padding:12px;text-align:center">'
+            f'<div style="color:{COLORS["text_muted"]};font-size:0.8em">Direction Bias</div>'
+            f'<div style="color:{COLORS["info"]};font-size:1.2em;font-weight:700">{bias}</div>'
+            f'</div>', unsafe_allow_html=True,
+        )
 
 
 def _format_scan_timestamp(scan_ts: str) -> str:

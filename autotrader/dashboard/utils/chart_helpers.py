@@ -4,6 +4,8 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
 
 from autotrader.dashboard.theme import COLORS, REGIME_COLORS, REGIME_TINTS
 
@@ -23,6 +25,7 @@ def get_chart_layout(**overrides: Any) -> dict:
             "size": 12,
         },
         "title": {
+            "text": "",
             "font": {
                 "size": 14,
                 "color": COLORS["text_primary"],
@@ -124,3 +127,72 @@ def _add_regime_vrect(
         row=row,
         col=col,
     )
+
+
+def render_daily_pnl_chart(
+    trades_df: pd.DataFrame,
+    *,
+    height: int = 250,
+    chart_key: str | None = None,
+    max_days: int | None = None,
+) -> None:
+    """Render a daily PnL bar chart from close trades.
+
+    Parameters
+    ----------
+    trades_df:
+        DataFrame of trades with at least ``timestamp`` and ``pnl`` columns.
+    height:
+        Chart height in pixels (default 250).
+    chart_key:
+        Optional Streamlit element key for deduplication.
+    max_days:
+        If set, only show the most recent *max_days* days.
+    """
+    if trades_df.empty:
+        st.caption("No close trades for daily PnL chart.")
+        return
+
+    df = trades_df.copy()
+    if "timestamp" not in df.columns:
+        st.caption("No timestamp column for daily PnL chart.")
+        return
+
+    df["date"] = pd.to_datetime(df["timestamp"]).dt.date
+    daily = (
+        df.groupby("date")["pnl"].sum().reset_index()
+        if "pnl" in df.columns
+        else pd.DataFrame()
+    )
+
+    if daily.empty:
+        st.caption("No PnL data for daily chart.")
+        return
+
+    daily.columns = ["date", "pnl"]
+    daily = daily.sort_values("date").reset_index(drop=True)
+    if max_days is not None and len(daily) > max_days:
+        daily = daily.tail(max_days).reset_index(drop=True)
+    bar_colors = [
+        COLORS["profit"] if v >= 0 else COLORS["loss"] for v in daily["pnl"]
+    ]
+
+    fig = go.Figure(
+        go.Bar(
+            x=daily["date"],
+            y=daily["pnl"],
+            marker_color=bar_colors,
+            hovertemplate="Date: %{x}<br>PnL: %{y:$,.2f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        **get_chart_layout(
+            title={"text": "Daily PnL"},
+            height=height,
+            yaxis={"title": "PnL ($)"},
+            xaxis={"title": ""},
+            showlegend=False,
+        )
+    )
+
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)

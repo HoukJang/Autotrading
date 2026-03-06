@@ -4,30 +4,16 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 from autotrader.dashboard.theme import COLORS, STRATEGY_NAMES
-from autotrader.dashboard.utils.chart_helpers import get_chart_layout
-from autotrader.dashboard.utils.formatters import fmt_currency, fmt_pnl, pnl_color
+from autotrader.dashboard.utils.chart_helpers import render_daily_pnl_chart
+from autotrader.dashboard.utils.formatters import fmt_currency, fmt_pnl, pnl_color, style_pnl
 
 
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-
-
-def _style_pnl(val: object) -> str:
-    """Return CSS color string for a PnL cell value."""
-    try:
-        num = float(val)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return ""
-    if num > 0:
-        return f"color: {COLORS['profit']}"
-    if num < 0:
-        return f"color: {COLORS['loss']}"
-    return f"color: {COLORS['neutral']}"
 
 
 def _apply_filters(
@@ -62,47 +48,6 @@ def _apply_filters(
         mask &= df["pnl"] < 0
 
     return df.loc[mask].copy()
-
-
-# ------------------------------------------------------------------
-# Daily PnL chart (close trades only)
-# ------------------------------------------------------------------
-
-
-def _render_daily_pnl_chart(close_df: pd.DataFrame) -> None:
-    """Render a daily PnL bar chart from close trades."""
-    if close_df.empty:
-        st.caption("No close trades in the selected range for daily PnL chart.")
-        return
-
-    df = close_df.copy()
-    df["date"] = pd.to_datetime(df["timestamp"]).dt.date
-    daily = df.groupby("date")["pnl"].sum().reset_index()
-    daily.columns = ["date", "pnl"]
-
-    bar_colors = [
-        COLORS["profit"] if v >= 0 else COLORS["loss"] for v in daily["pnl"]
-    ]
-
-    fig = go.Figure(
-        go.Bar(
-            x=daily["date"],
-            y=daily["pnl"],
-            marker_color=bar_colors,
-            hovertemplate="Date: %{x}<br>PnL: %{y:$,.2f}<extra></extra>",
-        )
-    )
-    fig.update_layout(
-        **get_chart_layout(
-            title={"text": "Daily PnL"},
-            height=250,
-            yaxis={"title": "PnL ($)"},
-            xaxis={"title": ""},
-            showlegend=False,
-        )
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
 
 
 # ------------------------------------------------------------------
@@ -144,7 +89,7 @@ def _render_trade_table(df: pd.DataFrame, total_count: int) -> None:
     pnl_cols_present = [c for c in ("pnl", "mfe", "mae") if c in display.columns]
 
     if pnl_cols_present:
-        styled = display.style.map(_style_pnl, subset=pnl_cols_present)
+        styled = display.style.map(style_pnl, subset=pnl_cols_present)
         st.dataframe(styled, use_container_width=True, hide_index=True)
     else:
         st.dataframe(display, use_container_width=True, hide_index=True)
@@ -228,8 +173,13 @@ def render_trade_log(trades_df: pd.DataFrame) -> None:
     # ------------------------------------------------------------------
     # Daily PnL chart (close trades only from filtered set)
     # ------------------------------------------------------------------
-    close_trades = filtered.loc[filtered["direction"] == "close"] if "direction" in filtered.columns else filtered
-    _render_daily_pnl_chart(close_trades)
+    if "side" in filtered.columns:
+        close_trades = filtered.loc[filtered["side"] == "exit"]
+    elif "direction" in filtered.columns:
+        close_trades = filtered.loc[filtered["direction"] == "close"]
+    else:
+        close_trades = filtered
+    render_daily_pnl_chart(close_trades)
 
     # ------------------------------------------------------------------
     # Trade table

@@ -9,12 +9,17 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
-from autotrader.data.batch_fetcher import BatchFetcher, _chunk, _BATCH_SIZE
+from autotrader.data.batch_fetcher import (
+    BatchFetcher,
+    _chunk,
+    _BATCH_SIZE,
+    _STALE_QUOTE_HOURS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -40,10 +45,18 @@ def _make_alpaca_bar(
     return bar
 
 
-def _make_alpaca_quote(ask=150.5, bid=149.5):
+def _make_alpaca_quote(ask=150.5, bid=149.5, timestamp=None):
+    """Create a mock Alpaca quote object.
+
+    Args:
+        ask: Ask price.
+        bid: Bid price.
+        timestamp: Quote timestamp (defaults to "just now" in UTC).
+    """
     quote = MagicMock()
     quote.ask_price = ask
     quote.bid_price = bid
+    quote.timestamp = timestamp if timestamp is not None else datetime.now(timezone.utc)
     return quote
 
 
@@ -373,3 +386,135 @@ class TestFetchLatestQuotes:
             result = await fetcher.fetch_latest_quotes(symbols)
 
         assert result == {}
+
+    # -----------------------------------------------------------------------
+    # Stale quote guard tests
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_stale_quote_excluded(self):
+        """Quotes older than _STALE_QUOTE_HOURS should be excluded from results."""
+        stale_ts = datetime.now(timezone.utc) - timedelta(hours=_STALE_QUOTE_HOURS + 1)
+        symbols = ["STALE"]
+        raw = {"STALE": _make_alpaca_quote(ask=150.0, bid=149.0, timestamp=stale_ts)}
+        client = _make_client(quotes_raw=raw)
+
+        fetcher = BatchFetcher("key", "secret")
+        fetcher._client = client
+
+        result = await fetcher.fetch_latest_quotes(symbols)
+
+        # Stale quote should be excluded -- gap_filter sees "no data"
+        assert "STALE" not in result
+
+    @pytest.mark.asyncio
+    async def test_fresh_quote_included(self):
+        """Quotes within _STALE_QUOTE_HOURS should be included normally."""
+        fresh_ts = datetime.now(timezone.utc) - timedelta(minutes=30)
+        symbols = ["FRESH"]
+        raw = {"FRESH": _make_alpaca_quote(ask=200.0, bid=198.0, timestamp=fresh_ts)}
+        client = _make_client(quotes_raw=raw)
+
+        fetcher = BatchFetcher("key", "secret")
+        fetcher._client = client
+
+        result = await fetcher.fetch_latest_quotes(symbols)
+
+        assert "FRESH" in result
+        assert result["FRESH"] == pytest.approx(199.0)
+
+    @pytest.mark.asyncio
+    async def test_mixed_fresh_and_stale_quotes(self):
+        """Only stale quotes are excluded; fresh ones are kept."""
+        now = datetime.now(timezone.utc)
+        stale_ts = now - timedelta(hours=5)
+        fresh_ts = now - timedelta(minutes=10)
+
+        symbols = ["STALE", "FRESH"]
+        raw = {
+            "STALE": _make_alpaca_quote(ask=100.0, bid=99.0, timestamp=stale_ts),
+            "FRESH": _make_alpaca_quote(ask=200.0, bid=198.0, timestamp=fresh_ts),
+        }
+        client = _make_client(quotes_raw=raw)
+
+        fetcher = BatchFetcher("key", "secret")
+        fetcher._client = client
+
+        result = await fetcher.fetch_latest_quotes(symbols)
+
+        assert "STALE" not in result
+        assert "FRESH" in result
+        assert result["FRESH"] == pytest.approx(199.0)
+
+    @pytest.mark.asyncio
+    async def test_quote_with_no_timestamp_treated_as_fresh(self):
+        """Quotes without a timestamp attribute should still be processed."""
+        symbols = ["NOTIME"]
+        quote = MagicMock()
+        quote.ask_price = 150.0
+        quote.bid_price = 148.0
+        quote.timestamp = None  # No timestamp available
+        raw = {"NOTIME": quote}
+        client = _make_client(quotes_raw=raw)
+
+        fetcher = BatchFetcher("key", "secret")
+        fetcher._client = client
+
+        result = await fetcher.fetch_latest_quotes(symbols)
+
+        # Should be included -- timestamp=None means we can't assess staleness
+        assert "NOTIME" in result
+        assert result["NOTIME"] == pytest.approx(149.0)
+
+    @pytest.mark.asyncio
+    async def test_stale_quote_boundary_just_under_threshold(self):
+        """Quote just under the stale threshold should be included."""
+        # 1 minute under threshold -- clearly fresh
+        under_ts = datetime.now(timezone.utc) - timedelta(
+            hours=_STALE_QUOTE_HOURS, minutes=-1
+        )
+        symbols = ["UNDER"]
+        raw = {"UNDER": _make_alpaca_quote(ask=160.0, bid=158.0, timestamp=under_ts)}
+        client = _make_client(quotes_raw=raw)
+
+        fetcher = BatchFetcher("key", "secret")
+        fetcher._client = client
+
+        result = await fetcher.fetch_latest_quotes(symbols)
+
+        assert "UNDER" in result
+
+    @pytest.mark.asyncio
+    async def test_stale_quote_boundary_just_over_threshold(self):
+        """Quote just over the stale threshold should be excluded."""
+        # 1 minute over threshold -- stale
+        over_ts = datetime.now(timezone.utc) - timedelta(
+            hours=_STALE_QUOTE_HOURS, minutes=1
+        )
+        symbols = ["OVER"]
+        raw = {"OVER": _make_alpaca_quote(ask=160.0, bid=158.0, timestamp=over_ts)}
+        client = _make_client(quotes_raw=raw)
+
+        fetcher = BatchFetcher("key", "secret")
+        fetcher._client = client
+
+        result = await fetcher.fetch_latest_quotes(symbols)
+
+        assert "OVER" not in result
+
+    @pytest.mark.asyncio
+    async def test_stale_quote_naive_timestamp_handled(self):
+        """Naive (no tzinfo) timestamps should be treated as UTC."""
+        # Create a naive timestamp that is stale
+        stale_naive_ts = datetime.utcnow() - timedelta(hours=_STALE_QUOTE_HOURS + 2)
+        symbols = ["NAIVE"]
+        raw = {"NAIVE": _make_alpaca_quote(ask=100.0, bid=99.0, timestamp=stale_naive_ts)}
+        client = _make_client(quotes_raw=raw)
+
+        fetcher = BatchFetcher("key", "secret")
+        fetcher._client = client
+
+        result = await fetcher.fetch_latest_quotes(symbols)
+
+        # Naive stale timestamp should be recognized and excluded
+        assert "NAIVE" not in result

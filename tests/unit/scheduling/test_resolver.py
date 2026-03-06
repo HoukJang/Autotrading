@@ -979,3 +979,55 @@ class TestGapFilterConditionalDeadline:
         resolver = StartupCatchUpResolver(events=custom_events)
         result = resolver.resolve(_et(15, 0), today_is_market_day=True)
         assert "cond_no_deadline" in result
+
+
+# ======================================================================
+# already_fired parameter tests
+# ======================================================================
+
+
+class TestAlreadyFiredFiltering:
+    """Test the already_fired parameter for persistent state integration."""
+
+    @pytest.fixture()
+    def resolver(self) -> StartupCatchUpResolver:
+        return StartupCatchUpResolver()
+
+    def test_resolve_filters_already_fired(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """Events in already_fired should be excluded from catch-up results."""
+        already = {"daily_bar_refresh", "daily_reset", "gap_filter", "moo"}
+        result = resolver.resolve(
+            _et(9, 30), today_is_market_day=True, already_fired=already
+        )
+        assert "daily_bar_refresh" not in result
+        assert "daily_reset" not in result
+        assert "gap_filter" not in result
+        assert "moo" not in result
+        assert result == []
+
+    def test_resolve_already_fired_none_backward_compat(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """When already_fired is None, behavior is unchanged (no filtering)."""
+        result_default = resolver.resolve(
+            _et(9, 30), today_is_market_day=True
+        )
+        result_none = resolver.resolve(
+            _et(9, 30), today_is_market_day=True, already_fired=None
+        )
+        assert result_default == result_none
+
+    def test_resolve_partial_already_fired(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """Only fired events are excluded; remaining events still caught up."""
+        already = {"daily_bar_refresh"}
+        result = resolver.resolve(
+            _et(9, 30), today_is_market_day=True, already_fired=already
+        )
+        assert "daily_bar_refresh" not in result
+        assert "daily_reset" in result
+        assert "gap_filter" in result
+        assert "moo" in result

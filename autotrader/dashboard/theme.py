@@ -37,9 +37,12 @@ COLORS = {
 REGIME_COLORS = {
     "TREND_UP": "#00D26A",
     "TREND_DOWN": "#FF4757",
+    "TREND": "#00D26A",       # Legacy alias for TREND_UP
     "RANGING": "#3B82F6",
     "HIGH_VOLATILITY": "#FFA502",
+    "HIGH_VOL": "#FFA502",    # Short alias
     "UNCERTAIN": "#6B7280",
+    "UNKNOWN": "#6B7280",     # Fallback for missing regime
 }
 
 # ---------------------------------------------------------------------------

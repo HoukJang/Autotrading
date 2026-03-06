@@ -101,8 +101,9 @@ class AlpacaAdapter(BrokerAdapter):
         if status in terminal:
             return order_response
 
-        # Market orders fill fast; limit/stop may take longer
-        deadline = max_wait if order_type != "market" else 10.0
+        # Market orders fill fast; limit/stop may take longer.
+        # Use 30s for market orders to handle MOO congestion at market open.
+        deadline = max_wait if order_type != "market" else 30.0
         elapsed = 0.0
         order_id = str(order_response.id)
         while elapsed < deadline:
@@ -121,6 +122,17 @@ class AlpacaAdapter(BrokerAdapter):
         logger.warning("Order %s still pending after %.1fs (status=%s)", order_id, elapsed, status)
         return self._client.get_order_by_id(order_id)
 
+    async def cancel_all_orders(self) -> int:
+        """Cancel all open orders. Returns count of cancelled orders."""
+        if self._client is None:
+            raise BrokerError("AlpacaAdapter not connected. Call connect() first.")
+        try:
+            statuses = self._client.cancel_orders()
+            cancelled = len(statuses) if statuses else 0
+            return cancelled
+        except Exception as exc:
+            raise BrokerError(f"Failed to cancel all orders: {exc}") from exc
+
     async def cancel_order(self, order_id: str) -> bool:
         if self._client is None:
             raise BrokerError("AlpacaAdapter not connected. Call connect() first.")
@@ -130,6 +142,23 @@ class AlpacaAdapter(BrokerAdapter):
         except Exception:
             logger.exception("Failed to cancel order %s", order_id)
             return False
+
+    async def get_order_status(self, order_id: str) -> OrderResult | None:
+        """Re-fetch current order state from Alpaca by order_id."""
+        if self._client is None:
+            raise BrokerError("AlpacaAdapter not connected. Call connect() first.")
+        try:
+            raw = self._client.get_order_by_id(order_id)
+            return OrderResult(
+                order_id=str(raw.id),
+                symbol=str(raw.symbol),
+                status=raw.status.value,  # type: ignore[arg-type]
+                filled_qty=float(raw.filled_qty or 0),
+                filled_price=float(raw.filled_avg_price or 0),
+            )
+        except Exception:
+            logger.exception("Failed to get order status for %s", order_id)
+            return None
 
     async def get_positions(self) -> list[Position]:
         if self._client is None:

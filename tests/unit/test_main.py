@@ -15,9 +15,7 @@ from autotrader.core.types import (
 from autotrader.indicators.engine import IndicatorEngine
 from autotrader.portfolio.allocation_engine import AllocationEngine
 from autotrader.portfolio.regime_detector import MarketRegime, RegimeDetector
-from autotrader.portfolio.tracker import PortfolioTracker
 from autotrader.risk.manager import RiskManager
-from autotrader.risk.position_sizer import PositionSizer
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
 from autotrader.strategy.breakout_momentum import BreakoutMomentum
@@ -55,10 +53,6 @@ class TestAutoTrader:
     def test_init_has_running_flag(self):
         app = AutoTrader(Settings())
         assert app._running is False
-
-    def test_init_has_position_sizer(self):
-        app = AutoTrader(Settings())
-        assert isinstance(app._position_sizer, PositionSizer)
 
 
 class TestRegisterStrategies:
@@ -170,13 +164,6 @@ class TestAutoTraderTradingLoop:
     @pytest.fixture()
     def app(self, settings) -> AutoTrader:
         return AutoTrader(settings)
-
-    @pytest.mark.asyncio
-    async def test_start_initializes_tracker(self, app):
-        await app.start()
-        assert app._portfolio_tracker is not None
-        assert app._portfolio_tracker.initial_equity == 100_000.0
-        await app.stop()
 
     @pytest.mark.asyncio
     async def test_start_registers_strategies(self, app):
@@ -378,7 +365,6 @@ class TestAllocationIntegration:
         app._broker.set_price("AAPL", 100.0)
         bar = _make_bar("AAPL", 100.0)
         app._bar_history["AAPL"].append(bar)
-        app._portfolio_tracker = PortfolioTracker(50_000.0)
         account = await app._broker.get_account()
         positions = await app._broker.get_positions()
         signal = Signal(
@@ -394,7 +380,6 @@ class TestAllocationIntegration:
         """After closing a position, symbol is removed from strategy map."""
         await app._broker.connect()
         app._broker.set_price("AAPL", 100.0)
-        app._portfolio_tracker = PortfolioTracker(50_000.0)
         # Buy first
         buy = Order(symbol="AAPL", side="buy", quantity=10, order_type="market")
         await app._broker.submit_order(buy)
@@ -1304,7 +1289,7 @@ class TestEntryTradeLogging:
         assert record.symbol == "NFLX"
         assert record.strategy == "breakout_momentum"
         assert record.direction == "long"
-        assert record.side == "buy"
+        assert record.side == "entry"
         assert record.quantity == 79.0
         assert record.price == pytest.approx(96.77)
         assert record.pnl == 0.0  # Entry has no PnL
@@ -1321,7 +1306,7 @@ class TestEntryTradeLogging:
         record = app._trade_logger.log_trade.call_args[0][0]
         assert record.symbol == "NFLX"
         assert record.direction == "long"
-        assert record.side == "buy"
+        assert record.side == "entry"
 
     @pytest.mark.asyncio
     async def test_moo_does_not_log_when_no_trade_logger(self):

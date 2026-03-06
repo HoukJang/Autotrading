@@ -31,6 +31,18 @@ def render_equity_section(equity_df: pd.DataFrame, trades_df: pd.DataFrame) -> N
         st.info("Waiting for live trading data...")
         return
 
+    # Short equity history: show daily PnL bars instead of equity curve
+    if len(equity_df) < 10:
+        from autotrader.dashboard.utils.chart_helpers import render_daily_pnl_chart
+        st.caption("Equity curve available after 10+ data points. Showing daily PnL instead.")
+        # Build close trades for daily PnL
+        if trades_df is not None and not trades_df.empty:
+            close_trades = trades_df[trades_df["side"] == "exit"] if "side" in trades_df.columns else trades_df
+            render_daily_pnl_chart(close_trades, height=350, chart_key="equity_daily_pnl_fallback")
+        else:
+            st.info("Not enough data for charts yet.")
+        return
+
     # -- Period selector -----------------------------------------------------
     period_options = ["1W", "1M", "3M", "ALL"]
     selected_period = st.radio(
@@ -47,6 +59,15 @@ def render_equity_section(equity_df: pd.DataFrame, trades_df: pd.DataFrame) -> N
         return
 
     filtered_eq = filtered_eq.sort_values("timestamp").reset_index(drop=True)
+
+    # Convert UTC timestamps to US/Eastern for display
+    filtered_eq = filtered_eq.copy()
+    if hasattr(filtered_eq["timestamp"].dt, "tz") and filtered_eq["timestamp"].dt.tz is not None:
+        filtered_eq["timestamp"] = filtered_eq["timestamp"].dt.tz_convert("US/Eastern")
+    if trades_df is not None and not trades_df.empty and "timestamp" in trades_df.columns:
+        trades_df = trades_df.copy()
+        if hasattr(trades_df["timestamp"].dt, "tz") and trades_df["timestamp"].dt.tz is not None:
+            trades_df["timestamp"] = trades_df["timestamp"].dt.tz_convert("US/Eastern")
 
     # -- Build subplots ------------------------------------------------------
     fig = make_subplots(

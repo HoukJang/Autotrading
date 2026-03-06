@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import streamlit as st
 
+from autotrader.dashboard.data_loader import load_open_positions
 from autotrader.dashboard.theme import COLORS
 from autotrader.dashboard.utils.formatters import fmt_pct
 
 
-def render_risk_dashboard(risk_metrics) -> None:
+def render_risk_dashboard(risk_metrics, open_positions=None) -> None:
     """Render the risk dashboard tab with metrics and visual limit bars.
 
     Parameters
@@ -79,6 +80,22 @@ def render_risk_dashboard(risk_metrics) -> None:
     # -- Row 3: Re-entry blocks ---------------------------------------------
     _render_reentry_blocks(risk_metrics)
 
+    st.divider()
+
+    # -- Row 4: Worst-case scenario and Traffic light --------------------
+    col_worst, col_traffic = st.columns(2)
+
+    with col_worst:
+        _render_worst_case(risk_metrics)
+
+    with col_traffic:
+        _render_entry_traffic_light(risk_metrics)
+
+    st.divider()
+
+    # -- Row 5: Sector concentration ------------------------------------
+    _render_sector_concentration(open_positions)
+
 
 def _render_limit_bar(
     label: str,
@@ -97,9 +114,10 @@ def _render_limit_bar(
     label:
         Display label for the metric.
     current:
-        Current ratio (0.0 to 1.0+) where 1.0 = at limit.
+        Current value in the same unit as *limit* (e.g. 0.03 for 3%
+        drawdown when limit is 0.15 for 15%).
     limit:
-        The limit value (used for display only, current is pre-normalized).
+        The limit value.  The bar fills to ``current / limit``.
     format_fn:
         Callable to format the current value for display text.
     suffix_label:
@@ -107,7 +125,7 @@ def _render_limit_bar(
     key:
         Unique key for the Streamlit progress widget.
     """
-    usage_ratio = min(1.0, max(0.0, current))
+    usage_ratio = min(1.0, max(0.0, current / limit)) if limit > 0 else 0.0
 
     if usage_ratio >= 0.8:
         bar_color = COLORS["loss"]
@@ -340,3 +358,182 @@ def _render_reentry_blocks(risk_metrics) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def _render_worst_case(risk_metrics) -> None:
+    """Render worst-case scenario card showing total loss if all SLs hit."""
+    worst_loss = getattr(risk_metrics, "worst_case_loss", 0.0)
+    worst_pct = getattr(risk_metrics, "worst_case_pct", 0.0)
+    positions = getattr(risk_metrics, "worst_case_positions", [])
+
+    st.markdown(
+        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Worst-Case Scenario</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not positions:
+        st.markdown(
+            f'<div style="color:{COLORS["text_muted"]};font-size:0.85em">No open positions.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    color = COLORS["loss"]
+    st.markdown(
+        f"""
+        <div style="
+            background-color: {COLORS['bg_card']};
+            border: 1px solid {color}44;
+            border-radius: 8px;
+            padding: 16px;
+        ">
+            <div style="color:{color};font-size:1.6em;font-weight:700;margin-bottom:4px">
+                -${worst_loss:,.0f} (-{worst_pct*100:.1f}%)
+            </div>
+            <div style="color:{COLORS['text_muted']};font-size:0.82em;margin-bottom:10px">
+                If all stop-losses hit simultaneously
+            </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Per-position breakdown
+    for p in sorted(positions, key=lambda x: x.get("loss", 0)):
+        loss = p.get("loss", 0)
+        sym = p.get("symbol", "?")
+        st.markdown(
+            f'<div style="display:flex;justify-content:space-between;font-size:0.82em;padding:2px 0">'
+            f'<span style="color:{COLORS["text_secondary"]}">{sym}</span>'
+            f'<span style="color:{color}">${loss:,.0f}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_entry_traffic_light(risk_metrics) -> None:
+    """Render entry gate status as a traffic light."""
+    can_enter = getattr(risk_metrics, "can_enter_new", True)
+    checks = getattr(risk_metrics, "entry_checks", [])
+
+    st.markdown(
+        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Entry Gate Status</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Big YES/NO badge
+    if can_enter:
+        badge_color = COLORS["profit"]
+        badge_text = "CAN ENTER"
+    else:
+        badge_color = COLORS["loss"]
+        badge_text = "BLOCKED"
+
+    st.markdown(
+        f"""
+        <div style="
+            background-color: {COLORS['bg_card']};
+            border: 1px solid {badge_color}44;
+            border-radius: 8px;
+            padding: 16px;
+        ">
+            <div style="
+                display:inline-block;
+                background-color:{badge_color}22;
+                color:{badge_color};
+                font-size:1.2em;
+                font-weight:700;
+                padding:6px 16px;
+                border-radius:6px;
+                margin-bottom:12px;
+            ">{badge_text}</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Individual checks
+    for check in checks:
+        ok = check.get("ok", True)
+        name = check.get("name", "")
+        detail = check.get("detail", "")
+        icon_color = COLORS["profit"] if ok else COLORS["loss"]
+        icon = "OK" if ok else "FAIL"
+        st.markdown(
+            f'<div style="display:flex;justify-content:space-between;align-items:center;'
+            f'font-size:0.82em;padding:3px 0">'
+            f'<span style="color:{COLORS["text_secondary"]}">{name}</span>'
+            f'<div style="display:flex;gap:8px;align-items:center">'
+            f'<span style="color:{COLORS["text_muted"]}">{detail}</span>'
+            f'<span style="color:{icon_color};font-weight:700;font-size:0.85em">{icon}</span>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_sector_concentration(open_positions=None) -> None:
+    """Render sector concentration of open positions."""
+    from autotrader.dashboard.utils.metrics import SP500_SECTORS
+
+    st.markdown(
+        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Sector Concentration</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not open_positions:
+        positions = load_open_positions()
+    else:
+        positions = open_positions
+
+    if not positions:
+        st.markdown(
+            f'<div style="color:{COLORS["text_muted"]};font-size:0.85em">No open positions for sector analysis.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    sector_counts: dict[str, int] = {}
+    for sym in positions:
+        sector = SP500_SECTORS.get(sym, "Other")
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+
+    total = sum(sector_counts.values())
+    if total == 0:
+        return
+
+    # Sort by count descending
+    sorted_sectors = sorted(sector_counts.items(), key=lambda x: -x[1])
+
+    st.markdown(
+        f'<div style="background-color:{COLORS["bg_card"]};border:1px solid {COLORS["bg_section"]};'
+        f'border-radius:8px;padding:12px 16px">',
+        unsafe_allow_html=True,
+    )
+
+    for sector, count in sorted_sectors:
+        pct = count / total * 100
+        bar_color = COLORS["warning"] if pct >= 50 else COLORS["info"]
+        st.markdown(
+            f'<div style="display:flex;justify-content:space-between;align-items:center;'
+            f'font-size:0.85em;padding:4px 0">'
+            f'<span style="color:{COLORS["text_secondary"]}">{sector}</span>'
+            f'<div style="display:flex;gap:8px;align-items:center">'
+            f'<div style="background:{COLORS["bg_section"]};border-radius:3px;width:80px;height:4px;overflow:hidden">'
+            f'<div style="background:{bar_color};width:{pct:.0f}%;height:100%"></div></div>'
+            f'<span style="color:{bar_color};font-weight:600">{count} ({pct:.0f}%)</span>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    # Warning if any sector > 50% (only meaningful with 4+ positions)
+    if total >= 4:
+        for sector, count in sorted_sectors:
+            if count / total >= 0.5:
+                st.markdown(
+                    f'<div style="color:{COLORS["warning"]};font-size:0.8em;margin-top:8px">'
+                    f'Warning: {sector} concentration at {count/total*100:.0f}%</div>',
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("</div>", unsafe_allow_html=True)

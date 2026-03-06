@@ -95,9 +95,40 @@ class BatchResult:
     candidates: list[Candidate] = field(default_factory=list)
     errors: list[dict[str, str]] = field(default_factory=list)
     regime: str = "UNCERTAIN"
+    spy_adx: float | None = None
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-serializable dict for dashboard consumption."""
+        from autotrader.trading.constants import SL_ATR_MULT, TP_ATR_MULT
+
+        def _compute_sl_tp(c: Candidate) -> tuple[float | None, float | None]:
+            """Compute SL/TP prices from ATR and strategy constants."""
+            atr_val = c.scan_result.indicators.get("ATR_14", 0)
+            if not atr_val or atr_val <= 0:
+                return None, None
+            prev = c.prev_close
+            direction = c.direction
+            strategy = c.strategy
+
+            # SL price
+            sl_mult = SL_ATR_MULT.get(strategy, {}).get(direction, 2.0)
+            if direction == "long":
+                sl_price = round(prev - sl_mult * atr_val, 2)
+            else:
+                sl_price = round(prev + sl_mult * atr_val, 2)
+
+            # TP price
+            tp_mult = TP_ATR_MULT.get(strategy)
+            if tp_mult:
+                if direction == "long":
+                    tp_price = round(prev + tp_mult * atr_val, 2)
+                else:
+                    tp_price = round(prev - tp_mult * atr_val, 2)
+            else:
+                tp_price = None
+
+            return sl_price, tp_price
+
         return {
             "run_at": self.run_at.isoformat(),
             "scan_timestamp": self.run_at.isoformat(),
@@ -107,6 +138,7 @@ class BatchResult:
             "symbols_with_signals": self.symbols_with_signals,
             "signals_generated": self.symbols_with_signals,
             "regime": self.regime,
+            "spy_adx": round(self.spy_adx, 2) if self.spy_adx is not None else None,
             "candidates": [
                 {
                     "rank": c.rank,
@@ -121,8 +153,8 @@ class BatchResult:
                     "prev_close": c.prev_close,
                     "entry_group": c.scan_result.metadata.get("entry_group", "MOO"),
                     "atr": round(c.scan_result.indicators.get("ATR_14", 0) or 0, 2),
-                    "sl_price": c.scan_result.metadata.get("sl_price"),
-                    "tp_price": c.scan_result.metadata.get("tp_price"),
+                    "sl_price": _compute_sl_tp(c)[0],
+                    "tp_price": _compute_sl_tp(c)[1],
                     "gap_filter_status": "pending",
                     "indicators": {
                         k: (round(v, 4) if isinstance(v, float) else v)

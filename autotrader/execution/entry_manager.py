@@ -226,7 +226,10 @@ class EntryManager:
                 self._gdr_manager.record_entry(candidate.signal.strategy)
 
             # Submit broker-side stop-loss order for safety
-            await self._submit_broker_sl(candidate.signal, result.fill_price, result.filled_qty, result.order_id)
+            await self._submit_broker_sl(
+                candidate.signal, result.fill_price, result.filled_qty,
+                result.order_id, atr=candidate.atr,
+            )
 
             logger.info(
                 "Group-A entry: %s %s %.0f @ %.2f (strategy=%s, day=%s)",
@@ -308,7 +311,10 @@ class EntryManager:
             if self._gdr_manager is not None:
                 self._gdr_manager.record_entry(candidate.signal.strategy)
 
-            await self._submit_broker_sl(candidate.signal, result.fill_price, result.filled_qty, result.order_id)
+            await self._submit_broker_sl(
+                candidate.signal, result.fill_price, result.filled_qty,
+                result.order_id, atr=candidate.atr,
+            )
 
             logger.info(
                 "Group-B entry (confirmed): %s %s %.0f @ %.2f (strategy=%s)",
@@ -540,15 +546,21 @@ class EntryManager:
         fill_price: float,
         qty: float,
         order_id: str,
+        atr: float = 0.0,
     ) -> None:
         """Place a broker-side stop order using the actual fill price."""
         direction = signal.direction
         mult = self._get_sl_mult(signal.strategy, direction)
-        atr = signal.metadata.get("entry_atr", 0.0) if signal.metadata else 0.0
+
+        # Use explicit atr parameter first, fall back to metadata
+        if atr <= 0:
+            atr = signal.metadata.get("entry_atr", 0.0) if signal.metadata else 0.0
 
         if atr <= 0:
             logger.warning(
-                "Cannot place broker SL for %s: no ATR in metadata", signal.symbol,
+                "Cannot place broker SL for %s: no ATR available (metadata=%s)",
+                signal.symbol,
+                signal.metadata,
             )
             return
 

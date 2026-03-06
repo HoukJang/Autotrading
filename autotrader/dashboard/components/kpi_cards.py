@@ -30,7 +30,11 @@ def render_kpi_cards(data) -> None:
     with col_equity:
         current_equity = getattr(data, "current_equity", 0.0)
         total_pnl = getattr(data, "total_pnl", 0.0)
-        pnl_delta = f"{fmt_pnl(total_pnl)} total"
+        total_trades = getattr(data, "total_trades", 0)
+        if total_trades == 0:
+            pnl_delta = "No closed trades"
+        else:
+            pnl_delta = f"{fmt_pnl(total_pnl)} total"
         st.metric(
             "Account Equity",
             fmt_currency(current_equity),
@@ -53,15 +57,30 @@ def render_kpi_cards(data) -> None:
         positions = getattr(data, "current_positions", [])
         pos_count = len(positions) if positions else 0
         max_pos = 8
+        deployed_pct = getattr(data, "capital_deployed_pct", 0.0)
         st.metric(
             "Positions",
             f"{pos_count} / {max_pos}",
+            delta=f"{deployed_pct*100:.0f}% deployed",
+            delta_color="off",
         )
 
     # -- 4. Regime -----------------------------------------------------------
     with col_regime:
         regime = getattr(data, "current_regime", "UNKNOWN")
+        spy_adx = getattr(data, "spy_adx", None)
         regime_color = REGIME_COLORS.get(str(regime), COLORS["neutral"])
+        regime_text = str(regime)
+        if spy_adx is not None:
+            regime_text = f"{regime} (ADX {spy_adx:.1f})"
+        dead_zone_html = ""
+        if spy_adx is not None and 20 <= spy_adx <= 28:
+            dead_zone_html = f"""
+                <div style="
+                    color: {COLORS['warning']};
+                    font-size: 0.75em;
+                    margin-top: 4px;
+                ">Dead Zone (20-28)</div>"""
         st.markdown(
             f"""
             <div style="
@@ -81,7 +100,7 @@ def render_kpi_cards(data) -> None:
                     color: {regime_color};
                     font-size: 1.1em;
                     font-weight: 700;
-                ">{regime}</div>
+                ">{regime_text}</div>{dead_zone_html}
             </div>
             """,
             unsafe_allow_html=True,
@@ -96,7 +115,10 @@ def render_kpi_cards(data) -> None:
             wr_display = fmt_pct(win_rate)
         else:
             wr_display = "--"
-        st.metric("Win Rate", wr_display, delta=f"{total_trades} trades")
+        wr_delta = f"n={total_trades}"
+        if total_trades < 30:
+            wr_delta += " (low confidence)"
+        st.metric("Win Rate", wr_display, delta=wr_delta, delta_color="off")
 
     # -- 6. Max Drawdown -----------------------------------------------------
     with col_dd:

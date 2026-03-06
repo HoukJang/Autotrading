@@ -57,6 +57,7 @@ class StartupCatchUpResolver:
         self,
         now_et: datetime,
         today_is_market_day: bool,
+        already_fired: set[str] | None = None,
     ) -> list[str]:
         """Return an ordered list of event names to catch up.
 
@@ -64,15 +65,23 @@ class StartupCatchUpResolver:
             now_et: Current time in US Eastern timezone.
             today_is_market_day: Whether today is a trading day
                 (i.e., not a weekend or market holiday).
+            already_fired: Event names already executed today
+                (from persistent state).  These are excluded from
+                catch-up regardless of policy.  ``None`` preserves
+                backward-compatible behaviour (no filtering).
 
         Returns:
             List of event names in dependency-safe execution order.
             Empty list when nothing needs to be caught up.
         """
         now_minutes = now_et.hour * 60 + now_et.minute
+        _skip = already_fired or set()
 
         candidates: list[str] = []
         for name, event in self._events.items():
+            if name in _skip:
+                logger.debug("Skipping already-fired event: %s", name)
+                continue
             if self._should_catch_up(event, now_minutes, today_is_market_day):
                 candidates.append(name)
 

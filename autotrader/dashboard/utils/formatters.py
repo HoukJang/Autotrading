@@ -59,3 +59,20 @@ def pnl_color(value: float) -> str:
     if value < 0:
         return COLORS["loss"]
     return COLORS["neutral"]
+
+
+def style_pnl(val: object) -> str:
+    """Return a CSS color string for a PnL cell value.
+
+    Intended for use with ``pandas.io.formats.style.Styler.map`` to
+    color-code PnL columns in Streamlit dataframes.
+    """
+    try:
+        num = float(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if num > 0:
+        return f"color: {COLORS['profit']}"
+    if num < 0:
+        return f"color: {COLORS['loss']}"
+    return f"color: {COLORS['neutral']}"

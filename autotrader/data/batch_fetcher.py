@@ -36,6 +36,11 @@ _BATCH_SIZE = 50
 _MAX_RETRIES = 3
 # Base delay for exponential backoff in seconds
 _BACKOFF_BASE = 1.0
+# Quotes older than this threshold (hours) are considered stale and excluded.
+# IEX can return prior-session closing quotes after market hours; 2 hours
+# provides enough buffer for normal pre-market activity while catching
+# overnight stale data.
+_STALE_QUOTE_HOURS = 2.0
 
 
 class BatchFetcher:
@@ -294,7 +299,12 @@ class BatchFetcher:
         return {}
 
     def _sync_fetch_quotes_batch(self, symbols: list[str]) -> dict[str, float]:
-        """Synchronous Alpaca latest-quote call run inside an executor thread."""
+        """Synchronous Alpaca latest-quote call run inside an executor thread.
+
+        Quotes older than ``_STALE_QUOTE_HOURS`` are excluded from results so
+        that GapFilter treats them as "no quote data" and keeps the candidate
+        rather than filtering on a stale price.
+        """
         client = self._get_client()
         request = StockLatestQuoteRequest(
             symbol_or_symbols=symbols,
@@ -302,10 +312,33 @@ class BatchFetcher:
         )
         raw = client.get_stock_latest_quote(request)
 
+        now_utc = datetime.now(timezone.utc)
         result: dict[str, float] = {}
         for sym in symbols:
             try:
                 quote: Any = raw[sym]
+
+                # --- Stale quote guard ---
+                # IEX latest quote can return the previous regular-session
+                # close after market hours.  If the quote timestamp is more
+                # than _STALE_QUOTE_HOURS old, exclude it so gap_filter sees
+                # ``pre_market_price = None`` and keeps the candidate.
+                quote_ts = getattr(quote, "timestamp", None)
+                if quote_ts is not None:
+                    if quote_ts.tzinfo is None:
+                        quote_ts = quote_ts.replace(tzinfo=timezone.utc)
+                    age_seconds = (now_utc - quote_ts).total_seconds()
+                    age_hours = age_seconds / 3600.0
+                    if age_hours > _STALE_QUOTE_HOURS:
+                        logger.warning(
+                            "[FETCHER] Stale quote for %s: %.1f hours old "
+                            "(ts=%s), excluding",
+                            sym,
+                            age_hours,
+                            quote_ts.isoformat(),
+                        )
+                        continue
+
                 ask = float(quote.ask_price or 0.0)
                 bid = float(quote.bid_price or 0.0)
                 if ask > 0 and bid > 0:

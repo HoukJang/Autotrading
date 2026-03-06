@@ -183,6 +183,7 @@ class BreakoutMomentum(Strategy):
             metadata={
                 "sub_strategy": "breakout_momentum_long",
                 "stop_loss": stop_loss,
+                "entry_atr": round(atr, 4),
                 "adx": round(adx, 2),
                 "rsi": round(rsi, 2),
                 "volume_ratio": round(vol_ratio, 3),

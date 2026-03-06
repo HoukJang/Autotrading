@@ -20,6 +20,9 @@ class BrokerAdapter(ABC):
     async def cancel_order(self, order_id: str) -> bool: ...
 
     @abstractmethod
+    async def get_order_status(self, order_id: str) -> OrderResult | None: ...
+
+    @abstractmethod
     async def get_positions(self) -> list[Position]: ...
 
     @abstractmethod

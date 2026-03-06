@@ -122,8 +122,24 @@ class PaperBroker(BrokerAdapter):
             filled_qty=order.quantity, filled_price=price,
         )
 
+    async def cancel_all_orders(self) -> int:
+        """Cancel all pending orders. Returns count of cancelled orders."""
+        count = len(self._pending_orders)
+        self._pending_orders.clear()
+        return count
+
     async def cancel_order(self, order_id: str) -> bool:
         return self._pending_orders.pop(order_id, None) is not None
+
+    async def get_order_status(self, order_id: str) -> OrderResult | None:
+        """Paper broker: orders are always immediately filled or pending."""
+        if order_id in self._pending_orders:
+            order = self._pending_orders[order_id]
+            return OrderResult(
+                order_id=order_id, symbol=order.symbol, status="accepted",
+            )
+        # Order not in pending -- was either filled or cancelled; return None
+        return None
 
     async def get_positions(self) -> list[Position]:
         result = []

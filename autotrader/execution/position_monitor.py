@@ -229,8 +229,17 @@ class PositionMonitor:
             order_type="market",
         )
 
-        fill_price = result.filled_price if result else bar.close
-        fill_qty = result.filled_qty if result else position.qty
+        # Guard: if exit order failed, keep position in tracking
+        if result is None:
+            logger.error(
+                "EXIT ORDER FAILED for %s %s (reason=%s) -- "
+                "position remains OPEN at broker and will retry on next daily bar.",
+                position.direction, symbol, decision.reason,
+            )
+            return
+
+        fill_price = result.filled_price
+        fill_qty = result.filled_qty
 
         # Compute PnL
         pnl = self._order_manager.calculate_pnl(

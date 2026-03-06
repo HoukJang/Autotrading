@@ -106,7 +106,91 @@ class OrderManager:
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 result = await self._adapter.submit_order(order)
-                if result.status in ("filled", "accepted", "partially_filled"):
+
+                # --- Ghost fill guard for market orders ---
+                # Market orders that are NOT filled/partially_filled are
+                # dangerous: they may fill later and create ghost positions.
+                # Covers: accepted, pending_new, new, and any other non-terminal
+                # status that Alpaca may return under API congestion.
+                _MARKET_FILL_OK = {"filled", "partially_filled"}
+                _TERMINAL_CANCEL = {"cancelled", "canceled", "expired", "rejected"}
+
+                if order_type == "market" and result.status not in _MARKET_FILL_OK:
+                    if result.status in _TERMINAL_CANCEL:
+                        logger.warning(
+                            "Market order %s reached terminal non-fill status: %s",
+                            result.order_id, result.status,
+                        )
+                        return None
+
+                    logger.warning(
+                        "Market order %s not filled (status=%s) "
+                        "-- cancelling to prevent ghost fill",
+                        result.order_id, result.status,
+                    )
+                    cancel_ok = await self._adapter.cancel_order(result.order_id)
+                    if not cancel_ok:
+                        # Cancel failed -- order may have filled in the
+                        # meantime.  Re-check status before giving up.
+                        recheck = await self._adapter.get_order_status(result.order_id)
+                        if recheck and recheck.status in _MARKET_FILL_OK:
+                            logger.info(
+                                "Order %s filled after cancel attempt "
+                                "(status=%s, qty=%.0f, price=%.2f) "
+                                "-- processing as filled",
+                                recheck.order_id, recheck.status,
+                                recheck.filled_qty, recheck.filled_price,
+                            )
+                            result = recheck
+                            # Fall through to the filled handling below
+                        else:
+                            logger.warning(
+                                "Cancel failed and order %s still not filled "
+                                "(status=%s) -- abandoning order",
+                                result.order_id,
+                                recheck.status if recheck else "unknown",
+                            )
+                            return None
+                    else:
+                        # Cancel "succeeded" but order may have filled in flight.
+                        # Brief wait + re-check to catch ghost fills.
+                        await asyncio.sleep(1.0)
+                        recheck = await self._adapter.get_order_status(
+                            result.order_id,
+                        )
+                        if recheck and recheck.status in _MARKET_FILL_OK:
+                            logger.warning(
+                                "Order %s filled AFTER cancel succeeded "
+                                "(status=%s, qty=%.0f, price=%.2f) "
+                                "-- processing as filled",
+                                recheck.order_id, recheck.status,
+                                recheck.filled_qty, recheck.filled_price,
+                            )
+                            result = recheck
+                            # Fall through to the filled handling below
+                        else:
+                            return None
+
+                if result.status in _MARKET_FILL_OK:
+                    active = ActiveOrder(
+                        order_id=result.order_id,
+                        symbol=symbol,
+                        side=side,
+                        order_type=order_type,
+                        submitted_qty=qty,
+                        fill_price=result.filled_price,
+                        filled_qty=result.filled_qty,
+                        status=result.status,
+                    )
+                    self._active_orders[result.order_id] = active
+                    logger.info(
+                        "Entry submitted: %s %s %s %.0f @ %.2f (attempt %d)",
+                        side, symbol, order_type, result.filled_qty,
+                        result.filled_price, attempt,
+                    )
+                    return result
+                # Non-market "accepted" orders (limit/stop) are expected
+                elif result.status == "accepted":
                     active = ActiveOrder(
                         order_id=result.order_id,
                         symbol=symbol,
@@ -126,7 +210,7 @@ class OrderManager:
                     return result
                 else:
                     logger.warning(
-                        "Entry order %s status: %s (attempt %d)",
+                        "Entry order %s unexpected status: %s (attempt %d)",
                         result.order_id, result.status, attempt,
                     )
                     return result
