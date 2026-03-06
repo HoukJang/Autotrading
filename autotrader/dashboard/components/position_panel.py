@@ -96,7 +96,7 @@ def _extract_position_data(
 
         if not sym_trades.empty:
             if "side" in sym_trades.columns:
-                entries = sym_trades[sym_trades["side"] == "entry"]
+                entries = sym_trades[sym_trades["side"].isin(["entry", "reconciliation_entry"])]
             elif "direction" in sym_trades.columns:
                 entries = sym_trades[sym_trades["direction"].isin(["long", "short"])]
             else:
@@ -219,6 +219,11 @@ def _extract_position_data(
                     data.entry_date = date.fromisoformat(entry_date_str)
                 except ValueError:
                     pass
+    else:
+        # Fallback: when live tracker is unavailable, use entry_price as
+        # current_price so the card shows a value instead of "Price unavailable"
+        if data.current_price is None and data.entry_price is not None:
+            data.current_price = data.entry_price
 
     # --- Phase 3: Compute derived fields ---
     today = date.today()
@@ -788,7 +793,7 @@ def _render_roundtrip_view(trades_df: pd.DataFrame) -> None:
 
     df = trades_df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
-    entries = df[df["side"] == "entry"].sort_values("timestamp")
+    entries = df[df["side"].isin(["entry", "reconciliation_entry"])].sort_values("timestamp")
     exits = df[df["side"] == "exit"].sort_values("timestamp")
 
     rows = []

@@ -217,7 +217,7 @@ def _add_trade_markers(
     if "side" not in trades_in_range.columns:
         return
 
-    entries = trades_in_range[trades_in_range["side"] == "entry"]
+    entries = trades_in_range[trades_in_range["side"].isin(["entry", "reconciliation_entry"])]
     exits = trades_in_range[trades_in_range["side"] == "exit"]
 
     # Entry markers grouped by strategy

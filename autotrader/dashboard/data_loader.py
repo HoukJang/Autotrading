@@ -293,7 +293,7 @@ def compute_metrics(
     open_positions = load_open_positions()
     if open_positions:
         current_positions = list(open_positions.keys())
-    capital_deployed_pct = _compute_capital_deployed(open_positions, current_equity)
+    capital_deployed_pct = _compute_capital_deployed(open_positions, current_equity, equity_df)
 
     # -- Last update timestamp ---------------------------------------------
     last_update = _resolve_last_update(trades_df, equity_df)
@@ -416,6 +416,24 @@ def compute_risk_metrics(
         open_positions_count = len(open_positions)
     else:
         open_positions_count = len(data.current_positions)
+        # Fallback: derive direction from trades_df entry records
+        if data.current_positions and not data.trades_df.empty and "symbol" in data.trades_df.columns:
+            for sym in data.current_positions:
+                sym_trades = data.trades_df[data.trades_df["symbol"] == sym]
+                if "side" in sym_trades.columns:
+                    entries = sym_trades[sym_trades["side"].isin(["entry", "reconciliation_entry"])]
+                else:
+                    entries = sym_trades
+                if not entries.empty:
+                    if "timestamp" in entries.columns:
+                        latest = entries.sort_values("timestamp", ascending=False).iloc[0]
+                    else:
+                        latest = entries.iloc[-1]
+                    direction = str(latest.get("direction", "")).lower()
+                    if direction == "long":
+                        long_count += 1
+                    elif direction == "short":
+                        short_count += 1
 
     # -- Today's entries count ---------------------------------------------
     entries_today = 0
@@ -426,7 +444,7 @@ def compute_risk_metrics(
         today_mask = data.trades_df["timestamp"].dt.date == today
 
         if "side" in data.trades_df.columns:
-            today_entries = data.trades_df[today_mask & (data.trades_df["side"] == "entry")]
+            today_entries = data.trades_df[today_mask & (data.trades_df["side"].isin(["entry", "reconciliation_entry"]))]
         else:
             today_entries = data.trades_df[today_mask]
 
@@ -439,10 +457,16 @@ def compute_risk_metrics(
                 reentry_blocks = today_exits["symbol"].unique().tolist()
 
     # -- Worst-case and entry gate checks -----------------------------------
+    positions_for_risk = open_positions or {}
+    # Fallback: reconstruct minimal position data from trades if open_positions is empty
+    if not positions_for_risk and data.current_positions and not data.trades_df.empty:
+        positions_for_risk = _reconstruct_positions_from_trades(
+            data.current_positions, data.trades_df
+        )
     worst_case_loss, worst_case_pct, worst_case_positions = _compute_worst_case(
-        open_positions or {}, data.current_equity
+        positions_for_risk, data.current_equity
     )
-    heat_pct = _compute_portfolio_heat(open_positions or {}, data.current_equity)
+    heat_pct = _compute_portfolio_heat(positions_for_risk, data.current_equity)
     can_enter_new, entry_checks = _compute_entry_checks(
         dd_pct=current_drawdown_pct,
         dd_limit=max_drawdown_limit_pct,
@@ -651,15 +675,96 @@ def _resolve_last_update(
 # ---------------------------------------------------------------------------
 # Worst-case / heat / entry-gate helpers
 # ---------------------------------------------------------------------------
-def _compute_capital_deployed(positions: dict[str, dict], equity: float) -> float:
-    """Fraction of equity deployed in open positions."""
-    if not positions or equity <= 0:
+def _reconstruct_positions_from_trades(
+    symbols: list[str], trades_df: pd.DataFrame,
+) -> dict[str, dict]:
+    """Build minimal position dicts from trades_df for risk estimation.
+
+    Used as a fallback when open_positions.json is empty but equity
+    snapshots indicate that positions exist.  Extracts entry_price,
+    direction, strategy, qty, and entry_atr (from metadata) for each
+    symbol so that worst-case and heat calculations can run.
+    """
+    import json as _json
+
+    positions: dict[str, dict] = {}
+    for sym in symbols:
+        sym_trades = trades_df[trades_df["symbol"] == sym] if "symbol" in trades_df.columns else trades_df.iloc[0:0]
+        if "side" in sym_trades.columns:
+            entries = sym_trades[sym_trades["side"].isin(["entry", "reconciliation_entry"])]
+        else:
+            entries = sym_trades
+        if entries.empty:
+            continue
+        if "timestamp" in entries.columns:
+            latest = entries.sort_values("timestamp", ascending=False).iloc[0]
+        else:
+            latest = entries.iloc[-1]
+
+        entry_price = float(latest.get("price", 0) or latest.get("entry_price", 0))
+        direction = str(latest.get("direction", "long"))
+        strategy = str(latest.get("strategy", "unknown"))
+        try:
+            qty = int(float(latest.get("quantity", 0)))
+        except (ValueError, TypeError):
+            qty = 0
+
+        # Extract entry_atr from metadata if available
+        entry_atr = 0.0
+        meta = latest.get("metadata")
+        if isinstance(meta, str):
+            try:
+                meta = _json.loads(meta)
+            except (ValueError, TypeError):
+                meta = None
+        if isinstance(meta, dict):
+            entry_atr = float(meta.get("entry_atr", 0) or 0)
+
+        if entry_price <= 0 or qty == 0:
+            # If no ATR, use conservative 2% of entry price as risk estimate
+            if entry_price > 0 and qty == 0:
+                qty = 1  # placeholder for risk estimation
+            else:
+                continue
+
+        positions[sym] = {
+            "entry_price": entry_price,
+            "direction": direction,
+            "strategy": strategy,
+            "qty": qty,
+            "entry_atr": entry_atr,
+        }
+    return positions
+
+
+def _compute_capital_deployed(
+    positions: dict[str, dict],
+    equity: float,
+    equity_df: pd.DataFrame | None = None,
+) -> float:
+    """Fraction of equity deployed in open positions.
+
+    When ``positions`` is empty but equity snapshots exist, falls back to
+    computing deployed capital as ``(equity - cash) / equity`` from the
+    latest snapshot.  This handles the case where open_positions.json is
+    empty (process not running) but the account still holds positions.
+    """
+    if equity <= 0:
         return 0.0
-    total_value = sum(
-        abs(p.get("qty", 0)) * (p.get("current_price") or p.get("entry_price", 0))
-        for p in positions.values()
-    )
-    return min(1.0, total_value / equity)
+    if positions:
+        total_value = sum(
+            abs(p.get("qty", 0)) * (p.get("current_price") or p.get("entry_price", 0))
+            for p in positions.values()
+        )
+        return min(1.0, total_value / equity)
+    # Fallback: derive from equity snapshots when positions dict is empty
+    if equity_df is not None and not equity_df.empty:
+        latest = equity_df.iloc[-1]
+        cash = float(latest.get("cash", equity))
+        deployed = equity - cash
+        if deployed > 0:
+            return min(1.0, deployed / equity)
+    return 0.0
 
 
 def _compute_worst_case(

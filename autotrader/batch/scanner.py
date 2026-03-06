@@ -306,7 +306,23 @@ class NightlyScanner:
             self._save_result(result)
             return result
 
-        # Stage 2: Scan each symbol
+        # Stage 2: Extract SPY ADX before the main scan loop
+        spy_adx: float | None = None
+        spy_bars = bars_by_symbol.get("SPY")
+        if spy_bars and len(spy_bars) >= _MIN_BARS_REQUIRED:
+            try:
+                spy_engine = IndicatorEngine()
+                for spec in self._indicator_specs:
+                    spy_engine.register(spec)
+                spy_indicators = spy_engine.compute(deque(spy_bars, maxlen=500))
+                raw_adx = spy_indicators.get("ADX_14")
+                if isinstance(raw_adx, (int, float)) and raw_adx > 0:
+                    spy_adx = float(raw_adx)
+                    logger.info("NightlyScanner: SPY ADX_14 = %.2f", spy_adx)
+            except Exception:
+                logger.warning("NightlyScanner: failed to extract SPY ADX")
+
+        # Stage 3: Scan each symbol
         scan_results: list[ScanResult] = []
         errors: list[dict[str, str]] = []
         symbols_with_signals = 0
@@ -328,10 +344,10 @@ class NightlyScanner:
             len(errors),
         )
 
-        # Stage 3: Rank and select top candidates
+        # Stage 4: Rank and select top candidates
         candidates = self._ranker.rank(scan_results, sector_map=self._sector_map)
 
-        # Stage 4: Build and persist result
+        # Stage 5: Build and persist result
         result = BatchResult(
             run_at=datetime.now(tz=timezone.utc),
             scan_duration_secs=time.monotonic() - t0,
@@ -340,6 +356,7 @@ class NightlyScanner:
             candidates=candidates,
             errors=errors,
             regime=regime,
+            spy_adx=spy_adx,
         )
 
         self._save_result(result)

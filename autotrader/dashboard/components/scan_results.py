@@ -385,20 +385,30 @@ def _render_risk_preview(candidates_df: pd.DataFrame, dashboard_data) -> None:
     current_equity = getattr(dashboard_data, "current_equity", 0.0)
     current_count = len(current_positions)
 
-    new_count = len(candidates_df)
+    # Filter out already-held symbols so they are not double-counted
+    held_set = set(current_positions)
+    from autotrader.dashboard.data_loader import load_open_positions
+    held_set.update(load_open_positions().keys())
+
+    if "symbol" in candidates_df.columns and held_set:
+        new_candidates_df = candidates_df[~candidates_df["symbol"].isin(held_set)]
+    else:
+        new_candidates_df = candidates_df
+
+    new_count = len(new_candidates_df)
     projected_total = current_count + new_count
 
-    # Count longs and shorts in candidates
+    # Count longs and shorts in candidates (excluding already-held)
     new_longs = 0
     new_shorts = 0
     projected_risk = 0.0
-    if "direction" in candidates_df.columns:
-        new_longs = int((candidates_df["direction"].str.lower() == "long").sum())
+    if "direction" in new_candidates_df.columns:
+        new_longs = int((new_candidates_df["direction"].str.lower() == "long").sum())
         new_shorts = new_count - new_longs
 
     # Estimate risk from candidates
-    if "atr" in candidates_df.columns and "strategy" in candidates_df.columns:
-        for _, row in candidates_df.iterrows():
+    if "atr" in new_candidates_df.columns and "strategy" in new_candidates_df.columns:
+        for _, row in new_candidates_df.iterrows():
             atr_val = pd.to_numeric(row.get("atr", 0), errors="coerce") or 0
             strat = str(row.get("strategy", ""))
             dirn = str(row.get("direction", "long")).lower()
