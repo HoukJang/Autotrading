@@ -578,6 +578,16 @@ class BatchPipelineOrchestrator:
         # not block recording of the remaining positions
         new_symbols: list[str] = []
         for held in new_positions:
+            if held.symbol in host._held_positions:
+                logger.critical(
+                    "DEDUP GUARD: %s already in _held_positions -- skipping "
+                    "confirmation registration to prevent double tracking "
+                    "(existing_strategy=%s, new_strategy=%s)",
+                    held.symbol,
+                    host._held_positions[held.symbol].strategy,
+                    held.strategy,
+                )
+                continue
             try:
                 host._held_positions[held.symbol] = held
                 host._position_strategy_map[held.symbol] = held.strategy
