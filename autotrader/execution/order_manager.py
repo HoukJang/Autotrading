@@ -324,8 +324,17 @@ class OrderManager:
                     side, symbol, result.filled_qty, result.filled_price,
                     result.status, attempt,
                 )
-                # Remove from active orders tracking
-                self._evict_symbol(symbol)
+                # Only evict active order tracking after confirmed fill.
+                # Evicting before fill confirmation loses the SL order reference.
+                _FILL_CONFIRMED = {"filled", "partially_filled"}
+                if result.status in _FILL_CONFIRMED:
+                    self._evict_symbol(symbol)
+                else:
+                    logger.warning(
+                        "Exit order %s for %s not yet filled (status=%s), "
+                        "keeping active order tracking until fill confirmed",
+                        result.order_id, symbol, result.status,
+                    )
                 return result
             except Exception as exc:
                 err = OrderError(symbol, f"Exit submission failed (attempt {attempt}/{_MAX_RETRIES}): {exc}")

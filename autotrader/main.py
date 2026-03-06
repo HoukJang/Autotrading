@@ -522,6 +522,29 @@ class AutoTrader:
                 source, len(orphaned), sorted(orphaned),
             )
 
+        # --- Cross-system consistency check ---
+        # Compare all 4 tracking systems: _open_position_tracker, _held_positions,
+        # _position_monitor, _position_strategy_map.  Log WARNING for mismatches
+        # but do NOT auto-fix (too risky).
+        held_syms = set(self._held_positions.keys())
+        monitor_syms = set(
+            self._position_monitor.monitored_symbols
+        ) if self._position_monitor else set()
+        strat_map_syms = set(self._position_strategy_map.keys())
+
+        all_internal_syms = tracked_symbols | held_syms | monitor_syms | strat_map_syms
+        for sym in sorted(all_internal_syms):
+            in_tracker = sym in tracked_symbols
+            in_held = sym in held_syms
+            in_monitor = sym in monitor_syms
+            in_strat_map = sym in strat_map_syms
+            if not (in_tracker and in_held and in_monitor and in_strat_map):
+                logger.warning(
+                    "RECONCILIATION[%s]: cross-system inconsistency for %s: "
+                    "tracker=%s, held=%s, monitor=%s, strategy_map=%s",
+                    source, sym, in_tracker, in_held, in_monitor, in_strat_map,
+                )
+
         if not untracked:
             return
 
@@ -667,12 +690,30 @@ class AutoTrader:
 
         Three-phase approach:
           Phase 0 - Restore strategy map from live_trades.jsonl.
+          Phase 0b - Load MFE/MAE state from open_positions.json snapshot.
           Phase 1 - Fetch positions from broker (with 1 retry).
           Phase 2 - Per-position registration (individual failures don't block others).
           Phase 3 - Post-registration setup (dump state + start monitor).
         """
         # Phase 0: Restore strategy map from trades file
         self._restore_strategy_map_from_trades()
+
+        # Phase 0b: Load last MFE/MAE snapshot for highest/lowest price restore
+        import json as _json
+
+        saved_positions: dict[str, dict] = {}
+        try:
+            snap_path = Path("data/open_positions.json")
+            if snap_path.exists():
+                snap_data = _json.loads(snap_path.read_text(encoding="utf-8"))
+                for rec in snap_data:
+                    saved_positions[rec["symbol"]] = rec
+                logger.info(
+                    "Loaded MFE/MAE snapshot for %d positions from %s",
+                    len(saved_positions), snap_path,
+                )
+        except Exception:
+            logger.warning("Could not load open_positions.json snapshot, MFE/MAE will reset")
 
         # Phase 1: Fetch from broker with retry
         positions = None
@@ -732,6 +773,16 @@ class AutoTrader:
                     # Try timestamp from the trade record itself
                     pass  # entry_date stays as yesterday (safe default)
 
+                # Restore highest/lowest from saved snapshot if available
+                saved = saved_positions.get(pos.symbol, {})
+                restored_highest = saved.get("highest_price", pos.avg_entry_price)
+                restored_lowest = saved.get("lowest_price", pos.avg_entry_price)
+                # Sanity: highest must be >= entry, lowest must be <= entry
+                if restored_highest < pos.avg_entry_price:
+                    restored_highest = pos.avg_entry_price
+                if restored_lowest > pos.avg_entry_price:
+                    restored_lowest = pos.avg_entry_price
+
                 held = HeldPosition(
                     symbol=pos.symbol,
                     strategy=strategy,
@@ -740,9 +791,14 @@ class AutoTrader:
                     entry_atr=atr,
                     entry_date_et=entry_date,
                     qty=pos.quantity,
-                    highest_price=pos.avg_entry_price,
-                    lowest_price=pos.avg_entry_price,
+                    highest_price=restored_highest,
+                    lowest_price=restored_lowest,
                 )
+                if saved:
+                    logger.info(
+                        "Restored MFE/MAE state for %s: highest=%.2f, lowest=%.2f",
+                        pos.symbol, restored_highest, restored_lowest,
+                    )
                 self._held_positions[pos.symbol] = held
                 self._position_strategy_map[pos.symbol] = strategy
                 if self._position_monitor is not None:
@@ -1268,6 +1324,28 @@ class AutoTrader:
                 logger.info("Re-subscribed to %d symbols after reconnect", len(held))
             except Exception:
                 logger.exception("Failed to re-subscribe after reconnect")
+
+            # Refresh _last_prices from broker REST API to clear stale values
+            try:
+                positions = await self._broker.get_positions()
+                if positions:
+                    refreshed = 0
+                    for pos in positions:
+                        # Derive current price from market_value / quantity
+                        if pos.quantity > 0 and pos.market_value > 0:
+                            current = pos.market_value / pos.quantity
+                            self._last_prices[pos.symbol] = current
+                            refreshed += 1
+                    logger.info(
+                        "Refreshed _last_prices for %d/%d positions after reconnect",
+                        refreshed, len(positions),
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to refresh _last_prices after reconnect, "
+                    "stale values may persist until next bar"
+                )
+
             attempt += 1
 
     # -----------------------------------------------------------------------
@@ -1302,6 +1380,15 @@ class AutoTrader:
         # Forward bar to PositionMonitor for exit evaluation
         if self._position_monitor is not None:
             await self._position_monitor.on_bar(bar)
+
+            # Guard: if PositionMonitor triggered an exit, the position is now
+            # removed from all tracking systems.  Re-dump to clear the stale
+            # snapshot written above, and skip further processing for this bar.
+            if bar.symbol not in self._held_positions:
+                self._last_prices.pop(bar.symbol, None)
+                self._dump_open_positions()
+                self._bar_count += 1
+                return
 
         # Periodic equity snapshot
         self._bar_count += 1
