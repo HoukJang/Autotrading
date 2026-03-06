@@ -38,6 +38,19 @@
   - 시장 레짐 분석 결과 (해당 시)
 - 리뷰 없이 다음 백테스트 차수로 넘어가지 않는다
 
+## Code Review Rules (Dev-5)
+
+- 모든 코드 변경 후 반드시 Dev-5 (code-reviewer) impact review를 수행한다
+- Impact review 체크 항목:
+  1. **Broken callers**: 변경된 함수 시그니처/리턴값이 호출자를 깨뜨리는지
+  2. **Missing matching changes**: 파일 A 변경 시 의존하는 파일 B도 수정 필요한지
+  3. **Variable scope**: 수정된 코드의 변수가 항상 정의되어 있는지
+  4. **New edge cases**: 수정이 새로운 실패 모드를 만드는지
+  5. **Cross-system consistency**: 여러 tracking 시스템(held_positions, strategy_map, position_monitor, open_position_tracker) 간 일관성
+  6. **N+1 API calls**: 루프 내 불필요한 반복 API 호출이 없는지
+- P0/P1 수정 후에는 반드시 impact review를 수행한 뒤 커밋한다
+- Review 결과 발견된 이슈는 같은 커밋 또는 직후 커밋에서 함께 수정한다
+
 ## Project Docs
 
 - System design: `docs/plans/2026-02-24-autotrader-v2-design.md`

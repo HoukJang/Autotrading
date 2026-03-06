@@ -705,6 +705,7 @@ class AutoTrader:
         today_et = datetime.now(timezone.utc).astimezone(_ET).date()
         loaded_count = 0
         trades_cache = getattr(self, "_trades_meta_cache", {})
+        recon_account = None  # Lazy-fetch once for reconciliation entries
         for pos in positions:
             try:
                 strategy = self._position_strategy_map.get(pos.symbol, "unknown")
@@ -752,7 +753,8 @@ class AutoTrader:
                 # Auto-write reconciliation_entry for positions missing from trade log
                 if pos.symbol not in trades_cache and self._trade_logger is not None:
                     try:
-                        account = await self._broker.get_account()
+                        if recon_account is None:
+                            recon_account = await self._broker.get_account()
                         record = LiveTradeRecord(
                             timestamp=datetime.now(timezone.utc).isoformat(),
                             symbol=pos.symbol,
@@ -763,7 +765,7 @@ class AutoTrader:
                             price=pos.avg_entry_price,
                             pnl=0.0,
                             regime=self._current_regime.value,
-                            equity_after=account.equity,
+                            equity_after=recon_account.equity,
                             metadata={
                                 "entry_atr": atr,
                                 "reconciliation_source": "startup_auto",
