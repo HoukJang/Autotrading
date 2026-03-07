@@ -6,9 +6,13 @@ the owning strategy to manage its own position.
 
 Updated for the 5-regime system with only BM and MR strategies in
 the allocation table.
+
+Updated for PositionBook SSOT: tests now register positions via
+app._position_book.add() instead of writing to the former
+_position_strategy_map dict directly.
 """
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -18,6 +22,7 @@ from autotrader.core.config import Settings
 from autotrader.core.types import (
     AccountInfo, Bar, Order, Position, Signal,
 )
+from autotrader.trading.types import HeldPosition
 
 
 def _make_bar(symbol: str = "AAPL", close: float = 150.0, idx: int = 0) -> Bar:
@@ -31,6 +36,25 @@ def _make_bar(symbol: str = "AAPL", close: float = 150.0, idx: int = 0) -> Bar:
         close=close,
         volume=1000.0,
     )
+
+
+def _register_position(app: AutoTrader, symbol: str, strategy: str) -> None:
+    """Register a position in PositionBook to simulate an existing holding.
+
+    Sets entry_date to 2 days ago to avoid PDT guard in close tests.
+    """
+    entry_time = datetime(2026, 3, 1, 10, 0, tzinfo=timezone.utc)
+    held = HeldPosition(
+        symbol=symbol,
+        strategy=strategy,
+        direction="long",
+        entry_price=150.0,
+        entry_atr=2.0,
+        entry_date_et=date(2026, 3, 1),
+        qty=10,
+        _entry_time=entry_time,
+    )
+    app._position_book.add(held)
 
 
 class TestDuplicateSignalPrevention:
@@ -50,7 +74,7 @@ class TestDuplicateSignalPrevention:
         account = await app._broker.get_account()
 
         # Simulate existing position from rsi_mean_reversion
-        app._position_strategy_map["AAPL"] = "rsi_mean_reversion"
+        _register_position(app, "AAPL", "rsi_mean_reversion")
 
         bar = _make_bar("AAPL", 150.0)
         app._bar_history["AAPL"].append(bar)
@@ -70,7 +94,7 @@ class TestDuplicateSignalPrevention:
         await app._broker.connect()
         account = await app._broker.get_account()
 
-        app._position_strategy_map["AAPL"] = "rsi_mean_reversion"
+        _register_position(app, "AAPL", "rsi_mean_reversion")
 
         bar = _make_bar("AAPL", 150.0)
         app._bar_history["AAPL"].append(bar)
@@ -90,7 +114,7 @@ class TestDuplicateSignalPrevention:
         await app._broker.connect()
         account = await app._broker.get_account()
 
-        app._position_strategy_map["AAPL"] = "rsi_mean_reversion"
+        _register_position(app, "AAPL", "rsi_mean_reversion")
 
         positions = [
             Position(
@@ -116,7 +140,7 @@ class TestDuplicateSignalPrevention:
         await app._broker.connect()
         account = await app._broker.get_account()
 
-        app._position_strategy_map["AAPL"] = "rsi_mean_reversion"
+        _register_position(app, "AAPL", "rsi_mean_reversion")
 
         bar = _make_bar("MSFT", 100.0)
         app._bar_history["MSFT"].append(bar)
@@ -131,8 +155,8 @@ class TestDuplicateSignalPrevention:
         # Should not be blocked by duplicate check (may be blocked by other checks)
         # The key assertion: it must NOT be None due to duplicate prevention
         # It could still be None if allocation engine blocks it, so we verify
-        # by checking that MSFT is not in position_strategy_map
-        assert "MSFT" not in app._position_strategy_map
+        # by checking that MSFT is not in PositionBook
+        assert not app._position_book.has("MSFT")
         # If allocation allows, order should be created
         if order is not None:
             assert order.symbol == "MSFT"
@@ -147,7 +171,7 @@ class TestDuplicateSignalPrevention:
         await app._broker.connect()
         account = await app._broker.get_account()
 
-        app._position_strategy_map["AAPL"] = "rsi_mean_reversion"
+        _register_position(app, "AAPL", "rsi_mean_reversion")
 
         bar = _make_bar("MSFT", 100.0)
         app._bar_history["MSFT"].append(bar)
@@ -165,7 +189,7 @@ class TestDuplicateSignalPrevention:
 
     @pytest.mark.asyncio
     async def test_blocks_when_broker_has_position(self, app):
-        """Even if _position_strategy_map is empty, broker position blocks entry."""
+        """Even if PositionBook is empty, broker position blocks entry."""
         await app._broker.connect()
         account = await app._broker.get_account()
 

@@ -46,6 +46,7 @@ from autotrader.batch.types import Candidate as BatchCandidate, FilteredCandidat
 from autotrader.execution.entry_manager import Candidate as EntryCandidate, EntryManager
 from autotrader.execution.exit_rules import ExitRuleEngine, HeldPosition
 from autotrader.execution.order_manager import OrderManager
+from autotrader.execution.order_ledger import OrderLedger, PENDING_STATES
 from autotrader.execution.position_monitor import PositionMonitor
 from autotrader.indicators.engine import IndicatorEngine
 from autotrader.indicators.base import IndicatorSpec
@@ -56,6 +57,7 @@ from autotrader.orchestration.batch_pipeline import (
 from autotrader.orchestration.history_manager import HistoryManager
 from autotrader.portfolio.allocation_engine import AllocationEngine
 from autotrader.portfolio.position_tracker import OpenPositionTracker
+from autotrader.trading.position_book import PositionBook
 from autotrader.portfolio.regime_detector import MarketRegime, RegimeDetector
 from autotrader.portfolio.regime_position_reviewer import RegimePositionReviewer
 from autotrader.portfolio.regime_tracker import RegimeTracker
@@ -66,6 +68,7 @@ from autotrader.rotation.event_driven import EventDrivenRotation
 from autotrader.rotation.manager import RotationManager
 from autotrader.scheduling import StartupCatchUpResolver
 from autotrader.scheduling.state import SchedulerState
+from autotrader.state.runtime_state import RuntimeState, bootstrap_from_broker
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
 from autotrader.strategy.breakout_momentum import BreakoutMomentum
@@ -248,18 +251,19 @@ class AutoTrader:
             lambda: deque(maxlen=settings.data.bar_history_size)
         )
 
-        # --- Position tracking ---
-        self._open_position_tracker = OpenPositionTracker()
-        self._position_strategy_map: dict[str, str] = {}
+        # --- Position tracking (single source of truth) ---
+        self._position_book = PositionBook()
+        self._open_position_tracker = OpenPositionTracker(position_book=self._position_book)
+
+        # Backward-compat properties: _held_positions and _position_strategy_map
+        # are now thin views over PositionBook. Direct dict assignment sites
+        # have been migrated to PositionBook.add/remove calls.
 
         # --- Execution layer (new v3) ---
         self._order_manager: OrderManager | None = None
         self._exit_rule_engine = ExitRuleEngine()
         self._entry_manager: EntryManager | None = None
         self._position_monitor: PositionMonitor | None = None
-
-        # Map from symbol -> HeldPosition for positions managed by v3 execution
-        self._held_positions: dict[str, HeldPosition] = {}
 
         # --- Batch pipeline components (injected) ---
         self._nightly_scanner: NightlyScannerProtocol | None = nightly_scanner
@@ -331,6 +335,33 @@ class AutoTrader:
         self._current_regime = regime
 
     # -----------------------------------------------------------------------
+    # Backward-compat views over PositionBook
+    # -----------------------------------------------------------------------
+
+    @property
+    def _held_positions(self) -> dict[str, HeldPosition]:
+        """Read-only view: symbol -> HeldPosition from PositionBook.
+
+        Existing code that reads ``self._held_positions`` (len, keys, get,
+        ``in``) works unchanged.  Mutation sites (``[sym] = held``,
+        ``pop``, ``del``) have been migrated to PositionBook.add/remove.
+        """
+        return {sym: p for sym, p in zip(
+            self._position_book.symbols,
+            self._position_book.all_positions(),
+        )}
+
+    @property
+    def _position_strategy_map(self) -> dict[str, str]:
+        """Read-only view: symbol -> strategy name from PositionBook.
+
+        Existing code that reads ``self._position_strategy_map`` (get,
+        values, ``in``) works unchanged.  Mutation sites have been
+        migrated to PositionBook.add/remove.
+        """
+        return self._position_book.strategy_map()
+
+    # -----------------------------------------------------------------------
     # Startup / Shutdown
     # -----------------------------------------------------------------------
 
@@ -389,6 +420,15 @@ class AutoTrader:
         # Load any existing open positions into v3 PositionMonitor
         await self._load_existing_positions()
 
+        # Restore component state from persisted RuntimeState
+        snapshots = self._runtime_state.load()
+        if snapshots:
+            state_components = self._get_state_components()
+            self._runtime_state.restore(state_components, snapshots)
+
+        # Reconcile any pending orders from ledger (ghost fill detection)
+        await self._reconcile_pending_orders()
+
         # Start daily regime refresh scheduler
         self._daily_regime_task = asyncio.create_task(self._daily_regime_scheduler())
 
@@ -401,7 +441,7 @@ class AutoTrader:
             logger.warning("No warmup data available; using config symbols (%d)", len(self._settings.symbols))
 
         # Subscribe to minute bars for held positions only (not full universe)
-        held_symbols = list(self._held_positions.keys())
+        held_symbols = self._position_book.symbols
         if held_symbols:
             logger.info("Subscribing to minute bars for %d held positions: %s", len(held_symbols), held_symbols)
         else:
@@ -446,6 +486,11 @@ class AutoTrader:
                     pass
                 setattr(self, task_attr, None)
 
+        # Save state on graceful shutdown
+        if hasattr(self, "_runtime_state"):
+            self._runtime_state.save(self._get_state_components())
+            logger.info("RuntimeState saved on shutdown")
+
         await self._broker.disconnect()
         logger.info("AutoTrader v3 stopped")
 
@@ -458,10 +503,14 @@ class AutoTrader:
         if not isinstance(self._broker, type(self._broker)) or not hasattr(self._broker, "submit_order"):
             logger.warning("Broker is not AlpacaAdapter; execution engine may not function correctly")
 
+        # Initialise order ledger for persistent order tracking
+        self._order_ledger = OrderLedger()
+        self._order_ledger.load()
+
         # OrderManager wraps the broker (expects AlpacaAdapter)
         if hasattr(self._broker, "_api_key"):
             # It IS an AlpacaAdapter
-            self._order_manager = OrderManager(self._broker)  # type: ignore[arg-type]
+            self._order_manager = OrderManager(self._broker, ledger=self._order_ledger)  # type: ignore[arg-type]
         else:
             # Fallback: wrap the PaperBroker via a thin adapter shim
             self._order_manager = _PaperOrderManager(self._broker)  # type: ignore[assignment]
@@ -478,10 +527,27 @@ class AutoTrader:
             order_manager=self._order_manager,
             exit_rule_engine=self._exit_rule_engine,
             indicator_engine=self._indicator_engine,
+            position_book=self._position_book,
         )
         self._position_monitor.register_exit_callback(self._on_position_exit)
 
+        # RuntimeState persistence
+        self._runtime_state = RuntimeState()
+
         logger.info("V3 execution engine initialised")
+
+    def _get_state_components(self) -> dict[str, Any]:
+        """Collect all snapshottable components for RuntimeState persistence."""
+        components: dict[str, Any] = {}
+        if hasattr(self, "_gdr_manager") and self._gdr_manager is not None:
+            components["gdr_manager"] = self._gdr_manager
+        if hasattr(self, "_risk_manager") and self._risk_manager is not None:
+            components["risk_manager"] = self._risk_manager
+        if hasattr(self, "_entry_manager") and self._entry_manager is not None:
+            components["entry_manager"] = self._entry_manager
+        if hasattr(self, "_exit_rule_engine") and self._exit_rule_engine is not None:
+            components["exit_rules"] = self._exit_rule_engine
+        return components
 
     async def _reconcile_positions(self, *, source: str = "startup") -> None:
         """Compare broker positions with internal tracking and reconcile gaps.
@@ -525,26 +591,22 @@ class AutoTrader:
             )
 
         # --- Cross-system consistency check ---
-        # Compare all 4 tracking systems: _open_position_tracker, _held_positions,
-        # _position_monitor, _position_strategy_map.  Log WARNING for mismatches
-        # but do NOT auto-fix (too risky).
-        held_syms = set(self._held_positions.keys())
-        monitor_syms = set(
-            self._position_monitor.monitored_symbols
-        ) if self._position_monitor else set()
-        strat_map_syms = set(self._position_strategy_map.keys())
-
-        all_internal_syms = tracked_symbols | held_syms | monitor_syms | strat_map_syms
-        for sym in sorted(all_internal_syms):
-            in_tracker = sym in tracked_symbols
-            in_held = sym in held_syms
-            in_monitor = sym in monitor_syms
-            in_strat_map = sym in strat_map_syms
-            if not (in_tracker and in_held and in_monitor and in_strat_map):
+        # With PositionBook as SSOT, tracker/held/monitor/strategy_map are
+        # all views of the same underlying store.  We only need to verify
+        # that the PositionBook and the broker agree.
+        book_syms = set(self._position_book.symbols)
+        if book_syms != broker_symbols:
+            only_book = book_syms - broker_symbols
+            only_broker = broker_symbols - book_syms
+            if only_book:
                 logger.warning(
-                    "RECONCILIATION[%s]: cross-system inconsistency for %s: "
-                    "tracker=%s, held=%s, monitor=%s, strategy_map=%s",
-                    source, sym, in_tracker, in_held, in_monitor, in_strat_map,
+                    "RECONCILIATION[%s]: in PositionBook but NOT at broker: %s",
+                    source, sorted(only_book),
+                )
+            if only_broker:
+                logger.warning(
+                    "RECONCILIATION[%s]: at broker but NOT in PositionBook: %s",
+                    source, sorted(only_broker),
                 )
 
         if not untracked:
@@ -587,11 +649,11 @@ class AutoTrader:
                 highest_price=max(pos.avg_entry_price, current_price),
                 lowest_price=min(pos.avg_entry_price, current_price),
             )
-            self._held_positions[pos.symbol] = held
-            self._position_strategy_map[pos.symbol] = "unknown"
+            # Register into PositionBook (SSOT). PositionMonitor and
+            # OpenPositionTracker both delegate to the same book.
+            self._position_book.add(held)
             if self._position_monitor is not None:
                 self._position_monitor.add_position(held)
-            self._open_position_tracker.add_position(held)
 
             # Log reconciliation entry trade record
             if self._trade_logger is not None:
@@ -635,12 +697,13 @@ class AutoTrader:
         self._dump_open_positions()
 
     def _restore_strategy_map_from_trades(self) -> None:
-        """Restore _position_strategy_map from live_trades.jsonl on startup.
+        """Restore strategy assignments from live_trades.jsonl on startup.
 
         Reads entry/exit records to determine which positions are currently
-        open and what their strategy + metadata was.  This ensures that
-        positions loaded from the broker have correct strategy assignments
-        instead of 'unknown'.
+        open and what their strategy + metadata was.  The results are stored
+        in ``_trades_meta_cache`` and used by ``_load_existing_positions``
+        to set the correct strategy when creating HeldPositions in
+        PositionBook.
         """
         import json as _json
 
@@ -681,10 +744,8 @@ class AutoTrader:
             return
 
         if symbol_meta:
-            for sym, meta in symbol_meta.items():
-                strategy = meta["strategy"]
-                if strategy and strategy != "unknown":
-                    self._position_strategy_map[sym] = strategy
+            # Strategy assignments are stored in _trades_meta_cache and
+            # applied when HeldPositions are created in _load_existing_positions.
             logger.info(
                 "Restored strategy map for %d symbols from trades: %s",
                 len(symbol_meta),
@@ -756,7 +817,9 @@ class AutoTrader:
         recon_account = None  # Lazy-fetch once for reconciliation entries
         for pos in positions:
             try:
-                strategy = self._position_strategy_map.get(pos.symbol, "unknown")
+                # Look up strategy from trades cache (restored in Phase 0)
+                cached_entry = trades_cache.get(pos.symbol, {})
+                strategy = cached_entry.get("strategy", "unknown") or "unknown"
 
                 # Restore ATR from trades metadata cache (Phase 0),
                 # fall back to indicator history, then default 1.0
@@ -772,6 +835,9 @@ class AutoTrader:
                         atr_raw = indicators.get("ATR_14")
                         if isinstance(atr_raw, (int, float)) and atr_raw > 0:
                             atr = float(atr_raw)
+
+                # Restore saved snapshot for this position
+                saved = saved_positions.get(pos.symbol, {})
 
                 # Restore entry_date from trades file or snapshot
                 entry_date = today_et - timedelta(days=1)  # safe default
@@ -791,7 +857,6 @@ class AutoTrader:
                         pass  # keep safe default
 
                 # Restore highest/lowest from saved snapshot if available
-                saved = saved_positions.get(pos.symbol, {})
                 restored_highest = saved.get("highest_price", pos.avg_entry_price)
                 restored_lowest = saved.get("lowest_price", pos.avg_entry_price)
                 # Sanity: highest must be >= entry, lowest must be <= entry
@@ -824,8 +889,9 @@ class AutoTrader:
                         pos.symbol, restored_highest, restored_lowest,
                         restored_bar_count, entry_date,
                     )
-                self._held_positions[pos.symbol] = held
-                self._position_strategy_map[pos.symbol] = strategy
+                # Register into PositionBook (SSOT). PositionMonitor and
+                # OpenPositionTracker both delegate to the same book.
+                self._position_book.add(held)
                 if self._position_monitor is not None:
                     self._position_monitor.add_position(held)
                     # Seed PositionMonitor's per-symbol bar history from
@@ -840,7 +906,6 @@ class AutoTrader:
                                 "Seeded PositionMonitor bar history for %s with %d warmup bars",
                                 pos.symbol, len(warmup_bars),
                             )
-                self._open_position_tracker.add_position(held)
                 loaded_count += 1
 
                 # Auto-write reconciliation_entry for positions missing from trade log
@@ -896,6 +961,134 @@ class AutoTrader:
                 await self._position_monitor.start()
         except Exception:
             logger.exception("Failed to start position monitor")
+
+    async def _reconcile_pending_orders(self) -> None:
+        """Reconcile pending orders from the ledger against broker state.
+
+        On startup, any orders in SUBMITTED/PENDING_FILL state in the ledger
+        may have filled or been cancelled at the broker while we were offline.
+        Query each pending order and update the ledger accordingly.
+        """
+        if not hasattr(self, "_order_ledger") or self._order_ledger is None:
+            return
+
+        pending_entries = self._order_ledger.get_pending_entries()
+        pending_sls = self._order_ledger.get_pending_stop_losses()
+
+        if not pending_entries and not pending_sls:
+            logger.info("Order ledger reconciliation: no pending orders")
+            return
+
+        logger.info(
+            "Order ledger reconciliation: %d pending entries, %d pending SLs",
+            len(pending_entries), len(pending_sls),
+        )
+
+        _FILL_OK = {"filled", "partially_filled"}
+        _TERMINAL = {"cancelled", "canceled", "expired", "rejected"}
+
+        # Reconcile pending entry orders
+        for record in pending_entries:
+            try:
+                broker_status = await self._broker.get_order_status(record.order_id)
+                if broker_status is None:
+                    logger.warning(
+                        "Ledger reconcile: order %s (%s) not found at broker -- marking cancelled",
+                        record.order_id, record.symbol,
+                    )
+                    from autotrader.execution.order_ledger import OrderState
+                    self._order_ledger.record_terminal(record.order_id, OrderState.CANCELLED)
+                    continue
+
+                if broker_status.status in _FILL_OK:
+                    logger.warning(
+                        "RECONCILED GHOST FILL: order %s (%s) filled at broker "
+                        "(qty=%.0f, price=%.2f) -- was pending in ledger",
+                        record.order_id, record.symbol,
+                        broker_status.filled_qty, broker_status.filled_price,
+                    )
+                    partial = broker_status.status == "partially_filled"
+                    self._order_ledger.record_fill(
+                        record.order_id, broker_status.filled_qty,
+                        broker_status.filled_price, partial=partial,
+                    )
+                    # Check if this position is already tracked
+                    existing = self._open_position_tracker.get_position(record.symbol)
+                    if existing is None:
+                        logger.warning(
+                            "Ghost fill %s (%s) has no tracked position -- "
+                            "position will be picked up by broker reconciliation",
+                            record.order_id, record.symbol,
+                        )
+                elif broker_status.status in _TERMINAL:
+                    from autotrader.execution.order_ledger import OrderState
+                    _state_map = {
+                        "cancelled": OrderState.CANCELLED, "canceled": OrderState.CANCELLED,
+                        "expired": OrderState.EXPIRED, "rejected": OrderState.REJECTED,
+                    }
+                    self._order_ledger.record_terminal(
+                        record.order_id,
+                        _state_map.get(broker_status.status, OrderState.CANCELLED),
+                    )
+                    logger.info(
+                        "Ledger reconcile: order %s (%s) terminal at broker: %s",
+                        record.order_id, record.symbol, broker_status.status,
+                    )
+                else:
+                    logger.info(
+                        "Ledger reconcile: order %s (%s) still pending at broker: %s",
+                        record.order_id, record.symbol, broker_status.status,
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile pending order %s (%s)",
+                    record.order_id, record.symbol,
+                )
+
+        # Reconcile pending stop-loss orders
+        for symbol, record in pending_sls.items():
+            try:
+                broker_status = await self._broker.get_order_status(record.order_id)
+                if broker_status is None:
+                    logger.warning(
+                        "Ledger reconcile: SL order %s (%s) not found at broker -- marking cancelled",
+                        record.order_id, symbol,
+                    )
+                    from autotrader.execution.order_ledger import OrderState
+                    self._order_ledger.record_terminal(record.order_id, OrderState.CANCELLED)
+                elif broker_status.status in _FILL_OK:
+                    logger.warning(
+                        "Ledger reconcile: SL order %s (%s) FILLED at broker -- "
+                        "stop loss was triggered while offline",
+                        record.order_id, symbol,
+                    )
+                    self._order_ledger.record_fill(
+                        record.order_id, broker_status.filled_qty,
+                        broker_status.filled_price,
+                    )
+                elif broker_status.status in _TERMINAL:
+                    from autotrader.execution.order_ledger import OrderState
+                    _state_map = {
+                        "cancelled": OrderState.CANCELLED, "canceled": OrderState.CANCELLED,
+                        "expired": OrderState.EXPIRED, "rejected": OrderState.REJECTED,
+                    }
+                    self._order_ledger.record_terminal(
+                        record.order_id,
+                        _state_map.get(broker_status.status, OrderState.CANCELLED),
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile pending SL order %s (%s)",
+                    record.order_id, symbol,
+                )
+
+        # Compact old ledger entries (keep 72h)
+        try:
+            removed = self._order_ledger.compact(keep_hours=72)
+            if removed > 0:
+                logger.info("Ledger compacted: removed %d old entries", removed)
+        except Exception:
+            logger.exception("Failed to compact order ledger")
 
     # -----------------------------------------------------------------------
     # Batch+intraday scheduler
@@ -1089,7 +1282,7 @@ class AutoTrader:
                 fired_summary = {k: (str(v) if v else "None") for k, v in _fired.items()}
                 logger.debug(
                     "Scheduler heartbeat: h=%d m=%d, positions=%d, state_date=%s, fired=%s",
-                    h, m, len(self._held_positions), _state.date, fired_summary,
+                    h, m, self._position_book.count, _state.date, fired_summary,
                 )
 
             # 9:00 AM: Pre-market daily bar refresh via REST API
@@ -1270,8 +1463,17 @@ class AutoTrader:
             fill_price: Actual exit fill price.
             pnl: Realised profit/loss.
         """
-        held = self._held_positions.pop(symbol, None)
-        self._position_strategy_map.pop(symbol, None)
+        # PositionMonitor already removed the position from PositionBook
+        # before calling this callback. Retrieve the cached position
+        # reference from the monitor, falling back to a book remove
+        # attempt (which returns None if already gone).
+        held = (
+            getattr(self._position_monitor, '_last_exited_position', None)
+            if self._position_monitor is not None
+            else None
+        )
+        if held is None or held.symbol != symbol:
+            held = self._position_book.remove(symbol)
 
         # Unsubscribe from minute bars for this symbol
         try:
@@ -1282,11 +1484,11 @@ class AutoTrader:
                 symbol,
             )
 
-        # Update MFE/MAE tracker
-        tracked = self._open_position_tracker.close_position(symbol)
-        mfe = tracked.mfe if tracked else 0.0
-        mae = tracked.mae if tracked else 0.0
-        bars_held = tracked.bar_count if tracked else 0
+        # MFE/MAE data from the removed HeldPosition (already popped
+        # from PositionBook above, so close_position would return None)
+        mfe = held.mfe if held else 0.0
+        mae = held.mae if held else 0.0
+        bars_held = held.bar_count if held else 0
 
         # Update risk manager
         self._risk_manager.record_pnl(pnl)
@@ -1355,6 +1557,10 @@ class AutoTrader:
         # Update open positions file for dashboard
         self._dump_open_positions()
 
+        # Persist runtime state after every exit (GDR tiers, risk peak, etc.)
+        if hasattr(self, "_runtime_state"):
+            self._runtime_state.save(self._get_state_components())
+
     # -----------------------------------------------------------------------
     # WebSocket stream with auto-reconnect
     # -----------------------------------------------------------------------
@@ -1378,9 +1584,9 @@ class AutoTrader:
             await asyncio.sleep(delay)
             # Re-create stream and re-subscribe held symbols
             try:
-                held = list(self._held_positions.keys())
-                await self._broker.subscribe_bars(held, self._on_bar)
-                logger.info("Re-subscribed to %d symbols after reconnect", len(held))
+                held_syms = self._position_book.symbols
+                await self._broker.subscribe_bars(held_syms, self._on_bar)
+                logger.info("Re-subscribed to %d symbols after reconnect", len(held_syms))
             except Exception:
                 logger.exception("Failed to re-subscribe after reconnect")
 
@@ -1444,9 +1650,9 @@ class AutoTrader:
             await self._position_monitor.on_bar(bar)
 
             # Guard: if PositionMonitor triggered an exit, the position is now
-            # removed from all tracking systems.  Re-dump to clear the stale
+            # removed from PositionBook (SSOT).  Re-dump to clear the stale
             # snapshot written above, and skip further processing for this bar.
-            if bar.symbol not in self._held_positions:
+            if not self._position_book.has(bar.symbol):
                 self._last_prices.pop(bar.symbol, None)
                 self._dump_open_positions()
                 self._bar_count += 1
@@ -1505,7 +1711,7 @@ class AutoTrader:
 
         if result.status == "filled":
             if signal.direction in ("long", "short"):
-                self._position_strategy_map[signal.symbol] = signal.strategy
+                # open_position() delegates to PositionBook.add()
                 self._open_position_tracker.open_position(
                     symbol=signal.symbol,
                     strategy=signal.strategy,
@@ -1515,7 +1721,7 @@ class AutoTrader:
                     quantity=result.filled_qty,
                 )
             elif signal.direction == "close":
-                self._position_strategy_map.pop(signal.symbol, None)
+                self._position_book.remove(signal.symbol)
 
             pnl = 0.0
             exit_reason = signal.metadata.get("exit_reason", "") if signal.metadata else ""
@@ -1572,12 +1778,17 @@ class AutoTrader:
             # PDT guard: block same-day close
             tracked = self._open_position_tracker.get_position(signal.symbol)
             if tracked is not None:
-                entry_date = tracked.entry_time.astimezone(_ET_TZ).date()
+                # Use entry_time if available (legacy path), else entry_date_et
+                if tracked.entry_time is not None:
+                    entry_date = tracked.entry_time.astimezone(_ET_TZ).date()
+                else:
+                    entry_date = tracked.entry_date_et
                 now_date = datetime.now(timezone.utc).astimezone(_ET_TZ).date()
                 if entry_date == now_date:
                     logger.warning(
                         "PDT guard: blocking same-day close for %s (entered %s)",
-                        signal.symbol, tracked.entry_time.isoformat(),
+                        signal.symbol,
+                        tracked.entry_time.isoformat() if tracked.entry_time else str(entry_date),
                     )
                     return None
 
@@ -1590,16 +1801,13 @@ class AutoTrader:
             )
 
         if signal.direction in ("long", "short"):
-            if signal.symbol in self._position_strategy_map:
+            if self._position_book.has(signal.symbol):
                 return None
             existing_pos = next((p for p in positions if p.symbol == signal.symbol), None)
             if existing_pos is not None:
                 return None
 
-            strategy_count = sum(
-                1 for s in self._position_strategy_map.values()
-                if s == signal.strategy
-            )
+            strategy_count = len(self._position_book.by_strategy(signal.strategy))
             if not self._allocation_engine.should_enter(
                 signal.strategy, self._current_regime, strategy_count,
             ):
@@ -1675,9 +1883,10 @@ class AutoTrader:
             self._current_regime = transition.current
 
             # Review positions for regime compatibility
-            if self._position_strategy_map:
+            strat_map = self._position_book.strategy_map()
+            if strat_map:
                 reviews = self._regime_reviewer.review(
-                    transition.current, self._position_strategy_map,
+                    transition.current, strat_map,
                 )
                 close_reviews = [r for r in reviews if r.action == "close"]
                 if close_reviews:
@@ -1777,8 +1986,8 @@ class AutoTrader:
             await self._position_monitor.on_bar(latest_bar)
             pushed += 1
 
-            # Check if exit was triggered (position removed from tracking)
-            if symbol not in self._held_positions:
+            # Check if exit was triggered (position removed from PositionBook)
+            if not self._position_book.has(symbol):
                 self._last_prices.pop(symbol, None)
                 self._dump_open_positions()
 
@@ -1787,6 +1996,10 @@ class AutoTrader:
                 "Pushed %d daily bar(s) to PositionMonitor for exit evaluation",
                 pushed,
             )
+
+        # Periodic state save after daily bar processing
+        if hasattr(self, "_runtime_state"):
+            self._runtime_state.save(self._get_state_components())
 
     def _initialize_regime_from_daily(self) -> None:
         """Walk SPY daily bars to classify regime.
@@ -2126,7 +2339,8 @@ class _PaperOrderManager(OrderManager):
         self._broker_adapter = broker
         self._active_orders: dict = {}
 
-    async def submit_entry(self, symbol, side, qty, order_type="market", limit_price=None, time_in_force="day"):
+    async def submit_entry(self, symbol, side, qty, order_type="market", limit_price=None, time_in_force="day",
+                           *, strategy="unknown", direction="long", entry_atr=0.0, metadata=None):
         """Delegate to PaperBroker submit_order."""
         order = Order(
             symbol=symbol,
@@ -2143,12 +2357,14 @@ class _PaperOrderManager(OrderManager):
             logger.exception("PaperBroker entry submission failed for %s", symbol)
             return None
 
-    async def submit_stop_loss(self, symbol, side, qty, stop_price, parent_order_id=None):
+    async def submit_stop_loss(self, symbol, side, qty, stop_price, parent_order_id=None,
+                               *, strategy="unknown", direction="long"):
         """No-op for paper trading; SL is handled via signal-based exit."""
         logger.debug("PaperBroker: SL order skipped for %s @ %.2f (paper mode)", symbol, stop_price)
         return None
 
-    async def submit_exit(self, symbol, side, qty, order_type="market", limit_price=None):
+    async def submit_exit(self, symbol, side, qty, order_type="market", limit_price=None,
+                          *, strategy="unknown", direction="long"):
         """Delegate to PaperBroker submit_order and evict from active orders."""
         order = Order(
             symbol=symbol,

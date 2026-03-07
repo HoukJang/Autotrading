@@ -7,7 +7,8 @@ so that existing backtest code and tests continue to work unchanged.
 from autotrader.trading.regime import (
     MarketRegime as Regime,
     ALLOCATION_TABLE as _ALLOCATION_TABLE,
+    RegimeAllocation,
     RegimeClassifier,
 )
 
-__all__ = ["Regime", "RegimeClassifier"]
+__all__ = ["Regime", "RegimeAllocation", "RegimeClassifier"]

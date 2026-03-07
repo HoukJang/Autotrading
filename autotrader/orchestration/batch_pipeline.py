@@ -22,6 +22,7 @@ from autotrader.core.types import Bar, Signal
 from autotrader.execution.entry_manager import Candidate as EntryCandidate
 from autotrader.execution.exit_rules import HeldPosition
 from autotrader.portfolio.regime_detector import MarketRegime
+from autotrader.trading.position_book import PositionBook
 
 logger = logging.getLogger("autotrader.orchestration.batch_pipeline")
 
@@ -80,8 +81,7 @@ class BatchPipelineHost(Protocol):
     _entry_manager: Any
     _gap_filter: Any
     _nightly_scanner: Any
-    _held_positions: dict[str, HeldPosition]
-    _position_strategy_map: dict[str, str]
+    _position_book: PositionBook
     _broker: Any
     _position_monitor: Any
     _open_position_tracker: Any
@@ -500,20 +500,17 @@ class BatchPipelineOrchestrator:
         recorded_symbols: list[str] = []
         for held in new_positions:
             # Dedup guard: skip if symbol already tracked (prevents double registration)
-            if held.symbol in host._held_positions:
+            if host._position_book.has(held.symbol):
                 logger.critical(
-                    "DEDUP GUARD: %s already in _held_positions -- skipping "
+                    "DEDUP GUARD: %s already in PositionBook -- skipping "
                     "registration to prevent double tracking (strategy=%s)",
                     held.symbol, held.strategy,
                 )
                 continue
             try:
-                host._held_positions[held.symbol] = held
-                host._position_strategy_map[held.symbol] = held.strategy
+                host._position_book.add(held)
                 if host._position_monitor is not None:
                     host._position_monitor.add_position(held)
-                # Register with MFE/MAE tracker (use same object to avoid divergence)
-                host._open_position_tracker.add_position(held)
                 # Log entry trade to live_trades.jsonl
                 await self._log_entry_trade(held, account)
                 recorded_symbols.append(held.symbol)
@@ -571,30 +568,22 @@ class BatchPipelineOrchestrator:
         # not block recording of the remaining positions
         new_symbols: list[str] = []
         for held in new_positions:
-            if held.symbol in host._held_positions:
+            if host._position_book.has(held.symbol):
+                existing = host._position_book.get(held.symbol)
                 logger.critical(
-                    "DEDUP GUARD: %s already in _held_positions -- skipping "
+                    "DEDUP GUARD: %s already in PositionBook -- skipping "
                     "confirmation registration to prevent double tracking "
                     "(existing_strategy=%s, new_strategy=%s)",
                     held.symbol,
-                    host._held_positions[held.symbol].strategy,
+                    existing.strategy if existing else "?",
                     held.strategy,
                 )
                 continue
             try:
-                host._held_positions[held.symbol] = held
-                host._position_strategy_map[held.symbol] = held.strategy
+                host._position_book.add(held)
                 new_symbols.append(held.symbol)
                 if host._position_monitor is not None:
                     host._position_monitor.add_position(held)
-                host._open_position_tracker.open_position(
-                    symbol=held.symbol,
-                    strategy=held.strategy,
-                    direction=held.direction,
-                    entry_price=held.entry_price,
-                    entry_time=datetime.now(timezone.utc),
-                    quantity=held.qty,
-                )
                 # Log entry trade to live_trades.jsonl
                 await self._log_entry_trade(held, account)
             except Exception:

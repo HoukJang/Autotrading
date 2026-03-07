@@ -306,10 +306,11 @@ class TestAllocationIntegration:
         settings.broker.paper_balance = 50_000.0
         return AutoTrader(settings)
 
-    def test_has_position_strategy_map(self):
+    def test_has_position_book(self):
         app = AutoTrader(Settings())
-        assert hasattr(app, '_position_strategy_map')
-        assert isinstance(app._position_strategy_map, dict)
+        assert hasattr(app, '_position_book')
+        from autotrader.trading.position_book import PositionBook
+        assert isinstance(app._position_book, PositionBook)
 
     @pytest.mark.asyncio
     async def test_short_signal_creates_sell_order(self, app):
@@ -359,8 +360,8 @@ class TestAllocationIntegration:
         assert order is None
 
     @pytest.mark.asyncio
-    async def test_position_strategy_map_tracks_entries(self, app):
-        """After a filled long order, position_strategy_map is updated."""
+    async def test_position_book_tracks_entries(self, app):
+        """After a filled long order, PositionBook is updated."""
         await app._broker.connect()
         app._broker.set_price("AAPL", 100.0)
         bar = _make_bar("AAPL", 100.0)
@@ -373,24 +374,36 @@ class TestAllocationIntegration:
         )
         result = await app._process_signal(signal, account, positions)
         if result and result.status == "filled":
-            assert app._position_strategy_map.get("AAPL") == "breakout_momentum"
+            assert app._position_book.has("AAPL")
+            held = app._position_book.get("AAPL")
+            assert held.strategy == "breakout_momentum"
 
     @pytest.mark.asyncio
-    async def test_close_removes_from_strategy_map(self, app):
-        """After closing a position, symbol is removed from strategy map."""
+    async def test_close_removes_from_position_book(self, app):
+        """After closing a position, symbol is removed from PositionBook."""
+        from datetime import date, timedelta
+        from autotrader.trading.types import HeldPosition
         await app._broker.connect()
         app._broker.set_price("AAPL", 100.0)
         # Buy first
         buy = Order(symbol="AAPL", side="buy", quantity=10, order_type="market")
         await app._broker.submit_order(buy)
-        app._position_strategy_map["AAPL"] = "test_strategy"
+        # Register in PositionBook with past entry_date to avoid PDT guard
+        yesterday = datetime.now(timezone.utc) - timedelta(days=2)
+        held = HeldPosition(
+            symbol="AAPL", strategy="test_strategy", direction="long",
+            entry_price=100.0, entry_atr=2.0,
+            entry_date_et=yesterday.date(), qty=10,
+            _entry_time=yesterday,
+        )
+        app._position_book.add(held)
         # Now close
         account = await app._broker.get_account()
         positions = await app._broker.get_positions()
         signal = Signal(strategy="test_strategy", symbol="AAPL",
                         direction="close", strength=1.0)
         await app._process_signal(signal, account, positions)
-        assert "AAPL" not in app._position_strategy_map
+        assert not app._position_book.has("AAPL")
 
 
 class TestRotationScheduler:

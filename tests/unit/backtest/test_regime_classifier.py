@@ -90,51 +90,53 @@ class TestAllocation:
 
     def test_trend_up_allocation(self):
         alloc = RegimeClassifier.get_allocation(Regime.TREND_UP)
-        assert alloc["breakout_momentum"] == 0.040
-        assert alloc["rsi_mean_reversion"] == 0.012
-        assert alloc["breakout_blocked"] is False
-        assert alloc["mr_short_blocked"] is True
-        assert "trend_pullback" not in alloc
-        assert "tp_blocked" not in alloc
+        assert alloc.breakout_momentum == 0.040
+        assert alloc.rsi_mean_reversion == 0.012
+        assert alloc.breakout_blocked is False
+        assert alloc.mr_short_blocked is True
+        assert not hasattr(alloc, "trend_pullback")
+        assert not hasattr(alloc, "tp_blocked")
 
     def test_trend_down_allocation(self):
         alloc = RegimeClassifier.get_allocation(Regime.TREND_DOWN)
-        assert alloc["breakout_momentum"] == 0.005
-        assert alloc["rsi_mean_reversion"] == 0.025
-        assert alloc["breakout_blocked"] is True
-        assert alloc["mr_short_blocked"] is False
-        assert "trend_pullback" not in alloc
-        assert "tp_blocked" not in alloc
+        assert alloc.breakout_momentum == 0.005
+        assert alloc.rsi_mean_reversion == 0.025
+        assert alloc.breakout_blocked is True
+        assert alloc.mr_short_blocked is False
+        assert not hasattr(alloc, "trend_pullback")
+        assert not hasattr(alloc, "tp_blocked")
 
     def test_ranging_allocation(self):
         alloc = RegimeClassifier.get_allocation(Regime.RANGING)
-        assert alloc["breakout_momentum"] == 0.005
-        assert alloc["rsi_mean_reversion"] == 0.040
-        assert alloc["breakout_blocked"] is False
-        assert alloc["mr_short_blocked"] is False
-        assert "trend_pullback" not in alloc
-        assert "tp_blocked" not in alloc
+        assert alloc.breakout_momentum == 0.005
+        assert alloc.rsi_mean_reversion == 0.040
+        assert alloc.breakout_blocked is False
+        assert alloc.mr_short_blocked is False
+        assert not hasattr(alloc, "trend_pullback")
+        assert not hasattr(alloc, "tp_blocked")
 
     def test_high_vol_allocation(self):
         alloc = RegimeClassifier.get_allocation(Regime.HIGH_VOLATILITY)
-        assert alloc["breakout_momentum"] == 0.005
-        assert alloc["rsi_mean_reversion"] == 0.020
-        assert alloc["breakout_blocked"] is False
-        assert alloc["mr_short_blocked"] is True
-        assert "trend_pullback" not in alloc
-        assert "tp_blocked" not in alloc
+        assert alloc.breakout_momentum == 0.005
+        assert alloc.rsi_mean_reversion == 0.020
+        assert alloc.breakout_blocked is False
+        assert alloc.mr_short_blocked is True
+        assert not hasattr(alloc, "trend_pullback")
+        assert not hasattr(alloc, "tp_blocked")
 
     def test_uncertain_allocation(self):
         alloc = RegimeClassifier.get_allocation(Regime.UNCERTAIN)
-        assert alloc["breakout_momentum"] == 0.008
-        assert alloc["rsi_mean_reversion"] == 0.025
-        assert alloc["breakout_blocked"] is False
-        assert alloc["mr_short_blocked"] is False
-        assert "trend_pullback" not in alloc
-        assert "tp_blocked" not in alloc
+        assert alloc.breakout_momentum == 0.008
+        assert alloc.rsi_mean_reversion == 0.025
+        assert alloc.breakout_blocked is False
+        assert alloc.mr_short_blocked is False
+        assert not hasattr(alloc, "trend_pullback")
+        assert not hasattr(alloc, "tp_blocked")
 
-    def test_allocation_returns_copy(self):
-        alloc1 = RegimeClassifier.get_allocation(Regime.TREND_UP)
-        alloc2 = RegimeClassifier.get_allocation(Regime.TREND_UP)
-        alloc1["breakout_momentum"] = 999
-        assert alloc2["breakout_momentum"] == 0.040  # original value unchanged
+    def test_allocation_is_frozen(self):
+        """RegimeAllocation is frozen -- mutation raises an error."""
+        alloc = RegimeClassifier.get_allocation(Regime.TREND_UP)
+        with pytest.raises(AttributeError):
+            alloc.breakout_momentum = 999  # type: ignore[misc]
+        # Verify original value is unchanged
+        assert RegimeClassifier.get_allocation(Regime.TREND_UP).breakout_momentum == 0.040

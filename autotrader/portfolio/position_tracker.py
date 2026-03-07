@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from autotrader.trading.types import HeldPosition
+from autotrader.trading.position_book import PositionBook
 
 # Backward-compatible alias: code that imports TrackedPosition from this
 # module continues to work unchanged.  Will be removed in a future cleanup.
@@ -25,14 +26,18 @@ _ET = ZoneInfo("America/New_York")
 class OpenPositionTracker:
     """Tracks open positions for MFE/MAE calculation.
 
-    Maintains a dictionary of HeldPosition instances keyed by symbol.
+    Delegates storage to a shared PositionBook (single source of truth).
     Each bar, call update_prices() to track high/low extremes.
     On close, call close_position() to retrieve the final HeldPosition
     with computed MFE/MAE values.
     """
 
-    def __init__(self) -> None:
-        self._positions: dict[str, HeldPosition] = {}
+    def __init__(self, position_book: PositionBook | None = None) -> None:
+        # Delegate to shared PositionBook. When no book is injected
+        # (backward compat / standalone tests), create a private one.
+        # Note: cannot use ``position_book or PositionBook()`` because an
+        # empty PositionBook is falsy due to __len__ returning 0.
+        self._position_book: PositionBook = position_book if position_book is not None else PositionBook()
 
     def open_position(
         self,
@@ -65,7 +70,7 @@ class OpenPositionTracker:
             # Assume UTC if naive
             entry_date_et = entry_time.replace(tzinfo=timezone.utc).astimezone(_ET).date()
 
-        self._positions[symbol] = HeldPosition(
+        held = HeldPosition(
             symbol=symbol,
             strategy=strategy,
             direction=direction,  # type: ignore[arg-type]
@@ -77,6 +82,7 @@ class OpenPositionTracker:
             lowest_price=entry_price,
             _entry_time=entry_time,
         )
+        self._position_book.add(held)
 
     def add_position(self, position: HeldPosition) -> None:
         """Register an existing HeldPosition for MFE/MAE tracking.
@@ -84,10 +90,14 @@ class OpenPositionTracker:
         Preferred over ``open_position()`` when a fully-constructed
         HeldPosition is already available (e.g. from EntryManager).
 
+        Delegates to PositionBook.add(). If the position is already
+        in the book (added by another subsystem), this is a no-op.
+
         Args:
             position: A HeldPosition to track.
         """
-        self._positions[position.symbol] = position
+        if not self._position_book.has(position.symbol):
+            self._position_book.add(position)
 
     def update_prices(
         self, symbol: str, high: float, low: float, close: float
@@ -102,9 +112,7 @@ class OpenPositionTracker:
             low: Bar low price.
             close: Bar close price (reserved for future use).
         """
-        pos = self._positions.get(symbol)
-        if pos is not None:
-            pos.update_price_extremes(high, low)
+        self._position_book.update_prices(symbol, high, low, close)
 
     def close_position(self, symbol: str) -> HeldPosition | None:
         """Remove and return the tracked position on close.
@@ -115,11 +123,11 @@ class OpenPositionTracker:
         Returns:
             The HeldPosition with final MFE/MAE data, or None if not tracked.
         """
-        return self._positions.pop(symbol, None)
+        return self._position_book.close_position(symbol)
 
     def has_position(self, symbol: str) -> bool:
         """Check if a symbol is currently being tracked."""
-        return symbol in self._positions
+        return self._position_book.has_position(symbol)
 
     def get_position(self, symbol: str) -> HeldPosition | None:
         """Get the tracked position without removing it.
@@ -130,9 +138,9 @@ class OpenPositionTracker:
         Returns:
             The HeldPosition if tracked, None otherwise.
         """
-        return self._positions.get(symbol)
+        return self._position_book.get_position(symbol)
 
     @property
     def open_symbols(self) -> list[str]:
         """List all currently tracked symbol names."""
-        return list(self._positions.keys())
+        return self._position_book.open_symbols

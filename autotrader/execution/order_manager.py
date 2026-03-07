@@ -18,6 +18,7 @@ from typing import Literal
 from autotrader.broker.base import BrokerAdapter
 from autotrader.core.exceptions import OrderError
 from autotrader.core.types import Order, OrderResult
+from autotrader.execution.order_ledger import OrderLedger, OrderRecord, OrderState, PENDING_STATES
 
 logger = logging.getLogger("autotrader.execution.order_manager")
 
@@ -58,8 +59,9 @@ class OrderManager:
         adapter: Initialised and connected BrokerAdapter instance.
     """
 
-    def __init__(self, adapter: BrokerAdapter) -> None:
+    def __init__(self, adapter: BrokerAdapter, ledger: OrderLedger | None = None) -> None:
         self._adapter = adapter
+        self._ledger = ledger
         # Keyed by Alpaca order_id -> ActiveOrder
         self._active_orders: dict[str, ActiveOrder] = {}
 
@@ -75,6 +77,11 @@ class OrderManager:
         order_type: Literal["market", "limit"] = "market",
         limit_price: float | None = None,
         time_in_force: Literal["day", "gtc", "ioc"] = "day",
+        *,
+        strategy: str = "unknown",
+        direction: Literal["long", "short"] = "long",
+        entry_atr: float = 0.0,
+        metadata: dict | None = None,
     ) -> OrderResult | None:
         """Submit an entry order with retry logic.
 
@@ -107,6 +114,22 @@ class OrderManager:
             try:
                 result = await self._adapter.submit_order(order)
 
+                # Record submission to ledger BEFORE processing response
+                if self._ledger:
+                    self._ledger.record_submission(OrderRecord(
+                        order_id=result.order_id,
+                        symbol=symbol,
+                        side=side,
+                        direction=direction,
+                        order_type=order_type,
+                        order_role="entry",
+                        strategy=strategy,
+                        qty_requested=qty,
+                        entry_atr=entry_atr,
+                        limit_price=limit_price,
+                        metadata=metadata or {},
+                    ))
+
                 # --- Ghost fill guard for market orders ---
                 # Market orders that are NOT filled/partially_filled are
                 # dangerous: they may fill later and create ghost positions.
@@ -121,6 +144,11 @@ class OrderManager:
                             "Market order %s reached terminal non-fill status: %s",
                             result.order_id, result.status,
                         )
+                        if self._ledger:
+                            _state_map = {"cancelled": OrderState.CANCELLED, "canceled": OrderState.CANCELLED,
+                                          "expired": OrderState.EXPIRED, "rejected": OrderState.REJECTED}
+                            self._ledger.record_terminal(result.order_id,
+                                                         _state_map.get(result.status, OrderState.CANCELLED))
                         return None
 
                     logger.warning(
@@ -151,6 +179,8 @@ class OrderManager:
                                 "Order %s already in terminal state: %s",
                                 result.order_id, recheck.status,
                             )
+                            if self._ledger:
+                                self._ledger.record_cancel(result.order_id)
                             return None
                         if cancel_attempt < 3:
                             logger.warning(
@@ -168,6 +198,7 @@ class OrderManager:
                                 result.order_id,
                                 recheck.status if recheck else "unknown",
                             )
+                            # Ledger keeps it in SUBMITTED state for reconciliation
                             return None
 
                     if cancel_ok and result.status not in _MARKET_FILL_OK:
@@ -188,9 +219,16 @@ class OrderManager:
                             result = recheck
                             # Fall through to the filled handling below
                         else:
+                            if self._ledger:
+                                self._ledger.record_cancel(result.order_id)
                             return None
 
                 if result.status in _MARKET_FILL_OK:
+                    if self._ledger:
+                        partial = result.status == "partially_filled"
+                        self._ledger.record_fill(
+                            result.order_id, result.filled_qty, result.filled_price, partial=partial,
+                        )
                     active = ActiveOrder(
                         order_id=result.order_id,
                         symbol=symbol,
@@ -249,6 +287,9 @@ class OrderManager:
         qty: float,
         stop_price: float,
         parent_order_id: str | None = None,
+        *,
+        strategy: str = "unknown",
+        direction: Literal["long", "short"] = "long",
     ) -> OrderResult | None:
         """Submit a stop-loss order as a broker-side safety net.
 
@@ -287,6 +328,22 @@ class OrderManager:
                 "Stop-loss submitted: %s %s %.0f @ stop=%.2f (status=%s)",
                 side, symbol, qty, stop_price, result.status,
             )
+            # Record to ledger
+            if self._ledger:
+                self._ledger.record_submission(OrderRecord(
+                    order_id=result.order_id,
+                    symbol=symbol,
+                    side=side,
+                    direction=direction,
+                    order_type="stop",
+                    order_role="stop_loss",
+                    strategy=strategy,
+                    qty_requested=qty,
+                    stop_price=stop_price,
+                    parent_order_id=parent_order_id,
+                ))
+                if parent_order_id:
+                    self._ledger.link_sl_order(parent_order_id, result.order_id)
             # Link stop order to its parent entry
             if parent_order_id and parent_order_id in self._active_orders:
                 self._active_orders[parent_order_id].sl_order_id = result.order_id
@@ -303,6 +360,9 @@ class OrderManager:
         qty: float,
         order_type: Literal["market", "limit"] = "market",
         limit_price: float | None = None,
+        *,
+        strategy: str = "unknown",
+        direction: Literal["long", "short"] = "long",
     ) -> OrderResult | None:
         """Submit a closing order for an existing position.
 
@@ -338,6 +398,21 @@ class OrderManager:
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 result = await self._adapter.submit_order(order)
+
+                # Record exit to ledger
+                if self._ledger:
+                    self._ledger.record_submission(OrderRecord(
+                        order_id=result.order_id,
+                        symbol=symbol,
+                        side=side,
+                        direction=direction,
+                        order_type=order_type,
+                        order_role="exit",
+                        strategy=strategy,
+                        qty_requested=qty,
+                        limit_price=limit_price,
+                    ))
+
                 logger.info(
                     "Exit submitted: %s %s %.0f @ %.2f (status=%s, attempt %d)",
                     side, symbol, result.filled_qty, result.filled_price,
@@ -347,6 +422,11 @@ class OrderManager:
                 # Evicting before fill confirmation loses the SL order reference.
                 _FILL_CONFIRMED = {"filled", "partially_filled"}
                 if result.status in _FILL_CONFIRMED:
+                    if self._ledger:
+                        partial = result.status == "partially_filled"
+                        self._ledger.record_fill(
+                            result.order_id, result.filled_qty, result.filled_price, partial=partial,
+                        )
                     self._evict_symbol(symbol)
                 else:
                     logger.warning(
@@ -377,6 +457,8 @@ class OrderManager:
         if success:
             if order_id in self._active_orders:
                 self._active_orders[order_id].status = "cancelled"
+            if self._ledger:
+                self._ledger.record_cancel(order_id)
             logger.info("Order %s cancelled", order_id)
         else:
             logger.warning("Failed to cancel order %s", order_id)
@@ -426,3 +508,8 @@ class OrderManager:
     def active_order_count(self) -> int:
         """Number of currently tracked active orders."""
         return len(self._active_orders)
+
+    @property
+    def ledger(self) -> OrderLedger | None:
+        """Expose the ledger for startup reconciliation."""
+        return self._ledger

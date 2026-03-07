@@ -230,6 +230,34 @@ class GDREngine:
                 dd_pct * 100, peak, current,
             )
 
+    # -----------------------------------------------------------------
+    # Snapshot (persistence support)
+    # -----------------------------------------------------------------
+
+    def to_snapshot(self) -> dict:
+        """Serialize ephemeral state for persistence."""
+        return {
+            "strategy_cumulative_pnl": dict(self._strategy_cumulative_pnl),
+            "strategy_peak_pnl": dict(self._strategy_peak_pnl),
+            "strategy_tiers": dict(self._strategy_tiers),
+            "portfolio_peak": self._portfolio_peak,
+            "realized_pnl": self._realized_pnl,
+            "safety_net_active": self._safety_net_active,
+        }
+
+    def from_snapshot(self, data: dict) -> None:
+        """Restore ephemeral state from persisted snapshot."""
+        self._strategy_cumulative_pnl = dict(data.get("strategy_cumulative_pnl", {}))
+        self._strategy_peak_pnl = dict(data.get("strategy_peak_pnl", {}))
+        self._strategy_tiers = {k: int(v) for k, v in data.get("strategy_tiers", {}).items()}
+        self._portfolio_peak = float(data.get("portfolio_peak", self._initial_capital))
+        self._realized_pnl = float(data.get("realized_pnl", 0.0))
+        self._safety_net_active = bool(data.get("safety_net_active", False))
+
+    # -----------------------------------------------------------------
+    # Internal helpers
+    # -----------------------------------------------------------------
+
     def _update_safety_net(self, total_equity: float) -> None:
         """Activate or deactivate the portfolio-level safety net."""
         if total_equity > self._portfolio_peak:

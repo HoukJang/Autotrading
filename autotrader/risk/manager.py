@@ -70,6 +70,24 @@ class RiskManager:
         drawdown = (self._peak_equity - self._current_equity) / self._peak_equity
         return max(0.0, drawdown)
 
+    # ------------------------------------------------------------------
+    # Snapshot (persistence support)
+    # ------------------------------------------------------------------
+
+    def to_snapshot(self) -> dict:
+        """Serialize ephemeral state for persistence."""
+        return {
+            "peak_equity": self._peak_equity,
+            "daily_pnl": self._daily_pnl,
+            "current_equity": self._current_equity,
+        }
+
+    def from_snapshot(self, data: dict) -> None:
+        """Restore ephemeral state from persisted snapshot."""
+        self._peak_equity = float(data.get("peak_equity", 0.0))
+        self._daily_pnl = float(data.get("daily_pnl", 0.0))
+        self._current_equity = float(data.get("current_equity", 0.0))
+
     def _check_max_positions(self, positions: list[Position]) -> bool:
         return len(positions) < self._config.max_open_positions
 

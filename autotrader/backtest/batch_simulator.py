@@ -951,7 +951,7 @@ class BatchBacktester:
             if hasattr(self, '_regime_classifier'):
                 regime = self._regime_classifier.confirmed_regime
                 alloc = RegimeClassifier.get_allocation(regime)
-                if strategy_name == "breakout_momentum" and alloc.get("breakout_blocked"):
+                if strategy_name == "breakout_momentum" and alloc.breakout_blocked:
                     logger.debug(
                         "Regime %s: breakout entry blocked for %s",
                         regime.value, sym,
@@ -959,7 +959,7 @@ class BatchBacktester:
                     continue
                 if (strategy_name == "rsi_mean_reversion"
                         and direction == "short"
-                        and alloc.get("mr_short_blocked")):
+                        and alloc.mr_short_blocked):
                     logger.debug(
                         "Regime %s: MR short blocked for %s",
                         regime.value, sym,
@@ -1729,7 +1729,7 @@ class BatchBacktester:
             if hasattr(self, '_regime_classifier'):
                 regime = self._regime_classifier.confirmed_regime
                 alloc = RegimeClassifier.get_allocation(regime)
-                base_risk = alloc.get(strategy, _STRATEGY_BASE_RISK.get(strategy, _DEFAULT_BASE_RISK))
+                base_risk = alloc.get_risk(strategy, _STRATEGY_BASE_RISK.get(strategy, _DEFAULT_BASE_RISK))
             else:
                 base_risk = _STRATEGY_BASE_RISK.get(strategy, _DEFAULT_BASE_RISK)
             return base_risk * gdr_risk_mult

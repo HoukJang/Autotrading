@@ -24,14 +24,11 @@ from autotrader.execution.exit_rules import ExitRuleEngine
 from autotrader.trading.types import HeldPosition
 from autotrader.execution.order_manager import OrderManager
 from autotrader.indicators.engine import IndicatorEngine
+from autotrader.trading.position_book import PositionBook
 
 _ET = ZoneInfo("America/New_York")
 
-from autotrader.trading.constants import MAX_TOTAL_POSITIONS
-
 logger = logging.getLogger("autotrader.execution.position_monitor")
-
-MAX_POSITIONS: int = MAX_TOTAL_POSITIONS
 
 
 # Callback type: called when a position is closed by exit rules.
@@ -61,13 +58,18 @@ class PositionMonitor:
         order_manager: OrderManager,
         exit_rule_engine: ExitRuleEngine,
         indicator_engine: IndicatorEngine,
+        position_book: PositionBook | None = None,
     ) -> None:
         self._order_manager = order_manager
         self._exit_rules = exit_rule_engine
         self._indicator_engine = indicator_engine
 
-        # symbol -> HeldPosition
-        self._positions: dict[str, HeldPosition] = {}
+        # Delegate position storage to the shared PositionBook (SSOT).
+        # When no PositionBook is injected (backward compat / tests),
+        # create a private one so this class still works standalone.
+        # Note: cannot use ``or`` because an empty PositionBook is falsy
+        # due to __len__ returning 0.
+        self._position_book: PositionBook = position_book if position_book is not None else PositionBook()
 
         # Minimal bar history per symbol for indicator computation
         self._bar_history: dict[str, deque[Bar]] = {}
@@ -95,16 +97,19 @@ class PositionMonitor:
     def add_position(self, position: HeldPosition) -> None:
         """Register a new position for monitoring.
 
+        Delegates storage to the shared PositionBook. The capacity check
+        is handled by PositionBook.add().
+
         Args:
             position: Newly created HeldPosition from EntryManager.
         """
-        if len(self._positions) >= MAX_POSITIONS:
-            logger.warning(
-                "MAX_POSITIONS (%d) reached; cannot monitor %s",
-                MAX_POSITIONS, position.symbol,
-            )
-            return
-        self._positions[position.symbol] = position
+        # PositionBook.add() handles duplicate and capacity checks.
+        # If the position is already in the book (e.g. added by AutoTrader
+        # before calling add_position here), add() returns False but the
+        # position is still accessible via get(). We only need to ensure
+        # bar_history is initialised.
+        if not self._position_book.has(position.symbol):
+            self._position_book.add(position)
         if position.symbol not in self._bar_history:
             self._bar_history[position.symbol] = deque(maxlen=500)
         logger.info(
@@ -122,12 +127,13 @@ class PositionMonitor:
         Returns:
             The removed HeldPosition, or None if not tracked.
         """
-        return self._positions.pop(symbol, None)
+        self._bar_history.pop(symbol, None)
+        return self._position_book.remove(symbol)
 
     @property
     def monitored_symbols(self) -> list[str]:
         """Currently monitored ticker symbols."""
-        return list(self._positions.keys())
+        return self._position_book.symbols
 
     async def start(self) -> None:
         """Start the position monitoring (sets running flag)."""
@@ -135,7 +141,7 @@ class PositionMonitor:
             logger.warning("PositionMonitor.start() called while already running")
             return
         self._running = True
-        logger.info("PositionMonitor started (monitoring %d positions)", len(self._positions))
+        logger.info("PositionMonitor started (monitoring %d positions)", self._position_book.count)
 
     async def stop(self) -> None:
         """Gracefully stop monitoring."""
@@ -164,10 +170,12 @@ class PositionMonitor:
         For DAILY bars: evaluate exit rules.
         """
         symbol = bar.symbol
-        if symbol not in self._positions:
+        if not self._position_book.has(symbol):
             return
 
-        position = self._positions[symbol]
+        position = self._position_book.get(symbol)
+        if position is None:
+            return
 
         # Always update MFE/MAE tracking with raw bar extremes
         position.update_price_extremes(bar.high, bar.low)
@@ -227,6 +235,8 @@ class PositionMonitor:
             side=exit_side,
             qty=position.qty,
             order_type="market",
+            strategy=position.strategy,
+            direction=position.direction,
         )
 
         # Guard: if exit order failed, keep position in tracking
@@ -248,10 +258,10 @@ class PositionMonitor:
         if result.status == "partially_filled" and result.filled_qty < position.qty:
             remaining_qty = position.qty - result.filled_qty
             logger.warning(
-                "PARTIAL FILL on exit for %s %s: filled %.0f of %.0f, "
+                "PARTIAL FILL on exit for %s %s: filled %.0f of %.0f @ %.2f, "
                 "submitting follow-up market order for remaining %.0f shares",
                 position.direction, symbol,
-                result.filled_qty, position.qty, remaining_qty,
+                result.filled_qty, position.qty, result.filled_price, remaining_qty,
             )
 
             followup_result = await self._order_manager.submit_exit(
@@ -259,6 +269,8 @@ class PositionMonitor:
                 side=exit_side,
                 qty=remaining_qty,
                 order_type="market",
+                strategy=position.strategy,
+                direction=position.direction,
             )
 
             if followup_result is not None and followup_result.filled_qty > 0:
@@ -269,12 +281,15 @@ class PositionMonitor:
 
                 if followup_result.status == "partially_filled":
                     still_remaining = position.qty - total_filled_qty
+                    avg_price = weighted_price_sum / total_filled_qty
                     logger.critical(
                         "FOLLOW-UP EXIT ALSO PARTIAL for %s %s: "
-                        "total filled %.0f of %.0f, %.0f shares STILL AT BROKER "
+                        "total filled %.0f of %.0f (avg fill %.2f), "
+                        "%.0f shares STILL AT BROKER "
                         "with NO stop-loss -- MANUAL INTERVENTION REQUIRED",
                         position.direction, symbol,
-                        total_filled_qty, position.qty, still_remaining,
+                        total_filled_qty, position.qty, avg_price,
+                        still_remaining,
                     )
                 else:
                     logger.info(
@@ -284,22 +299,34 @@ class PositionMonitor:
                     )
             else:
                 still_remaining = position.qty - total_filled_qty
+                avg_price = (
+                    weighted_price_sum / total_filled_qty
+                    if total_filled_qty > 0 else result.filled_price
+                )
                 logger.critical(
                     "FOLLOW-UP EXIT FAILED for %s %s: "
-                    "only %.0f of %.0f shares exited, %.0f shares STILL AT BROKER "
+                    "only %.0f of %.0f shares exited (avg fill %.2f), "
+                    "%.0f shares STILL AT BROKER "
                     "with NO stop-loss -- MANUAL INTERVENTION REQUIRED",
                     position.direction, symbol,
-                    total_filled_qty, position.qty, still_remaining,
+                    total_filled_qty, position.qty, avg_price,
+                    still_remaining,
                 )
 
             # If we could not exit ALL shares, do NOT remove from tracking.
             # The position stays monitored so the next daily bar retries the exit.
             if total_filled_qty < position.qty:
                 # Update position qty to reflect only the residual shares
+                exited_avg_price = (
+                    weighted_price_sum / total_filled_qty
+                    if total_filled_qty > 0 else 0.0
+                )
                 position.qty = position.qty - total_filled_qty
                 logger.warning(
-                    "Residual position kept in monitoring: %s %s, %.0f shares remaining",
-                    position.direction, symbol, position.qty,
+                    "Residual position kept in monitoring: %s %s, "
+                    "exited %.0f shares @ avg %.2f, %.0f shares remaining",
+                    position.direction, symbol,
+                    total_filled_qty, exited_avg_price, position.qty,
                 )
                 return
 
@@ -320,8 +347,12 @@ class PositionMonitor:
         # Record close to engage re-entry block
         self._exit_rules.record_close(symbol)
 
-        # Remove from monitoring
-        del self._positions[symbol]
+        # Remove from PositionBook and clean up bar history.
+        # Store the removed position reference so the exit callback
+        # can still access HeldPosition data (strategy, direction, etc.)
+        # even though it's been removed from the PositionBook.
+        self._last_exited_position: HeldPosition | None = position
+        self._position_book.remove(symbol)
         self._bar_history.pop(symbol, None)
 
         logger.info(

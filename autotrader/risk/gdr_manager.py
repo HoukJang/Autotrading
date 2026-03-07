@@ -122,3 +122,35 @@ class GDRManager:
 
     def get_strategy_pnl(self, strategy: str) -> float:
         return self._cumulative_pnl.get(strategy, 0.0)
+
+    # ------------------------------------------------------------------
+    # Snapshot (persistence support)
+    # ------------------------------------------------------------------
+
+    def to_snapshot(self) -> dict:
+        """Serialize ephemeral state for persistence.
+
+        Includes both the underlying GDREngine state and the
+        live-specific daily entry tracking managed by this wrapper.
+        """
+        return {
+            "engine": self._engine.to_snapshot(),
+            "entries_today": dict(self._entries_today),
+            "total_entries_today": self._total_entries_today,
+            "cumulative_pnl": dict(self._cumulative_pnl),
+        }
+
+    def from_snapshot(self, data: dict) -> None:
+        """Restore ephemeral state from persisted snapshot."""
+        engine_snap = data.get("engine")
+        if engine_snap:
+            self._engine.from_snapshot(engine_snap)
+        self._entries_today = {
+            k: int(v)
+            for k, v in data.get("entries_today", {}).items()
+        }
+        self._total_entries_today = int(data.get("total_entries_today", 0))
+        self._cumulative_pnl = {
+            k: float(v)
+            for k, v in data.get("cumulative_pnl", {}).items()
+        }

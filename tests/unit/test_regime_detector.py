@@ -197,22 +197,22 @@ class TestGetWeights:
 
 
 class TestGetAllocation:
-    """get_allocation returns full allocation dict including blocking flags."""
+    """get_allocation returns RegimeAllocation with blocking flags."""
 
     def test_trend_up_has_mr_short_blocked(self, detector: RegimeDetector):
         alloc = detector.get_allocation(MarketRegime.TREND_UP)
-        assert alloc["mr_short_blocked"] is True
-        assert alloc["breakout_blocked"] is False
+        assert alloc.mr_short_blocked is True
+        assert alloc.breakout_blocked is False
 
     def test_trend_down_has_breakout_blocked(self, detector: RegimeDetector):
         alloc = detector.get_allocation(MarketRegime.TREND_DOWN)
-        assert alloc["breakout_blocked"] is True
-        assert alloc["mr_short_blocked"] is False
+        assert alloc.breakout_blocked is True
+        assert alloc.mr_short_blocked is False
 
     def test_ranging_nothing_blocked(self, detector: RegimeDetector):
         alloc = detector.get_allocation(MarketRegime.RANGING)
-        assert alloc["breakout_blocked"] is False
-        assert alloc["mr_short_blocked"] is False
+        assert alloc.breakout_blocked is False
+        assert alloc.mr_short_blocked is False
 
 
 class TestAllRegimesHaveAllocations:
@@ -221,10 +221,10 @@ class TestAllRegimesHaveAllocations:
     @pytest.mark.parametrize("regime", list(MarketRegime))
     def test_regime_has_allocation(self, detector: RegimeDetector, regime: MarketRegime):
         alloc = detector.get_allocation(regime)
-        assert "breakout_momentum" in alloc
-        assert "rsi_mean_reversion" in alloc
-        assert "breakout_blocked" in alloc
-        assert "mr_short_blocked" in alloc
+        assert hasattr(alloc, "breakout_momentum")
+        assert hasattr(alloc, "rsi_mean_reversion")
+        assert hasattr(alloc, "breakout_blocked")
+        assert hasattr(alloc, "mr_short_blocked")
 
 
 class TestGetWeightsReturnsCopy:

@@ -342,6 +342,27 @@ class EntryManager:
         return discarded
 
     # ------------------------------------------------------------------
+    # Snapshot (persistence support)
+    # ------------------------------------------------------------------
+
+    def to_snapshot(self) -> dict:
+        """Serialize ephemeral state for persistence."""
+        return {
+            "daily_entry_count": self._daily_entry_count,
+            "last_entry_date": self._last_entry_date.isoformat() if self._last_entry_date else None,
+        }
+
+    def from_snapshot(self, data: dict) -> None:
+        """Restore ephemeral state from persisted snapshot."""
+        self._daily_entry_count = int(data.get("daily_entry_count", 0))
+        last_date = data.get("last_entry_date")
+        if last_date:
+            from datetime import date
+            self._last_entry_date = date.fromisoformat(last_date)
+        else:
+            self._last_entry_date = None
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -443,12 +464,12 @@ class EntryManager:
         # Regime-based entry blocking
         from autotrader.portfolio.regime_detector import RegimeDetector
         alloc = RegimeDetector.get_allocation(regime)
-        if strategy_name == "breakout_momentum" and alloc.get("breakout_blocked"):
+        if strategy_name == "breakout_momentum" and alloc.breakout_blocked:
             logger.info("Regime %s: breakout entry blocked", regime.value)
             return False
         if (strategy_name == "rsi_mean_reversion"
                 and direction == "short"
-                and alloc.get("mr_short_blocked")):
+                and alloc.mr_short_blocked):
             logger.info("Regime %s: MR short entry blocked", regime.value)
             return False
 
@@ -530,6 +551,10 @@ class EntryManager:
             side=side,
             qty=float(qty),
             order_type="market",
+            strategy=signal.strategy,
+            direction=direction,
+            entry_atr=atr,
+            metadata=signal.metadata or {},
         )
         if result is None or result.status not in ("filled", "partially_filled"):
             return None
@@ -609,6 +634,8 @@ class EntryManager:
             qty=qty,
             stop_price=round(stop_price, 2),
             parent_order_id=order_id,
+            strategy=signal.strategy,
+            direction=direction,
         )
         if sl_result is None:
             logger.error(

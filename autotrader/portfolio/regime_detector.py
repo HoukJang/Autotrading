@@ -7,7 +7,8 @@ existing live-trading code and tests continue to work unchanged.
 from autotrader.trading.regime import (
     MarketRegime,
     ALLOCATION_TABLE as _ALLOCATION_TABLE,
+    RegimeAllocation,
     RegimeClassifier as RegimeDetector,
 )
 
-__all__ = ["MarketRegime", "RegimeDetector", "_ALLOCATION_TABLE"]
+__all__ = ["MarketRegime", "RegimeAllocation", "RegimeDetector", "_ALLOCATION_TABLE"]

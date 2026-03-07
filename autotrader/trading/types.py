@@ -270,3 +270,58 @@ class HeldPosition:
             return (self.entry_price - self.lowest_price) / self.entry_price
         else:  # short
             return (self.highest_price - self.entry_price) / self.entry_price
+
+
+# ---------------------------------------------------------------------------
+# TradeMetaSnapshot -- typed metadata for trade records
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TradeMetaSnapshot:
+    """Typed metadata for a trade record.
+
+    Replaces the untyped ``dict`` previously used in ``_trades_meta_cache``
+    and similar runtime caches.  Provides explicit field names and types
+    so that callers no longer need to guess which keys exist or cast
+    values from ``Any``.
+
+    Attributes:
+        strategy: Strategy name that generated the trade.
+        direction: Trade direction (``"long"`` or ``"short"``).
+        entry_atr: ATR value at entry time.
+        entry_adx: ADX value at entry time.
+        sub_strategy: Sub-strategy identifier (e.g., ``"bb_cross"``).
+        timestamp: ISO-8601 timestamp string of the trade event.
+    """
+
+    strategy: str = "unknown"
+    direction: str = "long"
+    entry_atr: float = 0.0
+    entry_adx: float = 0.0
+    sub_strategy: str = ""
+    timestamp: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TradeMetaSnapshot:
+        """Create from an untyped dict (backward compatibility).
+
+        Handles the nested ``metadata`` sub-dict structure used by the
+        existing trade record format, with safe defaults for missing keys.
+
+        Args:
+            data: Raw trade record dict, optionally containing a nested
+                ``metadata`` dict with ``entry_atr``, ``entry_adx``, and
+                ``sub_strategy`` fields.
+
+        Returns:
+            A fully populated ``TradeMetaSnapshot`` instance.
+        """
+        metadata = data.get("metadata", {})
+        return cls(
+            strategy=data.get("strategy", "unknown"),
+            direction=data.get("direction", "long"),
+            entry_atr=float(metadata.get("entry_atr", 0.0)),
+            entry_adx=float(metadata.get("entry_adx", 0.0)),
+            sub_strategy=str(metadata.get("sub_strategy", "")),
+            timestamp=str(data.get("timestamp", "")),
+        )

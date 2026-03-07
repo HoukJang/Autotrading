@@ -19,7 +19,8 @@ import pytest
 from autotrader.core.types import Bar, OrderResult, Timeframe
 from autotrader.execution.exit_rules import ExitDecision, ExitRuleEngine
 from autotrader.trading.types import HeldPosition
-from autotrader.execution.position_monitor import PositionMonitor, MAX_POSITIONS
+from autotrader.execution.position_monitor import PositionMonitor
+from autotrader.trading.constants import MAX_TOTAL_POSITIONS as MAX_POSITIONS
 
 
 # ---------------------------------------------------------------------------

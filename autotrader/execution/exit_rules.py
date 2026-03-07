@@ -264,6 +264,27 @@ class ExitRuleEngine:
             )
 
     # ------------------------------------------------------------------
+    # Snapshot (persistence support)
+    # ------------------------------------------------------------------
+
+    def to_snapshot(self) -> dict:
+        """Serialize ephemeral state for persistence."""
+        return {
+            "closed_today": list(self._unified._closed_today),
+            "last_clear_date": self._unified._last_clear_date.isoformat() if self._unified._last_clear_date else None,
+        }
+
+    def from_snapshot(self, data: dict) -> None:
+        """Restore ephemeral state from persisted snapshot."""
+        self._unified._closed_today = set(data.get("closed_today", []))
+        last_clear = data.get("last_clear_date")
+        if last_clear:
+            from datetime import date
+            self._unified._last_clear_date = date.fromisoformat(last_clear)
+        else:
+            self._unified._last_clear_date = None
+
+    # ------------------------------------------------------------------
     # Utility (kept for backward compatibility -- tests use these)
     # ------------------------------------------------------------------
 

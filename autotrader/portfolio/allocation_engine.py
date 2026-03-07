@@ -82,10 +82,7 @@ class AllocationEngine:
             effective_risk_pct = PORTFOLIO_SAFETY_NET_RISK
         else:
             alloc = self._detector.get_allocation(regime)
-            base_risk = alloc.get(strategy_name, DEFAULT_BASE_RISK)
-            # Ensure we only use numeric risk values, not boolean flags
-            if not isinstance(base_risk, (int, float)):
-                base_risk = DEFAULT_BASE_RISK
+            base_risk = alloc.get_risk(strategy_name, DEFAULT_BASE_RISK)
             effective_risk_pct = base_risk * gdr_risk_mult
 
         # Determine the effective stop distance for the PositionSizer
