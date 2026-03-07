@@ -224,3 +224,112 @@ class TestEventRecord:
         rec = EventRecord(fired_at="2026-03-04T09:25:00-05:00", result="success")
         assert rec.fired_at == "2026-03-04T09:25:00-05:00"
         assert rec.result == "success"
+
+    def test_event_record_target_date_default_empty(self) -> None:
+        rec = EventRecord(fired_at="2026-03-04T20:00:00-05:00", result="success")
+        assert rec.target_date == ""
+
+    def test_event_record_target_date_set(self) -> None:
+        rec = EventRecord(
+            fired_at="2026-03-04T20:00:00-05:00",
+            result="success",
+            target_date="2026-03-05",
+        )
+        assert rec.target_date == "2026-03-05"
+
+
+class TestIsFiredForDate:
+    """Test target_date-based dedup via is_fired_for_date()."""
+
+    def test_not_fired_returns_false(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        assert state.is_fired_for_date("nightly_scan", "2026-03-05") is False
+
+    def test_matching_target_returns_true(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("nightly_scan", target_date="2026-03-05")
+        assert state.is_fired_for_date("nightly_scan", "2026-03-05") is True
+
+    def test_different_target_returns_false(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("nightly_scan", target_date="2026-03-05")
+        assert state.is_fired_for_date("nightly_scan", "2026-03-06") is False
+
+    def test_legacy_empty_target_returns_true(self) -> None:
+        """Legacy records without target_date are treated conservatively."""
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("nightly_scan")  # no target_date -> ""
+        assert state.is_fired_for_date("nightly_scan", "2026-03-05") is True
+
+    def test_non_target_event_works(self) -> None:
+        """is_fired_for_date on a non-target_next_day event (no target_date)."""
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("gap_filter")
+        assert state.is_fired_for_date("gap_filter", "2026-03-04") is True
+
+
+class TestMarkFiredWithTargetDate:
+    """Test mark_fired() with the target_date parameter."""
+
+    def test_mark_fired_stores_target_date(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("nightly_scan", target_date="2026-03-05")
+        rec = state.events["nightly_scan"]
+        assert rec.target_date == "2026-03-05"
+        assert rec.result == "success"
+
+    def test_mark_fired_without_target_date_stores_empty(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("nightly_scan")
+        assert state.events["nightly_scan"].target_date == ""
+
+
+class TestTargetDateSerialization:
+    """Test save/load roundtrip with target_date field."""
+
+    def test_roundtrip_preserves_target_date(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("nightly_scan", target_date="2026-03-05")
+        state.save(path)
+
+        loaded = SchedulerState.load(path)
+        assert loaded.events["nightly_scan"].target_date == "2026-03-05"
+
+    def test_roundtrip_empty_target_date(self, tmp_path: Path) -> None:
+        path = tmp_path / "state.json"
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("gap_filter")
+        state.save(path)
+
+        loaded = SchedulerState.load(path)
+        assert loaded.events["gap_filter"].target_date == ""
+
+    def test_backward_compat_missing_target_date(self, tmp_path: Path) -> None:
+        """Loading an old state file without target_date field."""
+        path = tmp_path / "state.json"
+        old_format = {
+            "date": "2026-03-04",
+            "events": {
+                "nightly_scan": {
+                    "fired_at": "2026-03-04T20:00:00-05:00",
+                    "result": "success",
+                    # no target_date key
+                }
+            },
+        }
+        path.write_text(json.dumps(old_format), encoding="utf-8")
+
+        loaded = SchedulerState.load(path)
+        assert loaded.is_fired("nightly_scan")
+        assert loaded.events["nightly_scan"].target_date == ""
+
+    def test_json_includes_target_date(self, tmp_path: Path) -> None:
+        """Verify the JSON output includes the target_date field."""
+        path = tmp_path / "state.json"
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("nightly_scan", target_date="2026-03-05")
+        state.save(path)
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["events"]["nightly_scan"]["target_date"] == "2026-03-05"

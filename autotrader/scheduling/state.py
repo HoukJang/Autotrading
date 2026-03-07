@@ -31,6 +31,7 @@ class EventRecord:
 
     fired_at: str  # ISO timestamp (ET)
     result: str  # "success" | "skipped" | "failed"
+    target_date: str = ""  # ISO date: which trading day this event serves
 
 
 @dataclass
@@ -72,6 +73,7 @@ class SchedulerState:
                 events[name] = EventRecord(
                     fired_at=rec.get("fired_at", ""),
                     result=rec.get("result", "unknown"),
+                    target_date=rec.get("target_date", ""),
                 )
 
             logger.info(
@@ -105,17 +107,56 @@ class SchedulerState:
     # Query / mutation
     # ------------------------------------------------------------------
 
-    def mark_fired(self, event: str, result: str = "success") -> None:
-        """Record an event as fired with the current ET timestamp."""
+    def mark_fired(
+        self,
+        event: str,
+        result: str = "success",
+        target_date: str = "",
+    ) -> None:
+        """Record an event as fired with the current ET timestamp.
+
+        Args:
+            event: Event name.
+            result: Outcome string ("success", "skipped", "failed").
+            target_date: ISO date string indicating which trading day this
+                event serves.  For events with ``target_next_day=True``
+                (e.g. nightly_scan), this is the *next* calendar day when
+                run in the evening, or *today* when caught up in the morning.
+        """
         now_et = datetime.now(timezone.utc).astimezone(_ET)
         self.events[event] = EventRecord(
             fired_at=now_et.isoformat(),
             result=result,
+            target_date=target_date,
         )
 
     def is_fired(self, event: str) -> bool:
         """Check whether an event has been recorded today."""
         return event in self.events
+
+    def is_fired_for_date(self, event_name: str, target: str) -> bool:
+        """Check if event was already fired for a specific target date.
+
+        For events that use target_date-based dedup (e.g. nightly_scan),
+        this checks whether the recorded target_date matches *target*.
+        If the event has no target_date recorded (legacy state or non-
+        target_next_day events), returns True when the event is present
+        (conservative: assume it was for the current day).
+
+        Args:
+            event_name: Name of the event to check.
+            target: ISO date string to compare against.
+
+        Returns:
+            True if the event was already fired for this target date.
+        """
+        rec = self.events.get(event_name)
+        if rec is None:
+            return False
+        if rec.target_date:
+            return rec.target_date == target
+        # Legacy: no target_date recorded means fired for current state.date
+        return True
 
     def fired_event_names(self) -> set[str]:
         """Return the set of event names that have fired."""

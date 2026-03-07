@@ -1129,18 +1129,35 @@ class AutoTrader:
         Uses StartupCatchUpResolver to determine which events should be
         replayed, then executes them in dependency order.  Events already
         recorded in *state* are excluded from catch-up.
+
+        For target_next_day events (nightly_scan), dedup is based on the
+        target_date rather than simple fired/not-fired.  Morning catch-up
+        targets today; evening catch-up targets tomorrow.
         """
         now_et = datetime.now(timezone.utc).astimezone(_ET)
         today_et = now_et.date()
+        today_str = today_et.isoformat()
 
         # Determine if today is a market day (simple weekday check)
         is_market_day = now_et.weekday() < 5  # Mon-Fri
+
+        # For nightly_scan, use target_date-based dedup instead of simple
+        # already_fired filtering.  Remove it from already_fired so the
+        # resolver can include it, then check target_date manually below.
+        already = state.fired_event_names()
+        _nightly_target = self._compute_nightly_target(now_et)
+        if state.is_fired_for_date("nightly_scan", _nightly_target):
+            # Already fired for this target -- leave it in already_fired
+            pass
+        else:
+            # Not fired for this target -- let the resolver consider it
+            already.discard("nightly_scan")
 
         resolver = StartupCatchUpResolver()
         catchup_events = resolver.resolve(
             now_et,
             today_is_market_day=is_market_day,
-            already_fired=state.fired_event_names(),
+            already_fired=already,
         )
 
         if not catchup_events:
@@ -1195,12 +1212,44 @@ class AutoTrader:
                 if asyncio.iscoroutine(result):
                     await result
                 fired[event_name] = today_et
-                state.mark_fired(event_name, result="success")
+                # For nightly_scan, record target_date for dedup
+                if event_name == "nightly_scan":
+                    state.mark_fired(
+                        event_name, result="success",
+                        target_date=_nightly_target,
+                    )
+                else:
+                    state.mark_fired(event_name, result="success")
                 state.save(self._state_path)
             except Exception:
                 logger.exception("Catch-up failed for event: %s", event_name)
-                state.mark_fired(event_name, result="failed")
+                if event_name == "nightly_scan":
+                    state.mark_fired(
+                        event_name, result="failed",
+                        target_date=_nightly_target,
+                    )
+                else:
+                    state.mark_fired(event_name, result="failed")
                 state.save(self._state_path)
+
+    @staticmethod
+    def _compute_nightly_target(now_et: datetime) -> str:
+        """Compute the target_date for a nightly_scan execution.
+
+        When run at 20:00+ (evening), the scan produces candidates for
+        the NEXT day's MOO, so target_date = tomorrow.
+        When caught up in the morning (before market open), the scan
+        serves TODAY's MOO, so target_date = today.
+
+        Args:
+            now_et: Current time in US Eastern.
+
+        Returns:
+            ISO date string for the target trading day.
+        """
+        if now_et.hour >= _NIGHTLY_SCAN_HOUR:
+            return (now_et.date() + timedelta(days=1)).isoformat()
+        return now_et.date().isoformat()
 
     def _load_last_batch_result(self) -> None:
         """Load the most recent batch result from disk if still fresh.
@@ -1246,7 +1295,15 @@ class AutoTrader:
         _today_str = _now_et.date().isoformat()
 
         if _state.date != _today_str:
+            # Preserve nightly_scan if it targets today (run last evening)
+            _old_nightly = _state.events.get("nightly_scan")
             _state = SchedulerState.fresh(_today_str)
+            if _old_nightly and _old_nightly.target_date == _today_str:
+                _state.events["nightly_scan"] = _old_nightly
+                logger.info(
+                    "Startup: preserved nightly_scan from previous day "
+                    "(target_date=%s)", _old_nightly.target_date,
+                )
 
         # Build legacy _fired dict from persistent state
         _fired: dict[str, date | None] = {
@@ -1269,6 +1326,9 @@ class AutoTrader:
 
         # Mark past events not caught up as "skipped" so the polling
         # loop does not re-fire them with stale/wrong data.
+        # nightly_scan is excluded: it uses target_date-based dedup and
+        # must not be marked skipped generically (the 20:00 run targets
+        # tomorrow, so a morning skip must not block the evening run).
         _event_schedule = {
             "daily_bar_refresh": (_DAILY_BAR_REFRESH_HOUR, _DAILY_BAR_REFRESH_MINUTE),
             "daily_reset": (_DAILY_RESET_HOUR, _DAILY_RESET_MINUTE),
@@ -1276,7 +1336,6 @@ class AutoTrader:
             "moo": (_MOO_HOUR, _MOO_MINUTE),
             "confirmation": (_CONFIRMATION_HOUR, _CONFIRMATION_MINUTE),
             "entry_close": (_ENTRY_WINDOW_CLOSE_HOUR, _ENTRY_WINDOW_CLOSE_MINUTE),
-            "nightly_scan": (_NIGHTLY_SCAN_HOUR, _NIGHTLY_SCAN_MINUTE),
         }
         _today_et = _now_et.date()
         _h, _m = _now_et.hour, _now_et.minute
@@ -1296,11 +1355,25 @@ class AutoTrader:
             today_et = now_et.date()
             h, m = now_et.hour, now_et.minute
 
-            # Day rollover: reset persistent state for the new day
+            # Day rollover: reset persistent state for the new day.
+            # Preserve nightly_scan if it targets today (run last evening).
             if _state.date != today_et.isoformat():
+                _old_nightly = _state.events.get("nightly_scan")
                 _state = SchedulerState.fresh(today_et.isoformat())
+                if (
+                    _old_nightly
+                    and _old_nightly.target_date == today_et.isoformat()
+                ):
+                    _state.events["nightly_scan"] = _old_nightly
+                    logger.info(
+                        "Day rollover: preserved nightly_scan (target_date=%s)",
+                        _old_nightly.target_date,
+                    )
                 for k in _fired:
                     _fired[k] = None
+                # If nightly_scan was preserved, mark it in _fired too
+                if _state.is_fired("nightly_scan"):
+                    _fired["nightly_scan"] = today_et
 
             # Heartbeat every ~5 minutes (10 iterations x 30s)
             if _loop_count % 10 == 0:
@@ -1388,12 +1461,17 @@ class AutoTrader:
                     _state.mark_fired("entry_close", result="skipped")
                 _state.save(self._state_path)
 
-            # 8:00 PM: Nightly scan
-            if h >= _NIGHTLY_SCAN_HOUR and (h > _NIGHTLY_SCAN_HOUR or m >= _NIGHTLY_SCAN_MINUTE) and _fired["nightly_scan"] != today_et:
-                _fired["nightly_scan"] = today_et
-                await self._on_nightly_scan()
-                _state.mark_fired("nightly_scan")
-                _state.save(self._state_path)
+            # 8:00 PM: Nightly scan (target_date = tomorrow)
+            if h >= _NIGHTLY_SCAN_HOUR and (h > _NIGHTLY_SCAN_HOUR or m >= _NIGHTLY_SCAN_MINUTE):
+                _nightly_target = (today_et + timedelta(days=1)).isoformat()
+                if not _state.is_fired_for_date("nightly_scan", _nightly_target):
+                    _fired["nightly_scan"] = today_et
+                    await self._on_nightly_scan()
+                    _state.mark_fired(
+                        "nightly_scan",
+                        target_date=_nightly_target,
+                    )
+                    _state.save(self._state_path)
 
     # -----------------------------------------------------------------------
     # Scheduled event handlers (delegate to batch pipeline)

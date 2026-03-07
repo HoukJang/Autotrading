@@ -1646,3 +1646,46 @@ class TestGapFilterIntegration:
 
         assert aapl_entry["gap_filter_status"] == "passed"
         assert tsla_entry["gap_filter_status"] == "filtered"
+
+
+class TestComputeNightlyTarget:
+    """Test AutoTrader._compute_nightly_target() static method.
+
+    Morning catch-up -> target_date = today (scan serves today's MOO).
+    Evening run (>=20:00) -> target_date = tomorrow (scan serves tomorrow's MOO).
+    """
+
+    def test_morning_target_is_today(self):
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+        # 5:21 AM ET on 2026-03-06
+        now = datetime(2026, 3, 6, 5, 21, tzinfo=_ET)
+        assert AutoTrader._compute_nightly_target(now) == "2026-03-06"
+
+    def test_evening_target_is_tomorrow(self):
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+        # 8:00 PM ET on 2026-03-06
+        now = datetime(2026, 3, 6, 20, 0, tzinfo=_ET)
+        assert AutoTrader._compute_nightly_target(now) == "2026-03-07"
+
+    def test_just_before_nightly_hour_targets_today(self):
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+        # 7:59 PM ET on 2026-03-06
+        now = datetime(2026, 3, 6, 19, 59, tzinfo=_ET)
+        assert AutoTrader._compute_nightly_target(now) == "2026-03-06"
+
+    def test_midnight_targets_today(self):
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+        # Midnight on 2026-03-06
+        now = datetime(2026, 3, 6, 0, 0, tzinfo=_ET)
+        assert AutoTrader._compute_nightly_target(now) == "2026-03-06"
+
+    def test_late_evening_targets_tomorrow(self):
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+        # 11:30 PM ET on 2026-03-06
+        now = datetime(2026, 3, 6, 23, 30, tzinfo=_ET)
+        assert AutoTrader._compute_nightly_target(now) == "2026-03-07"

@@ -152,6 +152,18 @@ class TestEventDefinitions:
                     f"WINDOW event '{name}' missing catch_up_deadline_minute"
                 )
 
+    def test_nightly_scan_has_target_next_day(self) -> None:
+        """nightly_scan must have target_next_day=True."""
+        assert TRADING_EVENTS["nightly_scan"].target_next_day is True
+
+    def test_non_nightly_events_have_target_next_day_false(self) -> None:
+        """All events except nightly_scan should have target_next_day=False."""
+        for name, ev in TRADING_EVENTS.items():
+            if name != "nightly_scan":
+                assert ev.target_next_day is False, (
+                    f"Event '{name}' has unexpected target_next_day=True"
+                )
+
     def test_non_window_non_conditional_events_have_no_deadline(self) -> None:
         """Events that are neither WINDOW nor CONDITIONAL should not specify deadline fields."""
         for name, ev in TRADING_EVENTS.items():
@@ -1031,3 +1043,53 @@ class TestAlreadyFiredFiltering:
         assert "daily_reset" in result
         assert "gap_filter" in result
         assert "moo" in result
+
+
+# ======================================================================
+# Nightly scan target_date dedup tests
+# ======================================================================
+
+
+class TestNightlyScanTargetDateDedup:
+    """Test that nightly_scan dedup works with target_date semantics.
+
+    The core scenario: morning catch-up targets today, evening run targets
+    tomorrow.  These are different target_dates, so a morning catch-up
+    must NOT block the 20:00 evening run (and vice versa).
+    """
+
+    @pytest.fixture()
+    def resolver(self) -> StartupCatchUpResolver:
+        return StartupCatchUpResolver()
+
+    def test_morning_catchup_does_not_block_evening_via_already_fired(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """If nightly_scan is NOT in already_fired, resolver includes it
+        in the morning catch-up window (before 9:00).
+        """
+        # Morning: nightly_scan should be caught up
+        result = resolver.resolve(
+            _et(5, 21), today_is_market_day=True, already_fired=set()
+        )
+        assert "nightly_scan" in result
+
+    def test_nightly_scan_in_already_fired_blocks_catchup(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """If nightly_scan IS in already_fired, resolver excludes it."""
+        result = resolver.resolve(
+            _et(5, 21),
+            today_is_market_day=True,
+            already_fired={"nightly_scan"},
+        )
+        assert "nightly_scan" not in result
+
+    def test_evening_resolver_includes_nightly_when_not_fired(
+        self, resolver: StartupCatchUpResolver
+    ) -> None:
+        """At 20:00+, nightly_scan should be included when not in already_fired."""
+        result = resolver.resolve(
+            _et(20, 0), today_is_market_day=True, already_fired=set()
+        )
+        assert "nightly_scan" in result

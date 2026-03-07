@@ -56,6 +56,7 @@ class EventDefinition:
     catch_up_deadline_hour: int | None = None
     catch_up_deadline_minute: int | None = None
     depends_on: list[str] = field(default_factory=list)
+    target_next_day: bool = False  # If True, dedup key uses next calendar date
 
 
 # ---------------------------------------------------------------------------
@@ -116,5 +117,6 @@ TRADING_EVENTS: dict[str, EventDefinition] = {
         scheduled_minute=0,
         catch_up_policy=CatchUpPolicy.ALWAYS,
         depends_on=[],
+        target_next_day=True,
     ),
 }
