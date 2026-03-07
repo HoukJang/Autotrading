@@ -128,32 +128,51 @@ class OrderManager:
                         "-- cancelling to prevent ghost fill",
                         result.order_id, result.status,
                     )
-                    cancel_ok = await self._adapter.cancel_order(result.order_id)
-                    if not cancel_ok:
-                        # Cancel failed -- order may have filled in the
-                        # meantime.  Re-check status before giving up.
+                    # Retry cancel up to 3 times to prevent ghost fills
+                    cancel_ok = False
+                    for cancel_attempt in range(1, 4):
+                        cancel_ok = await self._adapter.cancel_order(result.order_id)
+                        if cancel_ok:
+                            break
+                        # Cancel failed -- check if it filled in the meantime
                         recheck = await self._adapter.get_order_status(result.order_id)
                         if recheck and recheck.status in _MARKET_FILL_OK:
                             logger.info(
-                                "Order %s filled after cancel attempt "
+                                "Order %s filled after cancel attempt %d "
                                 "(status=%s, qty=%.0f, price=%.2f) "
                                 "-- processing as filled",
-                                recheck.order_id, recheck.status,
+                                recheck.order_id, cancel_attempt, recheck.status,
                                 recheck.filled_qty, recheck.filled_price,
                             )
                             result = recheck
-                            # Fall through to the filled handling below
-                        else:
+                            break
+                        if recheck and recheck.status in _TERMINAL_CANCEL:
+                            logger.info(
+                                "Order %s already in terminal state: %s",
+                                result.order_id, recheck.status,
+                            )
+                            return None
+                        if cancel_attempt < 3:
                             logger.warning(
-                                "Cancel failed and order %s still not filled "
-                                "(status=%s) -- abandoning order",
+                                "Cancel attempt %d failed for order %s "
+                                "(status=%s), retrying...",
+                                cancel_attempt, result.order_id,
+                                recheck.status if recheck else "unknown",
+                            )
+                            await asyncio.sleep(1.0 * cancel_attempt)
+                        else:
+                            logger.critical(
+                                "GHOST FILL RISK: All cancel attempts failed "
+                                "for order %s (status=%s). Order may still "
+                                "be live at broker!",
                                 result.order_id,
                                 recheck.status if recheck else "unknown",
                             )
                             return None
-                    else:
-                        # Cancel "succeeded" but order may have filled in flight.
-                        # Brief wait + re-check to catch ghost fills.
+
+                    if cancel_ok and result.status not in _MARKET_FILL_OK:
+                        # Cancel succeeded -- but order may have filled in flight.
+                        # Brief wait + re-check to catch race condition fills.
                         await asyncio.sleep(1.0)
                         recheck = await self._adapter.get_order_status(
                             result.order_id,
