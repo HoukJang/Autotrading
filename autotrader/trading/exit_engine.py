@@ -146,6 +146,31 @@ class UnifiedExitEngine:
             self._closed_today.clear()
             self._last_clear_date = today_et
 
+    @property
+    def closed_today_count(self) -> int:
+        """Return the number of symbols blocked from re-entry today."""
+        return len(self._closed_today)
+
+    # ------------------------------------------------------------------
+    # Snapshot (persistence support)
+    # ------------------------------------------------------------------
+
+    def to_snapshot(self) -> dict:
+        """Serialize ephemeral state for persistence."""
+        return {
+            "closed_today": list(self._closed_today),
+            "last_clear_date": self._last_clear_date.isoformat() if self._last_clear_date else None,
+        }
+
+    def from_snapshot(self, data: dict) -> None:
+        """Restore ephemeral state from persisted snapshot."""
+        self._closed_today = set(data.get("closed_today", []))
+        last_clear = data.get("last_clear_date")
+        if last_clear:
+            self._last_clear_date = date.fromisoformat(last_clear)
+        else:
+            self._last_clear_date = None
+
     # ------------------------------------------------------------------
     # BAR_CLOSE mode (live): check SL/TP against close only
     # ------------------------------------------------------------------

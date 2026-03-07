@@ -424,7 +424,30 @@ class AutoTrader:
         snapshots = self._runtime_state.load()
         if snapshots:
             state_components = self._get_state_components()
+            # Exclude position_book from generic restore (which calls
+            # from_snapshot and would wipe broker-loaded positions).
+            # Instead, merge tracking fields after generic restore.
+            pb_component = state_components.pop("position_book", None)
             self._runtime_state.restore(state_components, snapshots)
+            # Merge position_book tracking fields into broker-loaded positions
+            pb_snapshot = snapshots.get("position_book")
+            if pb_component is not None and pb_snapshot:
+                pb_component.merge_snapshot(pb_snapshot)
+                logger.info(
+                    "Merged PositionBook snapshot for %d symbols",
+                    len(pb_snapshot),
+                )
+        else:
+            # First run or state file missing -- bootstrap from broker
+            logger.info("No RuntimeState found, bootstrapping from broker...")
+            bootstrapped = await bootstrap_from_broker(
+                broker=self._broker,
+                ledger=getattr(self, '_order_ledger', None),
+            )
+            if bootstrapped:
+                logger.info("Bootstrapped %d positions from broker", len(bootstrapped))
+                for sym, held in bootstrapped.items():
+                    self._position_book.add(held)
 
         # Reconcile any pending orders from ledger (ghost fill detection)
         await self._reconcile_pending_orders()
@@ -547,6 +570,8 @@ class AutoTrader:
             components["entry_manager"] = self._entry_manager
         if hasattr(self, "_exit_rule_engine") and self._exit_rule_engine is not None:
             components["exit_rules"] = self._exit_rule_engine
+        if hasattr(self, "_position_book") and self._position_book is not None:
+            components["position_book"] = self._position_book
         return components
 
     async def _reconcile_positions(self, *, source: str = "startup") -> None:

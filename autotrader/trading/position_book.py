@@ -134,6 +134,33 @@ class PositionBook:
             except Exception:
                 logger.exception("PositionBook: failed to restore position for %s", sym)
 
+    def merge_snapshot(self, data: dict) -> None:
+        """Merge tracking fields from snapshot into existing positions.
+
+        Unlike from_snapshot() which replaces all positions, this method
+        only updates MFE/MAE tracking fields on positions that already exist
+        in the book (loaded from broker).
+        """
+        for sym, rec in data.items():
+            pos = self._positions.get(sym)
+            if pos is None:
+                continue
+            # Only update tracking fields, not identity/quantity fields
+            pos.bars_held = int(rec.get("bars_held", pos.bars_held))
+            pos.highest_price = float(rec.get("highest_price", pos.highest_price))
+            pos.lowest_price = float(rec.get("lowest_price", pos.lowest_price))
+            pos.consecutive_loss_bars = int(
+                rec.get("consecutive_loss_bars", pos.consecutive_loss_bars)
+            )
+            pos.entry_adx = float(rec.get("entry_adx", pos.entry_adx))
+            logger.info(
+                "Merged snapshot for %s: bars_held=%d, highest=%.2f, lowest=%.2f",
+                sym,
+                pos.bars_held,
+                pos.highest_price,
+                pos.lowest_price,
+            )
+
     # -- Backward compatibility --
 
     def update_prices(self, symbol: str, high: float, low: float, close: float) -> None:

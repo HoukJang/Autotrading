@@ -255,9 +255,9 @@ class ExitRuleEngine:
             today_et: Today's date in US/Eastern.  Used to guard against
                 duplicate calls within the same session.
         """
-        old_count = len(self._unified._closed_today)
+        old_count = self._unified.closed_today_count
         self._unified.on_new_trading_day(today_et)
-        if old_count and self._unified._last_clear_date == today_et:
+        if old_count and old_count != self._unified.closed_today_count:
             logger.info(
                 "Re-entry block cleared for new trading day %s (%d symbols released)",
                 today_et, old_count,
@@ -269,20 +269,11 @@ class ExitRuleEngine:
 
     def to_snapshot(self) -> dict:
         """Serialize ephemeral state for persistence."""
-        return {
-            "closed_today": list(self._unified._closed_today),
-            "last_clear_date": self._unified._last_clear_date.isoformat() if self._unified._last_clear_date else None,
-        }
+        return self._unified.to_snapshot()
 
     def from_snapshot(self, data: dict) -> None:
         """Restore ephemeral state from persisted snapshot."""
-        self._unified._closed_today = set(data.get("closed_today", []))
-        last_clear = data.get("last_clear_date")
-        if last_clear:
-            from datetime import date
-            self._unified._last_clear_date = date.fromisoformat(last_clear)
-        else:
-            self._unified._last_clear_date = None
+        self._unified.from_snapshot(data)
 
     # ------------------------------------------------------------------
     # Utility (kept for backward compatibility -- tests use these)

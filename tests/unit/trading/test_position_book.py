@@ -305,3 +305,152 @@ class TestDunderMethods:
         assert len(items) == 2
         assert h1 in items
         assert h2 in items
+
+
+class TestMergeSnapshot:
+    """merge_snapshot(): updates tracking fields without replacing positions."""
+
+    def test_merge_updates_tracking_fields(self):
+        """Tracking fields are updated from snapshot data."""
+        book = PositionBook()
+        held = _make_held("AAPL", entry_price=150.0)
+        book.add(held)
+
+        snapshot = {
+            "AAPL": {
+                "bars_held": 5,
+                "highest_price": 170.0,
+                "lowest_price": 130.0,
+                "consecutive_loss_bars": 2,
+                "entry_adx": 32.5,
+            }
+        }
+        book.merge_snapshot(snapshot)
+
+        assert held.bars_held == 5
+        assert held.highest_price == 170.0
+        assert held.lowest_price == 130.0
+        assert held.consecutive_loss_bars == 2
+        assert held.entry_adx == 32.5
+
+    def test_merge_preserves_identity_fields(self):
+        """Identity/quantity fields are NOT changed by merge."""
+        book = PositionBook()
+        held = _make_held("AAPL", entry_price=150.0, strategy="breakout_momentum")
+        book.add(held)
+
+        snapshot = {
+            "AAPL": {
+                "symbol": "AAPL",
+                "strategy": "rsi_mean_reversion",
+                "direction": "short",
+                "entry_price": 999.0,
+                "qty": 999,
+                "bars_held": 3,
+                "highest_price": 160.0,
+                "lowest_price": 140.0,
+                "consecutive_loss_bars": 1,
+                "entry_adx": 28.0,
+            }
+        }
+        book.merge_snapshot(snapshot)
+
+        # Identity/quantity fields must remain unchanged
+        assert held.symbol == "AAPL"
+        assert held.strategy == "breakout_momentum"
+        assert held.direction == "long"
+        assert held.entry_price == 150.0
+        assert held.qty == 10
+        # Tracking fields are updated
+        assert held.bars_held == 3
+        assert held.highest_price == 160.0
+
+    def test_merge_skips_unknown_symbols(self):
+        """Symbols not in the book are silently skipped."""
+        book = PositionBook()
+        held = _make_held("AAPL")
+        book.add(held)
+
+        snapshot = {
+            "MSFT": {
+                "bars_held": 10,
+                "highest_price": 400.0,
+                "lowest_price": 350.0,
+                "consecutive_loss_bars": 0,
+                "entry_adx": 20.0,
+            }
+        }
+        book.merge_snapshot(snapshot)
+
+        # AAPL unchanged, MSFT not added
+        assert book.count == 1
+        assert held.bars_held == 0  # default, not modified
+
+    def test_merge_empty_snapshot(self):
+        """Empty snapshot is a no-op."""
+        book = PositionBook()
+        held = _make_held("AAPL")
+        held.bars_held = 3
+        book.add(held)
+
+        book.merge_snapshot({})
+        assert held.bars_held == 3  # unchanged
+
+    def test_merge_partial_fields(self):
+        """Only fields present in snapshot are updated; others keep defaults."""
+        book = PositionBook()
+        held = _make_held("AAPL", entry_price=100.0)
+        held.bars_held = 0
+        held.highest_price = 100.0
+        held.lowest_price = 100.0
+        held.consecutive_loss_bars = 0
+        held.entry_adx = 0.0
+        book.add(held)
+
+        snapshot = {
+            "AAPL": {
+                "bars_held": 7,
+                "highest_price": 120.0,
+                # lowest_price, consecutive_loss_bars, entry_adx omitted
+            }
+        }
+        book.merge_snapshot(snapshot)
+
+        assert held.bars_held == 7
+        assert held.highest_price == 120.0
+        # Fields not in snapshot keep their current values
+        assert held.lowest_price == 100.0
+        assert held.consecutive_loss_bars == 0
+        assert held.entry_adx == 0.0
+
+    def test_merge_multiple_positions(self):
+        """Merge correctly updates multiple positions."""
+        book = PositionBook()
+        aapl = _make_held("AAPL", entry_price=150.0)
+        msft = _make_held("MSFT", entry_price=300.0)
+        book.add(aapl)
+        book.add(msft)
+
+        snapshot = {
+            "AAPL": {
+                "bars_held": 3,
+                "highest_price": 160.0,
+                "lowest_price": 140.0,
+                "consecutive_loss_bars": 0,
+                "entry_adx": 30.0,
+            },
+            "MSFT": {
+                "bars_held": 7,
+                "highest_price": 320.0,
+                "lowest_price": 280.0,
+                "consecutive_loss_bars": 1,
+                "entry_adx": 25.0,
+            },
+        }
+        book.merge_snapshot(snapshot)
+
+        assert aapl.bars_held == 3
+        assert aapl.highest_price == 160.0
+        assert msft.bars_held == 7
+        assert msft.highest_price == 320.0
+        assert msft.lowest_price == 280.0

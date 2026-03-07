@@ -1058,7 +1058,9 @@ class TestReEntryBlocking:
 
         today = date(2026, 2, 24)
         tomorrow = date(2026, 2, 25)
-        engine._last_clear_date = today
+        engine.on_new_trading_day(today)  # Set last_clear_date to today
+        engine.record_close("AAPL")
+        engine.record_close("MSFT")
 
         engine.on_new_trading_day(tomorrow)
 

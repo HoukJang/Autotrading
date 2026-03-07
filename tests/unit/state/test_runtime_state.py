@@ -325,33 +325,38 @@ class TestExitRuleEngineSnapshot:
         from autotrader.execution.exit_rules import ExitRuleEngine
 
         ere = ExitRuleEngine()
-        ere._unified._closed_today = {"AAPL", "MSFT"}
-        ere._unified._last_clear_date = date(2026, 3, 5)
+        ere.from_snapshot({
+            "closed_today": ["AAPL", "MSFT"],
+            "last_clear_date": "2026-03-05",
+        })
 
         snap = ere.to_snapshot()
 
         ere2 = ExitRuleEngine()
         ere2.from_snapshot(snap)
 
-        assert ere2._unified._closed_today == {"AAPL", "MSFT"}
-        assert ere2._unified._last_clear_date == date(2026, 3, 5)
+        restored = ere2.to_snapshot()
+        assert set(restored["closed_today"]) == {"AAPL", "MSFT"}
+        assert restored["last_clear_date"] == "2026-03-05"
 
     def test_from_snapshot_handles_null_date(self) -> None:
         from autotrader.execution.exit_rules import ExitRuleEngine
 
         ere = ExitRuleEngine()
         ere.from_snapshot({"closed_today": ["TSLA"], "last_clear_date": None})
-        assert ere._unified._closed_today == {"TSLA"}
-        assert ere._unified._last_clear_date is None
+        restored = ere.to_snapshot()
+        assert set(restored["closed_today"]) == {"TSLA"}
+        assert restored["last_clear_date"] is None
 
     def test_from_snapshot_handles_missing_keys(self) -> None:
         from autotrader.execution.exit_rules import ExitRuleEngine
 
         ere = ExitRuleEngine()
-        ere._unified._closed_today = {"NVDA"}
+        ere.from_snapshot({"closed_today": ["NVDA"], "last_clear_date": None})
         ere.from_snapshot({})
-        assert ere._unified._closed_today == set()
-        assert ere._unified._last_clear_date is None
+        restored = ere.to_snapshot()
+        assert set(restored["closed_today"]) == set()
+        assert restored["last_clear_date"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -385,8 +390,10 @@ class TestRuntimeStateEndToEnd:
         risk._daily_pnl = -100.0
 
         exit_eng = ExitRuleEngine()
-        exit_eng._unified._closed_today = {"AAPL", "GOOG"}
-        exit_eng._unified._last_clear_date = date(2026, 3, 5)
+        exit_eng.from_snapshot({
+            "closed_today": ["AAPL", "GOOG"],
+            "last_clear_date": "2026-03-05",
+        })
 
         components = {
             "gdr_manager": gdr,
@@ -428,8 +435,9 @@ class TestRuntimeStateEndToEnd:
         assert risk2._peak_equity == 10000.0
         assert risk2._current_equity == 9700.0
         assert risk2._daily_pnl == -100.0
-        assert exit_eng2._unified._closed_today == {"AAPL", "GOOG"}
-        assert exit_eng2._unified._last_clear_date == date(2026, 3, 5)
+        exit_restored = exit_eng2.to_snapshot()
+        assert set(exit_restored["closed_today"]) == {"AAPL", "GOOG"}
+        assert exit_restored["last_clear_date"] == "2026-03-05"
 
 
 # ---------------------------------------------------------------------------
