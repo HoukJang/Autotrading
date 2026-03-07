@@ -1066,11 +1066,19 @@ def _render_position_card(
         total_range = sl_d + tp_d
         if total_range > 0:
             position_pct = sl_d / total_range * 100
+            # Color: left=profit(green), right=loss(red) for long
+            # Reversed for short so green always means "toward profit"
+            if dir_lower == "long":
+                left_color = COLORS["profit"]
+                right_color = COLORS["loss"]
+            else:
+                left_color = COLORS["loss"]
+                right_color = COLORS["profit"]
             proximity_html = (
                 f'<div style="margin-top:4px">'
                 f'<div style="display:flex;justify-content:space-between;font-size:0.72em;color:{COLORS["text_muted"]}">'
                 f'<span>SL -{sl_d:.1f}%</span><span>TP +{tp_d:.1f}%</span></div>'
-                f'<div style="background:linear-gradient(90deg, {COLORS["loss"]}44 0%, {COLORS["loss"]}22 {position_pct:.0f}%, {COLORS["profit"]}22 {position_pct:.0f}%, {COLORS["profit"]}44 100%);'
+                f'<div style="background:linear-gradient(90deg, {left_color}44 0%, {left_color}22 {position_pct:.0f}%, {right_color}22 {position_pct:.0f}%, {right_color}44 100%);'
                 f'height:4px;border-radius:2px;position:relative;margin-top:2px">'
                 f'<div style="position:absolute;left:{position_pct:.0f}%;top:-2px;width:2px;height:8px;background:{COLORS["text_primary"]};border-radius:1px"></div>'
                 f'</div></div>'
