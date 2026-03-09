@@ -255,11 +255,22 @@ class TestIsFiredForDate:
         state.mark_fired("nightly_scan", target_date="2026-03-05")
         assert state.is_fired_for_date("nightly_scan", "2026-03-06") is False
 
-    def test_legacy_empty_target_returns_true(self) -> None:
-        """Legacy records without target_date are treated conservatively."""
+    def test_legacy_empty_target_blocks_same_date(self) -> None:
+        """Legacy records without target_date block when target == state.date."""
         state = SchedulerState.fresh("2026-03-04")
         state.mark_fired("nightly_scan")  # no target_date -> ""
-        assert state.is_fired_for_date("nightly_scan", "2026-03-05") is True
+        assert state.is_fired_for_date("nightly_scan", "2026-03-04") is True
+
+    def test_legacy_empty_target_does_not_block_different_date(self) -> None:
+        """Legacy records without target_date must NOT block a different date.
+
+        Scenario: morning catch-up at 05:21 fires nightly_scan with no
+        target_date (legacy).  The evening 20:00 run targets tomorrow
+        (2026-03-05).  The legacy record should not block the evening run.
+        """
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("nightly_scan")  # no target_date -> ""
+        assert state.is_fired_for_date("nightly_scan", "2026-03-05") is False
 
     def test_non_target_event_works(self) -> None:
         """is_fired_for_date on a non-target_next_day event (no target_date)."""

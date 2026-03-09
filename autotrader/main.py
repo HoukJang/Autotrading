@@ -2305,7 +2305,7 @@ class AutoTrader:
         interval = self._settings.scheduler.rotation_check_interval_seconds
         while self._running:
             await asyncio.sleep(interval)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(ZoneInfo("America/New_York"))
             rotation_day = 5
             if self._rotation_manager is not None:
                 rotation_day = getattr(
@@ -2338,7 +2338,7 @@ class AutoTrader:
         except Exception:
             logger.warning("Earnings calendar fetch partially failed")
 
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(ZoneInfo("America/New_York")).date()
         blackout = earnings_cal.blackout_symbols(all_symbols, today)
         active_candidates = [s for s in all_symbols if s not in blackout][:max_candidates]
 
@@ -2389,6 +2389,16 @@ class AutoTrader:
         account = await self._broker.get_account()
         positions = await self._broker.get_positions()
         open_syms = [p.symbol for p in positions]
+        # Pre-check: reject tiny universes before mutating any state
+        incoming_symbols = getattr(universe_result, "symbols", []) or []
+        if len(incoming_symbols) < 10:
+            logger.warning(
+                "Rotation universe has only %d symbols (minimum 10); "
+                "refusing to overwrite universe of %d symbols",
+                len(incoming_symbols), len(self._settings.symbols),
+            )
+            return
+
         self._rotation_manager.apply_rotation(
             universe_result,
             open_position_symbols=open_syms,
@@ -2401,6 +2411,14 @@ class AutoTrader:
             set(self._rotation_manager.active_symbols)
             | set(self._rotation_manager.watchlist_symbols)
         )
+        if len(new_symbols) < 10:
+            logger.warning(
+                "Rotation produced only %d symbols (minimum 10); "
+                "refusing to overwrite universe of %d symbols -- "
+                "state may be inconsistent, consider restarting",
+                len(new_symbols), len(self._settings.symbols),
+            )
+            return
         self._settings.symbols = new_symbols
         logger.info(
             "Rotation applied: %d active, %d watchlist",

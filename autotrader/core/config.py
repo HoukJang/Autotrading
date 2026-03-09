@@ -139,7 +139,7 @@ class SchedulerConfig(BaseModel):
     rotation_check_interval_seconds: int = 300
     regime_proxy_symbol: str = "SPY"
     universe_history_days: int = 120
-    universe_max_candidates: int = 50
+    universe_max_candidates: int = 510
 
 
 class PerformanceConfig(BaseModel):

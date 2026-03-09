@@ -40,7 +40,7 @@ class TestHardFilter:
 
     def test_rejects_price_too_high(self):
         f = HardFilter()
-        c = _make_candidate(close=250.0)
+        c = _make_candidate(close=550.0)
         assert f.passes(c) is False
 
     def test_rejects_atr_ratio_too_low(self):
@@ -102,7 +102,7 @@ class TestHardFilter:
 
     def test_boundary_max_price_passes(self):
         f = HardFilter()
-        c = _make_candidate(close=200.0)
+        c = _make_candidate(close=500.0)
         assert f.passes(c) is True
 
     def test_boundary_min_atr_ratio_passes(self):

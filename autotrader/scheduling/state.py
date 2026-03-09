@@ -140,8 +140,11 @@ class SchedulerState:
         For events that use target_date-based dedup (e.g. nightly_scan),
         this checks whether the recorded target_date matches *target*.
         If the event has no target_date recorded (legacy state or non-
-        target_next_day events), returns True when the event is present
-        (conservative: assume it was for the current day).
+        target_next_day events), assume it was fired for state.date
+        (the current scheduler day).  This means a legacy record blocks
+        same-day targets but does NOT block a different-date target
+        (e.g. morning catch-up for today does not block the evening run
+        targeting tomorrow).
 
         Args:
             event_name: Name of the event to check.
@@ -155,8 +158,9 @@ class SchedulerState:
             return False
         if rec.target_date:
             return rec.target_date == target
-        # Legacy: no target_date recorded means fired for current state.date
-        return True
+        # Legacy: no target_date recorded -> assume fired for state.date.
+        # Blocks same-day target, but not a different-date target.
+        return target == self.date
 
     def fired_event_names(self) -> set[str]:
         """Return the set of event names that have fired."""
