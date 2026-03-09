@@ -1,7 +1,7 @@
 """Status bar component for the live trading dashboard.
 
-Renders a horizontal bar showing connection status, last update time,
-market status, next scheduled event countdown, and last batch scan info.
+Renders a compact horizontal bar showing connection status with update time,
+market status, and weekly safety level with next event countdown.
 """
 from __future__ import annotations
 
@@ -30,11 +30,11 @@ def render_status_bar(data, settings: dict) -> None:
     weekly_loss_limit_pct = settings.get("weekly_loss_limit_pct", 0.05)
     last_scan_ts = settings.get("last_scan_timestamp", "")
 
-    col_conn, col_update, col_market, col_event, col_loss = st.columns(
-        [1, 1, 1, 2, 2],
+    col_conn, col_market, col_safety = st.columns(
+        [2, 1, 3],
     )
 
-    # -- 1. Connection status ------------------------------------------------
+    # -- 1. Connection status + last update (merged) -------------------------
     with col_conn:
         last_update = getattr(data, "last_update", None)
         if last_update is not None and last_update != "":
@@ -61,28 +61,28 @@ def render_status_bar(data, settings: dict) -> None:
             dot_color = COLORS["loss"]
             label = "No data"
 
-        st.markdown(
-            f'<span style="color:{dot_color};font-size:1.1em">'
-            f"&#9679;</span> **{label}**",
-            unsafe_allow_html=True,
-        )
-
-    # -- 2. Last update ------------------------------------------------------
-    with col_update:
         if elapsed == float("inf"):
-            st.markdown(
-                f'<span style="color:{COLORS["text_muted"]}">No data yet</span>',
-                unsafe_allow_html=True,
+            update_part = (
+                f' <span style="color:{COLORS["text_muted"]}">'
+                f"&middot; No data yet</span>"
             )
         else:
             time_text = fmt_delta_time(elapsed)
-            color = COLORS["warning"] if elapsed > 120 else COLORS["text_secondary"]
-            st.markdown(
-                f'<span style="color:{color}">Updated {time_text}</span>',
-                unsafe_allow_html=True,
+            update_color = (
+                COLORS["warning"] if elapsed > 120 else COLORS["text_secondary"]
+            )
+            update_part = (
+                f' <span style="color:{update_color}">'
+                f"&middot; Updated {time_text}</span>"
             )
 
-    # -- 3. Market status ----------------------------------------------------
+        st.markdown(
+            f'<span style="color:{dot_color};font-size:1.1em">'
+            f"&#9679;</span> **{label}**{update_part}",
+            unsafe_allow_html=True,
+        )
+
+    # -- 2. Market status ----------------------------------------------------
     with col_market:
         now_utc = datetime.now(timezone.utc)
         weekday = now_utc.weekday()  # 0=Mon .. 6=Sun
@@ -114,28 +114,9 @@ def render_status_bar(data, settings: dict) -> None:
             unsafe_allow_html=True,
         )
 
-    # -- 4. Next scheduled event (nightly scan / entry window) ---------------
-    with col_event:
-        event_text = _compute_next_event(now_utc)
-        scan_text = ""
-        if last_scan_ts:
-            try:
-                scan_dt = datetime.fromisoformat(last_scan_ts)
-                if scan_dt.tzinfo is None:
-                    scan_dt = scan_dt.replace(tzinfo=timezone.utc)
-                scan_elapsed = (now_utc - scan_dt).total_seconds()
-                scan_text = f" | Last scan: {fmt_delta_time(scan_elapsed)}"
-            except (ValueError, TypeError):
-                pass
-
-        st.markdown(
-            f'<span style="color:{COLORS["info"]};font-size:0.9em">'
-            f"{event_text}{scan_text}</span>",
-            unsafe_allow_html=True,
-        )
-
-    # -- 5. Weekly loss limit usage -----------------------------------------
-    with col_loss:
+    # -- 3. Weekly safety + next event (merged) ------------------------------
+    with col_safety:
+        # Weekly loss limit usage
         equity_df = getattr(data, "equity_df", None)
         current_equity = getattr(data, "current_equity", 0.0)
 
@@ -172,11 +153,26 @@ def render_status_bar(data, settings: dict) -> None:
         else:
             label_color = COLORS["profit"]
 
+        # Next event info
+        event_text = _compute_next_event(now_utc)
+        scan_text = ""
+        if last_scan_ts:
+            try:
+                scan_dt = datetime.fromisoformat(last_scan_ts)
+                if scan_dt.tzinfo is None:
+                    scan_dt = scan_dt.replace(tzinfo=timezone.utc)
+                scan_elapsed = (now_utc - scan_dt).total_seconds()
+                scan_text = f" | Last scan: {fmt_delta_time(scan_elapsed)}"
+            except (ValueError, TypeError):
+                pass
+
         st.markdown(
             f'<span style="color:{COLORS["text_secondary"]};font-size:0.85em">'
-            f"Weekly Loss: "
+            f"Weekly Safety: "
             f'<span style="color:{label_color}">{usage_pct_display}</span>'
-            f" / {limit_pct_display}</span>",
+            f" / {limit_pct_display}"
+            f' &middot; <span style="color:{COLORS["info"]}">'
+            f"{event_text}{scan_text}</span></span>",
             unsafe_allow_html=True,
         )
         st.progress(usage)
@@ -218,32 +214,32 @@ def _compute_next_event(now_utc: datetime) -> str:
 
     # Weekend: next event is Monday's nightly scan (Sunday night)
     if weekday >= 5:
-        return "Next scan: Monday 22:00 ET"
+        return "Next scan: Monday evening"
 
     # Before market open
     if time_min_et < moo_open_min:
         if time_min_et >= nightly_scan_min - (24 * 60) and weekday == 0:
             # Monday before open -- no prior scan last night
             delta = moo_open_min - time_min_et
-            return _fmt_countdown(delta, "MOO Window")
+            return _fmt_countdown(delta, "Market opens")
         delta = moo_open_min - time_min_et
-        return _fmt_countdown(delta, "MOO Window")
+        return _fmt_countdown(delta, "Market opens")
 
     # After open, before confirm window
     if time_min_et < confirm_min:
         delta = confirm_min - time_min_et
-        return _fmt_countdown(delta, "Confirm Window")
+        return _fmt_countdown(delta, "10 AM check")
 
     # After confirm, before afternoon review
     if time_min_et < review_min:
         delta = review_min - time_min_et
-        return _fmt_countdown(delta, "Portfolio Review")
+        return _fmt_countdown(delta, "Afternoon review")
 
     # After review: show nightly scan countdown
     if time_min_et < nightly_scan_min:
         delta = nightly_scan_min - time_min_et
-        return _fmt_countdown(delta, "Nightly Scan")
+        return _fmt_countdown(delta, "Next signal scan")
 
     # After nightly scan: next event is tomorrow's MOO
     delta = (24 * 60 - time_min_et) + moo_open_min
-    return _fmt_countdown(delta, "Tomorrow MOO")
+    return _fmt_countdown(delta, "Tomorrow open")

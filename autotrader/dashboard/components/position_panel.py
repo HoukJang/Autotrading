@@ -15,7 +15,7 @@ import streamlit as st
 import plotly.graph_objects as go
 
 from autotrader.dashboard.data_loader import load_open_positions
-from autotrader.dashboard.theme import COLORS, STRATEGY_COLORS, STRATEGY_NAMES
+from autotrader.dashboard.theme import COLORS, EXIT_REASON_LABELS, STRATEGY_COLORS, STRATEGY_NAMES
 from autotrader.dashboard.utils.chart_helpers import get_chart_layout
 from autotrader.dashboard.utils.formatters import style_pnl
 from autotrader.trading.constants import SL_ATR_MULT, TP_ATR_MULT
@@ -359,7 +359,7 @@ def render_positions_tab(data) -> None:
     st.subheader(f"Open Positions ({len(positions)} / 8)")
 
     if not positions:
-        st.info("No open positions currently.")
+        st.info("No open positions right now. Positions appear when the nightly scan finds opportunities.")
     else:
         _render_open_positions_table(positions, trades_df)
 
@@ -371,7 +371,7 @@ def render_positions_tab(data) -> None:
         horizontal=True, key="trade_view_mode",
     )
     if trades_df is None or trades_df.empty:
-        st.info("No trades recorded yet.")
+        st.info("No trades recorded yet. Trade history builds as the system opens and closes positions.")
     elif view_mode == "Log View":
         st.subheader("Recent Trades (Last 50)")
         _render_recent_trades_table(trades_df)
@@ -394,7 +394,11 @@ def _render_open_positions_table(
     positions: list[str],
     trades_df: pd.DataFrame | None,
 ) -> None:
-    """Render a detailed DataFrame table of open positions."""
+    """Render a detailed DataFrame table of open positions.
+
+    Provides a toggle between a simplified 8-column basic view and the
+    full 17-column detail view.
+    """
     live_pos = load_open_positions()
     fallback_prices = _load_fallback_prices()
     rows = []
@@ -411,18 +415,50 @@ def _render_open_positions_table(
         return
 
     df = pd.DataFrame(rows)
+
+    # Rename columns for beginner-friendliness
+    col_rename = {
+        "Dir": "Direction",
+        "SL Dist": "Stop Distance",
+        "MFE": "Best P&L",
+        "MAE": "Worst P&L",
+        "R": "R-Multiple",
+    }
+    df = df.rename(columns={k: v for k, v in col_rename.items() if k in df.columns})
+
+    # Expand direction abbreviations: "L" -> "Long", "S" -> "Short"
+    if "Direction" in df.columns:
+        dir_map = {"L": "Long", "S": "Short"}
+        df["Direction"] = df["Direction"].map(lambda v: dir_map.get(v, v))
+
+    # Toggle between basic and detail view
+    show_details = st.toggle(
+        "Show all columns", value=False, key="pos_detail_toggle",
+    )
+
+    basic_cols = [
+        "Symbol", "Strategy", "Direction", "Entry", "Current",
+        "P&L", "Days", "Status",
+    ]
+    basic_cols = [c for c in basic_cols if c in df.columns]
+
+    display_df = df if show_details else df[basic_cols]
+
     st.dataframe(
-        df.style.apply(_style_position_table, axis=1),
+        display_df.style.apply(
+            _style_position_table, axis=1, renamed=True,
+        ),
         use_container_width=True,
         hide_index=True,
     )
 
     # Legend
-    st.caption(
-        "P&L = unrealized profit/loss | "
-        "MFE = max favorable excursion (best unrealized) | "
-        "MAE = max adverse excursion (worst unrealized)"
-    )
+    if show_details:
+        st.caption(
+            "P&L = unrealized profit/loss | "
+            "Best P&L = max favorable excursion (best unrealized) | "
+            "Worst P&L = max adverse excursion (worst unrealized)"
+        )
 
 
 def _extract_position_row(
@@ -491,8 +527,15 @@ def _extract_position_row(
     }
 
 
-def _style_position_table(row: pd.Series) -> list[str]:
-    """Apply row-level styling to position table."""
+def _style_position_table(row: pd.Series, renamed: bool = False) -> list[str]:
+    """Apply row-level styling to position table.
+
+    Parameters
+    ----------
+    renamed:
+        If True, use the beginner-friendly column names (Direction,
+        Best P&L, Worst P&L, R-Multiple) instead of the originals.
+    """
     styles = [""] * len(row)
 
     # Status column styling
@@ -509,15 +552,23 @@ def _style_position_table(row: pd.Series) -> list[str]:
         elif status_val == "Est.":
             styles[idx] = f"color: #8899AA; font-weight: bold"
 
-    if "Dir" in row.index:
-        idx = row.index.get_loc("Dir")
-        if row["Dir"] == "L":
+    # Direction column (supports both old "Dir" and renamed "Direction")
+    dir_col = "Direction" if renamed else "Dir"
+    if dir_col in row.index:
+        idx = row.index.get_loc(dir_col)
+        dir_val = str(row[dir_col])
+        if dir_val in ("L", "Long"):
             styles[idx] = f"color: {COLORS['profit']}; font-weight: bold"
-        elif row["Dir"] == "S":
+        elif dir_val in ("S", "Short"):
             styles[idx] = f"color: {COLORS['loss']}; font-weight: bold"
 
-    # Color P&L, MFE, MAE, R columns
-    for col in ("P&L", "MFE", "MAE", "R"):
+    # Color P&L and related columns (supports both old and renamed names)
+    pnl_cols = (
+        ("P&L", "Best P&L", "Worst P&L", "R-Multiple")
+        if renamed
+        else ("P&L", "MFE", "MAE", "R")
+    )
+    for col in pnl_cols:
         if col in row.index:
             idx = row.index.get_loc(col)
             val = str(row[col])
@@ -825,6 +876,12 @@ def _render_recent_trades_table(trades_df: pd.DataFrame) -> None:
             lambda v: f"${float(v):+,.2f}" if pd.notna(v) and v is not None else "--"
         )
 
+    # Map exit reasons to friendly labels
+    if "exit_reason" in display.columns:
+        display["exit_reason"] = display["exit_reason"].map(
+            lambda v: EXIT_REASON_LABELS.get(str(v).lower(), str(v)) if pd.notna(v) and v != "" else v
+        )
+
     # Rename columns for display
     col_rename = {
         "timestamp": "Time", "symbol": "Symbol", "side": "Side",
@@ -896,17 +953,20 @@ def _render_roundtrip_view(trades_df: pd.DataFrame) -> None:
         exit_ts = exit_row["timestamp"]
         hold_days = (exit_ts - entry_ts).days
 
+        dir_raw = str(entry.get("direction", "--")).lower()
+        dir_display = "Long" if dir_raw == "long" else ("Short" if dir_raw == "short" else "--")
+
         rows.append({
             "Symbol": sym,
             "Strategy": STRATEGY_NAMES.get(str(strat), str(strat)),
-            "Dir": str(entry.get("direction", "--")).upper()[:1],
+            "Direction": dir_display,
             "Entry Date": entry_ts.strftime("%m/%d %H:%M"),
             "Entry Price": f"${float(entry.get('price', 0)):,.2f}",
             "Exit Date": exit_ts.strftime("%m/%d %H:%M"),
             "Exit Price": f"${float(exit_row.get('price', 0)):,.2f}",
             "Hold Days": hold_days,
             "PnL": f"${float(exit_row.get('pnl', 0)):+,.2f}",
-            "Exit Reason": str(exit_row.get("exit_reason", "--")),
+            "Exit Reason": EXIT_REASON_LABELS.get(str(exit_row.get("exit_reason", "--")).lower(), str(exit_row.get("exit_reason", "--"))),
         })
 
     if not rows:
@@ -940,27 +1000,16 @@ def _render_roundtrip_view(trades_df: pd.DataFrame) -> None:
 
 def _render_empty_state(trades_df) -> None:
     """Render the empty positions placeholder."""
-    active_count = 0
-    if trades_df is not None and not trades_df.empty and "symbol" in trades_df.columns:
-        active_count = trades_df["symbol"].nunique()
-
-    universe_text = (
-        f"Active universe: {active_count} symbols"
-        if active_count > 0
-        else "Active universe: --"
+    st.markdown(
+        '<div class="at-empty">'
+        '<div class="at-empty-title">No open positions</div>'
+        '<div class="at-empty-desc">'
+        "The system scans S&P 500 stocks every weeknight at 10 PM ET.<br>"
+        "New positions appear here when signals are found."
+        "</div>"
+        "</div>",
+        unsafe_allow_html=True,
     )
-
-    empty_html = (
-        f'<div style="background-color:{COLORS["bg_card"]};border:1px solid {COLORS["bg_section"]};'
-        f'border-radius:8px;padding:32px 24px;text-align:center">'
-        f'<div style="color:{COLORS["text_secondary"]};font-size:1.05em;font-weight:600;'
-        f'margin-bottom:8px">No open positions</div>'
-        f'<div style="color:{COLORS["text_muted"]};font-size:0.9em;margin-bottom:4px">'
-        f'Waiting for batch scan entries...</div>'
-        f'<div style="color:{COLORS["text_muted"]};font-size:0.85em">{universe_text}</div>'
-        f'</div>'
-    )
-    st.markdown(empty_html, unsafe_allow_html=True)
 
 
 def _render_position_card(
@@ -970,6 +1019,10 @@ def _render_position_card(
     fallback_prices: dict[str, float] | None = None,
 ) -> None:
     """Render a single compact position card for the sidebar panel.
+
+    Shows a collapsed view by default (symbol, direction, P&L, strategy,
+    days held) with an expander for detailed info (entry/current/qty,
+    SL/TP, MFE/MAE, proximity bar).
 
     Delegates data extraction to _extract_position_data() and focuses
     solely on HTML rendering.
@@ -1004,104 +1057,125 @@ def _render_position_card(
     dir_short = "S" if direction.lower() == "short" else "L"
     dir_bg = COLORS["loss"] if direction.lower() == "short" else COLORS["profit"]
 
-    entry_text = _fmt_price(entry_price)
-    current_text = (
-        f'<span style="color:{COLORS["warning"]}">Price unavailable</span>'
-        if current_price is None and not is_ghost and strategy != "--"
-        else _fmt_price(current_price)
-    )
-    qty_text = f"{quantity}" if quantity is not None else "--"
-    size_text = ""
-    if quantity is not None and entry_price is not None:
-        size_text = f"${quantity * entry_price:,.0f}"
     days_text = f"{days_held}d" if days_held is not None else "--"
 
     # P&L display
     pnl_html = ""
     if unrealized_pnl is not None and unrealized_pnl_pct is not None:
-        pnl_color = COLORS["profit"] if unrealized_pnl >= 0 else COLORS["loss"]
+        pnl_clr = COLORS["profit"] if unrealized_pnl >= 0 else COLORS["loss"]
         sign = "+" if unrealized_pnl >= 0 else ""
         pnl_html = (
-            f'<span style="color:{pnl_color};font-size:0.95em;font-weight:700">'
+            f'<span style="color:{pnl_clr};font-size:0.95em;font-weight:700">'
             f'{sign}${unrealized_pnl:,.0f} ({sign}{unrealized_pnl_pct * 100:.1f}%)</span>'
         )
 
-    # MFE/MAE display (unified format)
-    mfe_mae_html = ""
-    if data.mfe_dollar or data.mae_dollar:
-        parts = []
-        if data.mfe_dollar:
-            parts.append(
-                f'<span style="color:{COLORS["profit"]}">MFE +${data.mfe_dollar:,.0f} '
-                f'(+{(data.mfe_pct or 0) * 100:.1f}%)</span>'
-            )
-        if data.mae_dollar:
-            parts.append(
-                f'<span style="color:{COLORS["loss"]}">MAE -${abs(data.mae_dollar):,.0f} '
-                f'(-{abs(data.mae_pct or 0) * 100:.1f}%)</span>'
-            )
-        if parts:
-            mfe_mae_html = f'<div style="display:flex;gap:12px;font-size:0.78em;margin-top:2px">{"".join(parts)}</div>'
-
-    if is_ghost:
-        sl_text = "N/A"
-        tp_text = "N/A"
-        level_text = "SL/TP N/A (no trade record)"
-    else:
-        sl_text = _fmt_price(sl_price)
-        tp_text = _fmt_price(tp_price)
-        level_text = " | ".join(filter(lambda x: x != "--", [f"SL {sl_text}", f"TP {tp_text}"])) or "--"
-
-    # Proximity bar
-    proximity_html = ""
-    if current_price and sl_price and tp_price:
-        dir_lower = direction.lower()
-        if dir_lower == "long":
-            sl_d = (current_price - sl_price) / current_price * 100
-            tp_d = (tp_price - current_price) / current_price * 100
-        else:
-            sl_d = (sl_price - current_price) / current_price * 100
-            tp_d = (current_price - tp_price) / current_price * 100
-
-        total_range = sl_d + tp_d
-        if total_range > 0:
-            position_pct = sl_d / total_range * 100
-            # Color: left=profit(green), right=loss(red) for long
-            # Reversed for short so green always means "toward profit"
-            if dir_lower == "long":
-                left_color = COLORS["profit"]
-                right_color = COLORS["loss"]
-            else:
-                left_color = COLORS["loss"]
-                right_color = COLORS["profit"]
-            proximity_html = (
-                f'<div style="margin-top:4px">'
-                f'<div style="display:flex;justify-content:space-between;font-size:0.72em;color:{COLORS["text_muted"]}">'
-                f'<span>SL -{sl_d:.1f}%</span><span>TP +{tp_d:.1f}%</span></div>'
-                f'<div style="background:linear-gradient(90deg, {left_color}44 0%, {left_color}22 {position_pct:.0f}%, {right_color}22 {position_pct:.0f}%, {right_color}44 100%);'
-                f'height:4px;border-radius:2px;position:relative;margin-top:2px">'
-                f'<div style="position:absolute;left:{position_pct:.0f}%;top:-2px;width:2px;height:8px;background:{COLORS["text_primary"]};border-radius:1px"></div>'
-                f'</div></div>'
-            )
-
+    # ── Collapsed view (always visible) ──────────────────────────────
     card_html = (
         f'<div style="background-color:{COLORS["bg_card"]};border-left:3px solid {strat_color};'
-        f'border-radius:6px;padding:10px 14px;margin-bottom:8px">'
+        f'border-radius:6px;padding:10px 14px;margin-bottom:2px">'
+        # Header: symbol + direction badge + P&L
         f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'
         f'<div style="display:flex;align-items:center;gap:8px">'
         f'<span style="color:{COLORS["text_primary"]};font-size:1.05em;font-weight:700">{symbol}</span>'
         f'<span style="background-color:{dir_bg}22;color:{dir_bg};font-size:0.75em;font-weight:700;'
         f'padding:2px 6px;border-radius:4px">{dir_short}</span>'
         f'</div>{pnl_html}</div>'
-        f'<div style="color:{COLORS["text_secondary"]};font-size:0.82em;margin-bottom:3px">{strategy_display}</div>'
-        f'<div style="display:flex;gap:12px;color:{COLORS["text_muted"]};font-size:0.80em">'
-        f'<span>Entry: {entry_text}</span><span>Now: {current_text}</span>'
-        f'<span>Qty: {qty_text}</span>'
-        f'{"<span>Size: " + size_text + "</span>" if size_text else ""}'
-        f'<span>Held: {days_text}</span></div>'
-        f'<div style="color:{COLORS["text_muted"]};font-size:0.78em;margin-top:2px">{level_text}</div>'
-        f'{mfe_mae_html}'
-        f'{proximity_html}'
+        # Strategy + days held
+        f'<div style="color:{COLORS["text_secondary"]};font-size:0.82em">'
+        f'{strategy_display}'
+        f'<span style="color:{COLORS["text_muted"]};margin-left:8px">{days_text} held</span>'
+        f'</div>'
         f'</div>'
     )
     st.markdown(card_html, unsafe_allow_html=True)
+
+    # ── Detailed view (inside expander) ──────────────────────────────
+    with st.expander("Details", expanded=False):
+        # Entry/Current/Qty/Size line
+        entry_text = _fmt_price(entry_price)
+        current_text = (
+            f'<span style="color:{COLORS["warning"]}">Price unavailable</span>'
+            if current_price is None and not is_ghost and strategy != "--"
+            else _fmt_price(current_price)
+        )
+        qty_text = f"{quantity}" if quantity is not None else "--"
+        size_text = ""
+        if quantity is not None and entry_price is not None:
+            size_text = f"${quantity * entry_price:,.0f}"
+
+        detail_line = (
+            f'<div style="display:flex;gap:12px;color:{COLORS["text_muted"]};font-size:0.80em">'
+            f'<span>Entry: {entry_text}</span><span>Now: {current_text}</span>'
+            f'<span>Qty: {qty_text}</span>'
+            f'{"<span>Size: " + size_text + "</span>" if size_text else ""}'
+            f'</div>'
+        )
+        st.markdown(detail_line, unsafe_allow_html=True)
+
+        # SL/TP level text
+        if is_ghost:
+            level_text = "SL/TP N/A (no trade record)"
+        else:
+            sl_text = _fmt_price(sl_price)
+            tp_text = _fmt_price(tp_price)
+            level_text = (
+                " | ".join(
+                    filter(lambda x: x != "--", [f"SL {sl_text}", f"TP {tp_text}"])
+                )
+                or "--"
+            )
+        st.markdown(
+            f'<div style="color:{COLORS["text_muted"]};font-size:0.78em;margin-top:2px">'
+            f'{level_text}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # MFE/MAE display (unified format)
+        if data.mfe_dollar or data.mae_dollar:
+            parts = []
+            if data.mfe_dollar:
+                parts.append(
+                    f'<span style="color:{COLORS["profit"]}">MFE +${data.mfe_dollar:,.0f} '
+                    f'(+{(data.mfe_pct or 0) * 100:.1f}%)</span>'
+                )
+            if data.mae_dollar:
+                parts.append(
+                    f'<span style="color:{COLORS["loss"]}">MAE -${abs(data.mae_dollar):,.0f} '
+                    f'(-{abs(data.mae_pct or 0) * 100:.1f}%)</span>'
+                )
+            if parts:
+                st.markdown(
+                    f'<div style="display:flex;gap:12px;font-size:0.78em;margin-top:2px">'
+                    f'{"".join(parts)}</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # Proximity bar
+        if current_price and sl_price and tp_price:
+            dir_lower = direction.lower()
+            if dir_lower == "long":
+                sl_d = (current_price - sl_price) / current_price * 100
+                tp_d = (tp_price - current_price) / current_price * 100
+            else:
+                sl_d = (sl_price - current_price) / current_price * 100
+                tp_d = (current_price - tp_price) / current_price * 100
+
+            total_range = sl_d + tp_d
+            if total_range > 0:
+                position_pct = sl_d / total_range * 100
+                if dir_lower == "long":
+                    left_color = COLORS["profit"]
+                    right_color = COLORS["loss"]
+                else:
+                    left_color = COLORS["loss"]
+                    right_color = COLORS["profit"]
+                proximity_html = (
+                    f'<div style="margin-top:4px">'
+                    f'<div style="display:flex;justify-content:space-between;font-size:0.72em;color:{COLORS["text_muted"]}">'
+                    f'<span>SL -{sl_d:.1f}%</span><span>TP +{tp_d:.1f}%</span></div>'
+                    f'<div style="background:linear-gradient(90deg, {left_color}44 0%, {left_color}22 {position_pct:.0f}%, {right_color}22 {position_pct:.0f}%, {right_color}44 100%);'
+                    f'height:4px;border-radius:2px;position:relative;margin-top:2px">'
+                    f'<div style="position:absolute;left:{position_pct:.0f}%;top:-2px;width:2px;height:8px;background:{COLORS["text_primary"]};border-radius:1px"></div>'
+                    f'</div></div>'
+                )
+                st.markdown(proximity_html, unsafe_allow_html=True)

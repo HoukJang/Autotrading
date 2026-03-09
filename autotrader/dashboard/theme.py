@@ -69,3 +69,34 @@ STRATEGY_NAMES = {
     "rsi_mean_reversion": "RSI Mean Reversion",
     "rotation_manager": "Rotation Manager",
 }
+
+# ---------------------------------------------------------------------------
+# Beginner-friendly regime labels
+# ---------------------------------------------------------------------------
+REGIME_BEGINNER_LABELS = {
+    "TREND_UP": "Trending Up",
+    "TREND_DOWN": "Trending Down",
+    "TREND": "Trending Up",
+    "RANGING": "Sideways",
+    "HIGH_VOLATILITY": "Volatile",
+    "HIGH_VOL": "Volatile",
+    "UNCERTAIN": "Uncertain",
+    "UNKNOWN": "Unknown",
+}
+
+# ---------------------------------------------------------------------------
+# Friendly exit reason labels
+# ---------------------------------------------------------------------------
+EXIT_REASON_LABELS = {
+    "stop_loss": "Stop Hit",
+    "sl": "Stop Hit",
+    "take_profit": "Target Hit",
+    "tp": "Target Hit",
+    "target": "Target Hit",
+    "timeout": "Time Expired",
+    "time": "Time Expired",
+    "emergency": "Emergency Exit",
+    "manual": "Manual Close",
+    "trailing_stop": "Trailing Stop",
+    "profit_lock": "Profit Locked",
+}

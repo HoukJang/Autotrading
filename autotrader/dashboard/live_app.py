@@ -23,6 +23,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from autotrader.dashboard import data_loader
+from autotrader.dashboard.styles import get_global_css
 from autotrader.dashboard.components.status_bar import render_status_bar
 from autotrader.dashboard.components.kpi_cards import render_kpi_cards
 from autotrader.dashboard.components.equity_chart import render_equity_section
@@ -30,7 +31,6 @@ from autotrader.dashboard.components.position_panel import (
     render_position_panel,
     render_positions_tab,
 )
-from autotrader.dashboard.components.trade_log import render_trade_log
 from autotrader.dashboard.components.strategy_analysis import render_strategy_analysis
 from autotrader.dashboard.components.scan_results import render_scan_results
 from autotrader.dashboard.components.risk_dashboard import render_risk_dashboard
@@ -46,6 +46,9 @@ st.set_page_config(
 # -- Sidebar controls ----------------------------------------------------------
 st.sidebar.title("AutoTrader v3")
 st.sidebar.caption("Nightly Batch Trading System")
+
+# -- Inject global CSS --------------------------------------------------------
+st.markdown(get_global_css(), unsafe_allow_html=True)
 
 auto_refresh = st.sidebar.toggle("Auto Refresh (30s)", value=True)
 refresh_btn = st.sidebar.button("Refresh Now")
@@ -135,11 +138,11 @@ render_status_bar(dashboard_data, _SETTINGS)
 # [B] Main Tabs
 # ==============================================================================
 tab_overview, tab_scan, tab_positions, tab_analysis, tab_risk = st.tabs([
-    "Overview",
-    "Nightly Scan",
-    "Positions & Trades",
-    "Strategy Analysis",
-    "Risk Dashboard",
+    "My Portfolio",
+    "Signals",
+    "Positions",
+    "Performance",
+    "Risk",
 ])
 
 # ==============================================================================
@@ -149,66 +152,7 @@ with tab_overview:
     # KPI Cards Row
     render_kpi_cards(dashboard_data)
 
-    # Market Context Widget (#11)
-    _spy_adx = getattr(dashboard_data, "spy_adx", None)
-    if _spy_adx is not None:
-        from autotrader.dashboard.theme import COLORS
-
-        st.markdown(
-            f'<div style="margin:8px 0 4px 0;color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600">'
-            f'Market Context</div>',
-            unsafe_allow_html=True,
-        )
-        ctx_col1, ctx_col2, ctx_col3 = st.columns(3)
-
-        with ctx_col1:
-            adx_color = COLORS["warning"] if 20 <= _spy_adx <= 28 else COLORS["info"]
-            st.markdown(
-                f'<div style="background:{COLORS["bg_card"]};border-radius:8px;padding:10px 14px">'
-                f'<div style="color:{COLORS["text_muted"]};font-size:0.78em">SPY ADX</div>'
-                f'<div style="color:{adx_color};font-size:1.3em;font-weight:700">{_spy_adx:.1f}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-        with ctx_col2:
-            # Active strategies based on ADX
-            if _spy_adx > 28:
-                active = "BM + MR"
-            elif _spy_adx < 20:
-                active = "MR only"
-            else:
-                active = "None (Dead Zone)"
-            active_color = COLORS["warning"] if "Dead Zone" in active else COLORS["profit"]
-            st.markdown(
-                f'<div style="background:{COLORS["bg_card"]};border-radius:8px;padding:10px 14px">'
-                f'<div style="color:{COLORS["text_muted"]};font-size:0.78em">Active Strategies</div>'
-                f'<div style="color:{active_color};font-size:1.1em;font-weight:700">{active}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-        with ctx_col3:
-            # Regime duration: count consecutive days with current regime
-            _regime_duration = 0
-            if not equity_df.empty and "regime" in equity_df.columns:
-                regimes = equity_df.sort_values("timestamp")["regime"].values
-                if len(regimes) > 0:
-                    current_r = regimes[-1]
-                    for i in range(len(regimes) - 1, -1, -1):
-                        if regimes[i] == current_r:
-                            _regime_duration += 1
-                        else:
-                            break
-            current_regime = getattr(dashboard_data, "current_regime", "UNKNOWN")
-            st.markdown(
-                f'<div style="background:{COLORS["bg_card"]};border-radius:8px;padding:10px 14px">'
-                f'<div style="color:{COLORS["text_muted"]};font-size:0.78em">Regime Duration</div>'
-                f'<div style="color:{COLORS["text_primary"]};font-size:1.1em;font-weight:700">'
-                f'{current_regime} ({_regime_duration}d)</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+    # Market context is now integrated into KPI cards (Phase 2B)
 
     st.divider()
 

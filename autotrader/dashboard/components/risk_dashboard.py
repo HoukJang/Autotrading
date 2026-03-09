@@ -27,7 +27,8 @@ def render_risk_dashboard(risk_metrics, open_positions=None) -> None:
         st.info("Risk metrics not available.")
         return
 
-    st.subheader("Risk Utilization")
+    st.subheader("Safety Overview")
+    st.caption("How much of your risk budget is being used")
 
     # -- Row 1: Three main risk bars ----------------------------------------
     col_dd, col_daily, col_pos = st.columns(3)
@@ -129,13 +130,16 @@ def _render_limit_bar(
 
     if usage_ratio >= 0.8:
         bar_color = COLORS["loss"]
-        status_icon = "CRITICAL"
+        status_icon = "Danger"
+        badge_class = "at-badge-danger"
     elif usage_ratio >= 0.5:
         bar_color = COLORS["warning"]
-        status_icon = "WARNING"
+        status_icon = "Caution"
+        badge_class = "at-badge-caution"
     else:
         bar_color = COLORS["profit"]
-        status_icon = "OK"
+        status_icon = "Safe"
+        badge_class = "at-badge-safe"
 
     # Format display values
     current_display = format_fn(current)
@@ -158,7 +162,7 @@ def _render_limit_bar(
                 margin-bottom: 8px;
             ">
                 <span style="color:{COLORS['text_secondary']};font-size:0.9em;font-weight:600">{label}</span>
-                <span style="
+                <span class="{badge_class}" style="
                     color: {bar_color};
                     font-size: 0.75em;
                     font-weight: 700;
@@ -201,7 +205,7 @@ def _render_limit_bar(
 def _render_direction_exposure(risk_metrics) -> None:
     """Render long vs short position direction breakdown."""
     st.markdown(
-        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Direction Exposure</div>',
+        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Long vs Short</div>',
         unsafe_allow_html=True,
     )
 
@@ -263,16 +267,16 @@ def _render_entry_count(risk_metrics) -> None:
 
     if usage_ratio >= 1.0:
         color = COLORS["loss"]
-        status = "LIMIT REACHED"
+        status = "Daily Limit"
     elif usage_ratio >= 0.67:
         color = COLORS["warning"]
-        status = "NEAR LIMIT"
+        status = "Almost Full"
     else:
         color = COLORS["profit"]
-        status = "OK"
+        status = "Available"
 
     st.markdown(
-        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Daily Entry Count</div>',
+        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Trades Opened Today</div>',
         unsafe_allow_html=True,
     )
 
@@ -315,13 +319,13 @@ def _render_reentry_blocks(risk_metrics) -> None:
     reentry_blocks = getattr(risk_metrics, "reentry_blocks", [])
 
     st.markdown(
-        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Re-entry Blocks (Today)</div>',
+        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Stocks on Cooldown</div>',
         unsafe_allow_html=True,
     )
 
     if not reentry_blocks:
         st.markdown(
-            f'<div style="color:{COLORS["text_muted"]};font-size:0.85em">No re-entry blocks active today.</div>',
+            f'<div style="color:{COLORS["text_muted"]};font-size:0.85em">No stocks on cooldown. All symbols are available for trading.</div>',
             unsafe_allow_html=True,
         )
         return
@@ -351,7 +355,7 @@ def _render_reentry_blocks(risk_metrics) -> None:
             padding: 12px 16px;
         ">
             <div style="color:{COLORS['warning']};font-size:0.8em;margin-bottom:8px">
-                {len(reentry_blocks)} symbol(s) blocked from re-entry today
+                {len(reentry_blocks)} stock(s) need a cooldown period before re-entry
             </div>
             <div>{badges_html}</div>
         </div>
@@ -367,7 +371,7 @@ def _render_worst_case(risk_metrics) -> None:
     positions = getattr(risk_metrics, "worst_case_positions", [])
 
     st.markdown(
-        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Worst-Case Scenario</div>',
+        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Maximum Risk</div>',
         unsafe_allow_html=True,
     )
 
@@ -417,17 +421,18 @@ def _render_entry_traffic_light(risk_metrics) -> None:
     checks = getattr(risk_metrics, "entry_checks", [])
 
     st.markdown(
-        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Entry Gate Status</div>',
+        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Can We Open New Trades?</div>',
         unsafe_allow_html=True,
     )
+    st.caption("All conditions must pass before the system opens new positions")
 
     # Big YES/NO badge
     if can_enter:
         badge_color = COLORS["profit"]
-        badge_text = "CAN ENTER"
+        badge_text = "Open for Trading"
     else:
         badge_color = COLORS["loss"]
-        badge_text = "BLOCKED"
+        badge_text = "Trading Paused"
 
     st.markdown(
         f"""
@@ -457,7 +462,7 @@ def _render_entry_traffic_light(risk_metrics) -> None:
         name = check.get("name", "")
         detail = check.get("detail", "")
         icon_color = COLORS["profit"] if ok else COLORS["loss"]
-        icon = "OK" if ok else "FAIL"
+        icon = "Pass" if ok else "Blocked"
         st.markdown(
             f'<div style="display:flex;justify-content:space-between;align-items:center;'
             f'font-size:0.82em;padding:3px 0">'
@@ -477,7 +482,7 @@ def _render_sector_concentration(open_positions=None) -> None:
     from autotrader.dashboard.utils.metrics import SP500_SECTORS
 
     st.markdown(
-        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Sector Concentration</div>',
+        f'<div style="color:{COLORS["text_secondary"]};font-size:0.9em;font-weight:600;margin-bottom:8px">Sector Spread</div>',
         unsafe_allow_html=True,
     )
 

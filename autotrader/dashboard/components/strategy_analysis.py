@@ -12,6 +12,8 @@ import streamlit as st
 
 from autotrader.dashboard.theme import (
     COLORS,
+    EXIT_REASON_LABELS,
+    REGIME_BEGINNER_LABELS,
     REGIME_COLORS,
     STRATEGY_COLORS,
     STRATEGY_NAMES,
@@ -77,6 +79,7 @@ def _compute_strategy_metrics(close_df: pd.DataFrame) -> pd.DataFrame:
 def _render_performance_table(metrics_df: pd.DataFrame) -> None:
     """Display the per-strategy metrics table."""
     st.subheader("Strategy Performance")
+    st.caption("How each strategy has performed overall")
 
     if metrics_df.empty:
         st.caption("No close trades available for performance analysis.")
@@ -92,7 +95,13 @@ def _render_performance_table(metrics_df: pd.DataFrame) -> None:
     display["Avg Bars Held"] = display["Avg Bars Held"].map(lambda v: f"{v:.1f}")
     display["Max Consec. Loss"] = display["Max Consec. Loss"].astype(int)
 
-    st.dataframe(display, use_container_width=True, hide_index=True)
+    show_advanced = st.toggle("Show advanced metrics", value=False, key="perf_advanced_toggle")
+
+    if show_advanced:
+        st.dataframe(display, use_container_width=True, hide_index=True)
+    else:
+        basic_cols = ["Strategy", "Trades", "Win Rate", "Total PnL", "Avg PnL"]
+        st.dataframe(display[basic_cols], use_container_width=True, hide_index=True)
 
 
 # ------------------------------------------------------------------
@@ -102,7 +111,8 @@ def _render_performance_table(metrics_df: pd.DataFrame) -> None:
 
 def _render_regime_performance(close_df: pd.DataFrame) -> None:
     """Display per-regime trade performance."""
-    st.subheader("Performance by Regime")
+    st.subheader("Performance by Market Condition")
+    st.caption("Strategy results broken down by market environment")
 
     if close_df.empty or "regime" not in close_df.columns:
         st.caption("No regime data available.")
@@ -113,9 +123,10 @@ def _render_regime_performance(close_df: pd.DataFrame) -> None:
         pnls = group["pnl"]
         wins = int((pnls > 0).sum())
         count = len(group)
+        regime_label = REGIME_BEGINNER_LABELS.get(str(regime), str(regime))
         rows.append(
             {
-                "Regime": str(regime),
+                "Regime": regime_label,
                 "Trades": count,
                 "Win Rate": f"{wins / count * 100:.1f}%" if count > 0 else "--",
                 "Total PnL": fmt_pnl(float(pnls.sum())),
@@ -139,6 +150,7 @@ def _render_regime_performance(close_df: pd.DataFrame) -> None:
 def _render_cumulative_pnl(close_df: pd.DataFrame) -> None:
     """Render cumulative PnL line chart (left) and total PnL bar chart (right)."""
     st.subheader("Strategy PnL Breakdown")
+    st.caption("Cumulative profit and loss for each strategy over time")
 
     if close_df.empty:
         st.caption("No close trades available.")
@@ -221,7 +233,7 @@ _REGIME_ORDER = ["TREND_UP", "TREND_DOWN", "RANGING", "HIGH_VOLATILITY", "UNCERT
 
 def _render_regime_heatmap(close_df: pd.DataFrame) -> None:
     """Render a win-rate heatmap: strategies (rows) vs regimes (columns)."""
-    st.subheader("Win Rate by Strategy and Regime")
+    st.subheader("Win Rate by Market Condition")
 
     if close_df.empty or "regime" not in close_df.columns:
         st.caption("Not enough data to build the regime-strategy heatmap.")
@@ -259,7 +271,7 @@ def _render_regime_heatmap(close_df: pd.DataFrame) -> None:
     fig = go.Figure(
         go.Heatmap(
             z=z_values,
-            x=regimes,
+            x=[REGIME_BEGINNER_LABELS.get(r, r) for r in regimes],
             y=y_labels,
             text=text_values,
             texttemplate="%{text}",
@@ -301,7 +313,7 @@ def _render_regime_heatmap(close_df: pd.DataFrame) -> None:
 
 def _render_exit_analysis(close_df: pd.DataFrame) -> None:
     """Render a stacked bar chart showing exit reason distribution per strategy."""
-    st.subheader("Exit Reason Analysis")
+    st.subheader("How Trades End")
 
     if close_df.empty or "exit_reason" not in close_df.columns:
         st.caption("No exit reason data available.")
@@ -338,13 +350,14 @@ def _render_exit_analysis(close_df: pd.DataFrame) -> None:
             counts.append(count)
 
         color = exit_colors.get(str(reason).lower(), COLORS["info"])
+        friendly_reason = EXIT_REASON_LABELS.get(str(reason).lower(), str(reason))
         fig.add_trace(
             go.Bar(
-                name=str(reason),
+                name=friendly_reason,
                 x=[STRATEGY_NAMES.get(s, s) for s in strategies],
                 y=counts,
                 marker_color=color,
-                hovertemplate=f"Exit: {reason}<br>Strategy: %{{x}}<br>Count: %{{y}}<extra></extra>",
+                hovertemplate=f"Exit: {friendly_reason}<br>Strategy: %{{x}}<br>Count: %{{y}}<extra></extra>",
             )
         )
 
@@ -367,7 +380,7 @@ def _render_exit_analysis(close_df: pd.DataFrame) -> None:
 
 def _render_pnl_by_symbol(close_df: pd.DataFrame) -> None:
     """Render a horizontal bar chart of total PnL per symbol (top 15)."""
-    st.subheader("PnL by Symbol")
+    st.subheader("PnL by Stock")
 
     if close_df.empty or "symbol" not in close_df.columns:
         st.caption("No symbol-level PnL data available.")
@@ -475,7 +488,7 @@ def _render_section_progress(section_name: str, current: int, required: int) -> 
 
 def _render_regime_timeline(equity_df: pd.DataFrame) -> None:
     """Render a horizontal regime timeline showing regime changes over time."""
-    st.subheader("Regime Timeline")
+    st.subheader("Market Condition Timeline")
 
     if equity_df.empty or "regime" not in equity_df.columns:
         st.caption("No regime data available for timeline.")
@@ -525,7 +538,7 @@ def _render_regime_timeline(equity_df: pd.DataFrame) -> None:
                 name=regime,
                 marker_color=color,
                 opacity=0.7,
-                text=[f"{regime} ({span['days']}d)"],
+                text=[f"{REGIME_BEGINNER_LABELS.get(regime, regime)} ({span['days']}d)"],
                 textposition="inside",
                 textfont={"color": COLORS["text_primary"], "size": 11},
                 hovertemplate=f"{regime}<br>{span['days']} days<br>"
@@ -558,7 +571,7 @@ def _render_regime_timeline(equity_df: pd.DataFrame) -> None:
                 f'<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px">'
                 f'<span style="display:inline-block;width:10px;height:10px;background:{color};'
                 f'border-radius:2px"></span>'
-                f'<span style="color:{COLORS["text_muted"]};font-size:0.8em">{r}</span></span>'
+                f'<span style="color:{COLORS["text_muted"]};font-size:0.8em">{REGIME_BEGINNER_LABELS.get(r, r)}</span></span>'
             )
     if legend_parts:
         st.markdown("".join(legend_parts), unsafe_allow_html=True)
@@ -615,23 +628,26 @@ def render_strategy_analysis(
 
     st.divider()
 
-    # Section 4: Regime-Strategy heatmap (needs 20+ trades)
-    if trade_count >= 20:
-        _render_regime_heatmap(close_df)
-    else:
-        _render_section_progress("Regime Heatmap", trade_count, 20)
+    # Sections 4-7: Advanced analysis grouped in expander
+    st.caption("Detailed charts and analysis for experienced users")
+    with st.expander("Advanced Analysis", expanded=False):
+        # Section 4: Regime-Strategy heatmap (needs 20+ trades)
+        if trade_count >= 20:
+            _render_regime_heatmap(close_df)
+        else:
+            _render_section_progress("Regime Heatmap", trade_count, 20)
 
-    st.divider()
+        st.divider()
 
-    # Section 5: SL/TP hit analysis
-    _render_exit_analysis(close_df)
+        # Section 5: SL/TP hit analysis
+        _render_exit_analysis(close_df)
 
-    st.divider()
+        st.divider()
 
-    # Section 6: PnL by symbol
-    _render_pnl_by_symbol(close_df)
+        # Section 6: PnL by symbol
+        _render_pnl_by_symbol(close_df)
 
-    st.divider()
+        st.divider()
 
-    # Section 7: Regime Timeline (new)
-    _render_regime_timeline(equity_df)
+        # Section 7: Regime Timeline
+        _render_regime_timeline(equity_df)

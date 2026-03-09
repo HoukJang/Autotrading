@@ -4,6 +4,8 @@ from __future__ import annotations
 import plotly.graph_objects as go
 import pandas as pd
 
+from autotrader.dashboard.theme import COLORS
+
 
 def equity_curve_chart(eq_df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
@@ -46,7 +48,7 @@ def per_strategy_pnl_bar(per_substrategy: dict[str, dict]) -> go.Figure:
         return go.Figure()
     names = list(per_substrategy.keys())
     pnls = [per_substrategy[n]["total_pnl"] for n in names]
-    colors = ["#2ecc71" if p >= 0 else "#e74c3c" for p in pnls]
+    colors = [COLORS["profit"] if p >= 0 else COLORS["loss"] for p in pnls]
     fig = go.Figure(go.Bar(
         x=names,
         y=pnls,
@@ -67,7 +69,7 @@ def per_symbol_pnl_bar(per_symbol: dict[str, dict]) -> go.Figure:
         return go.Figure()
     symbols = list(per_symbol.keys())
     pnls = [per_symbol[s].get("total_pnl", 0) for s in symbols]
-    colors = ["#2ecc71" if p >= 0 else "#e74c3c" for p in pnls]
+    colors = [COLORS["profit"] if p >= 0 else COLORS["loss"] for p in pnls]
     fig = go.Figure(go.Bar(
         x=symbols,
         y=pnls,
@@ -89,7 +91,7 @@ def pnl_distribution_histogram(trades_df: pd.DataFrame) -> go.Figure:
     fig = go.Figure(go.Histogram(
         x=trades_df["pnl"],
         nbinsx=30,
-        marker_color="#3498db",
+        marker_color=COLORS["info"],
     ))
     fig.update_layout(
         title="PnL Distribution",
@@ -122,7 +124,7 @@ def cumulative_pnl_chart(trades_df: pd.DataFrame) -> go.Figure:
         x=sorted_df["exit_time"],
         y=cum_pnl,
         mode="lines+markers",
-        line=dict(color="#8e44ad"),
+        line=dict(color="#8B5CF6"),
         name="Cumulative PnL",
     ))
     fig.update_layout(
@@ -140,7 +142,7 @@ def bars_held_histogram(trades_df: pd.DataFrame) -> go.Figure:
     fig = go.Figure(go.Histogram(
         x=trades_df["bars_held"],
         nbinsx=20,
-        marker_color="#e67e22",
+        marker_color=COLORS["warning"],
     ))
     fig.update_layout(
         title="Bars Held Distribution",

@@ -21,12 +21,13 @@ _ENTRY_GROUP_COLORS = {
     "CONFIRM": COLORS["info"],
 }
 
-# Gap filter status badge colors
-_GAP_STATUS_COLORS = {
-    "passed": COLORS["profit"],
-    "filtered": COLORS["loss"],
-    "pending": COLORS["warning"],
-    "skipped": COLORS["neutral"],
+# Unified status badge colors (lifecycle: SCANNED -> PASSED/FILTERED/SKIPPED, HELD)
+_STATUS_COLORS = {
+    "scanned": COLORS["warning"],     # yellow - gap check pending
+    "passed": COLORS["profit"],       # green - gap OK
+    "filtered": COLORS["loss"],       # red - gap too large
+    "skipped": COLORS["neutral"],     # gray - outside market hours
+    "held": COLORS["warning"],        # orange-ish - already held
 }
 
 
@@ -43,7 +44,7 @@ def render_scan_results(batch_data, dashboard_data=None) -> None:
         signals_generated, candidates_df, and all_scores fields.
     """
     if batch_data is None:
-        st.info("No batch scan data available. Run the nightly scanner to populate this tab.")
+        st.info("No scan results yet. The nightly scan runs automatically at 10 PM ET.")
         return
 
     scan_ts = getattr(batch_data, "scan_timestamp", "")
@@ -51,6 +52,12 @@ def render_scan_results(batch_data, dashboard_data=None) -> None:
     signals_generated = getattr(batch_data, "signals_generated", 0)
     candidates_df = getattr(batch_data, "candidates_df", pd.DataFrame())
     all_scores = getattr(batch_data, "all_scores", [])
+
+    # -- Error banner (shown when the scan reported errors) --------------------
+    raw = getattr(batch_data, "raw", {}) or {}
+    scan_errors = raw.get("errors", [])
+    if scan_errors:
+        _render_scan_error_banner(scan_errors, scan_ts)
 
     if not scan_ts and total_scanned == 0:
         st.info("No batch scan data found. Nightly scan has not run yet.")
@@ -65,7 +72,7 @@ def render_scan_results(batch_data, dashboard_data=None) -> None:
     # -- Candidates table ---------------------------------------------------
     st.subheader("Top Candidates")
     if candidates_df.empty:
-        st.info("No candidates selected in the last scan.")
+        st.info("No trading opportunities found in the latest scan. The system will check again tonight.")
     else:
         # Collect held symbols from dashboard state and open_positions.json
         held_symbols: set[str] = set()
@@ -93,26 +100,56 @@ def render_scan_results(batch_data, dashboard_data=None) -> None:
 def _render_empty_scan_placeholder() -> None:
     """Render a placeholder explaining the nightly batch scan flow."""
     st.markdown(
-        f"""
-        <div style="
-            background-color: {COLORS['bg_card']};
-            border: 1px solid {COLORS['bg_section']};
-            border-radius: 8px;
-            padding: 32px 24px;
-            text-align: center;
-        ">
-            <div style="color:{COLORS['text_secondary']};font-size:1.1em;font-weight:600;margin-bottom:12px">
-                Nightly Batch Scan
-            </div>
-            <div style="color:{COLORS['text_muted']};font-size:0.9em;line-height:1.6">
-                The nightly scanner runs at 22:00 ET on weekdays.<br>
-                It scans all 503 S&amp;P 500 symbols, scores each candidate,<br>
-                and selects up to 12 top candidates for next-day entry.<br><br>
+        """
+        <div class="at-empty">
+            <div class="at-empty-title">Tonight's scan hasn't run yet</div>
+            <div class="at-empty-desc">
+                The system scans all S&P 500 stocks automatically at 10 PM ET on weekdays.<br>
                 Results appear here after the scan completes.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
+    )
+
+
+# Known error codes -> beginner-friendly explanations
+_ERROR_FRIENDLY_MESSAGES: dict[str, str] = {
+    "insufficient_data": (
+        "Not enough market data was available. "
+        "The scanner needs data from at least 10 stocks."
+    ),
+}
+
+
+def _render_scan_error_banner(
+    errors: list[dict],
+    scan_ts: str,
+) -> None:
+    """Show a prominent error banner when the nightly scan had errors.
+
+    Parameters
+    ----------
+    errors:
+        List of error dicts, each with at least ``"error"`` and optionally
+        ``"symbol"`` keys.
+    scan_ts:
+        ISO-formatted scan timestamp for display.
+    """
+    ts_display = _format_scan_timestamp(scan_ts) if scan_ts else "unknown time"
+
+    # Build detail lines from each error entry
+    detail_lines: list[str] = []
+    for err in errors:
+        code = err.get("error", "unknown_error") if isinstance(err, dict) else str(err)
+        friendly = _ERROR_FRIENDLY_MESSAGES.get(code, code)
+        detail_lines.append(f"- {friendly}")
+
+    details = "\n".join(detail_lines)
+
+    st.error(
+        f"**Last scan encountered errors** (scan time: {ts_display})\n\n{details}",
+        icon=None,
     )
 
 
@@ -130,7 +167,7 @@ def _render_scan_summary(
         st.metric("Last Scan", ts_display)
 
     with col_scanned:
-        st.metric("Symbols Scanned", f"{total_scanned:,}")
+        st.metric("Stocks Checked", f"{total_scanned:,}")
 
     with col_signals:
         st.metric("Signals Generated", str(signals_generated))
@@ -143,8 +180,8 @@ def _render_scan_summary(
             moo_count = int((candidates_df["entry_group"].str.upper() == "MOO").sum())
             confirm_count = selected_count - moo_count
 
-        delta_text = f"{moo_count} MOO | {confirm_count} Confirm"
-        st.metric("Candidates Selected", str(selected_count), delta=delta_text)
+        delta_text = f"{moo_count} At Open | {confirm_count} 10 AM Check"
+        st.metric("Ready to Trade", str(selected_count), delta=delta_text)
 
 
 def _render_candidates_table(
@@ -156,10 +193,33 @@ def _render_candidates_table(
 
     # Normalize column presence
     expected_cols = [
-        "rank", "symbol", "strategy", "direction", "score",
+        "rank", "symbol", "status", "strategy", "direction", "score",
         "entry_group", "est_qty", "est_size",
-        "sl_price", "tp_price", "atr", "gap_filter_status",
+        "sl_price", "tp_price", "atr",
     ]
+
+    # Build unified Status column: HELD > FILTERED > SKIPPED > PASSED > SCANNED
+    gap_status_series = df.get("gap_filter_status", pd.Series("", index=df.index))
+    gap_pct_series = pd.to_numeric(df.get("gap_pct", pd.Series(dtype=float)), errors="coerce")
+
+    def _compute_status(row_idx):
+        sym = df["symbol"].iloc[row_idx] if "symbol" in df.columns else ""
+        if held_symbols and sym in held_symbols:
+            return "HELD"
+        gap_val = str(gap_status_series.iloc[row_idx]).lower().strip() if row_idx < len(gap_status_series) else ""
+        gap_pct_val = gap_pct_series.iloc[row_idx] if row_idx < len(gap_pct_series) else None
+        has_pct = pd.notna(gap_pct_val)
+        if gap_val == "filtered":
+            return f"FILTERED ({gap_pct_val:.1f}%)" if has_pct else "FILTERED"
+        elif gap_val == "skipped":
+            return "SKIPPED"
+        elif gap_val == "passed":
+            return f"PASSED ({gap_pct_val:.1f}%)" if has_pct else "PASSED"
+        else:
+            return "SCANNED"
+
+    df["status"] = [_compute_status(i) for i in range(len(df))]
+
     for col in expected_cols:
         if col not in df.columns:
             df[col] = "--"
@@ -221,12 +281,23 @@ def _render_candidates_table(
             lambda v: f"{v:.2f}" if pd.notna(v) else "--"
         )
 
+    # Rename Entry Group values for beginner-friendly display
+    if "entry_group" in df.columns:
+        df["entry_group"] = df["entry_group"].map(
+            lambda v: "At Open" if str(v).upper() == "MOO"
+            else ("10 AM Check" if str(v).upper() in ("CONFIRM", "CONFIRMATION") else v)
+        )
+
+    # Toggle between basic and detail views
+    show_details = st.toggle("Show all columns", value=False, key="scan_detail_toggle")
+
     # Rename for display
-    display = df[expected_cols].rename(columns={
+    all_display = df[expected_cols].rename(columns={
         "rank": "Rank",
         "symbol": "Symbol",
+        "status": "Status",
         "strategy": "Strategy",
-        "direction": "Dir",
+        "direction": "Direction",
         "score": "Score",
         "entry_group": "Entry Group",
         "est_qty": "Est.Qty",
@@ -234,40 +305,30 @@ def _render_candidates_table(
         "sl_price": "SL",
         "tp_price": "TP",
         "atr": "ATR",
-        "gap_filter_status": "Gap Filter",
     })
 
-    # Add "Status" column indicating already-held positions
-    if held_symbols and "symbol" in candidates_df.columns:
-        display.insert(
-            2,  # After Rank and Symbol
-            "Status",
-            candidates_df["symbol"].map(
-                lambda s: "HELD" if s in held_symbols else ""
-            ).values,
-        )
+    if show_details:
+        display = all_display
     else:
-        display.insert(2, "Status", "")
+        basic_cols = ["Rank", "Symbol", "Strategy", "Direction", "Score", "Entry Group", "Status"]
+        display = all_display[basic_cols]
+
+    # Determine the direction column name in the current view
+    dir_col = "Direction"
 
     def _style_candidates(row: pd.Series) -> list[str]:
         styles = [""] * len(row)
         if "Entry Group" in row.index:
             idx = row.index.get_loc("Entry Group")
             group = str(row["Entry Group"]).upper()
-            if group == "MOO":
+            if group == "AT OPEN":
                 styles[idx] = f"background-color: {COLORS['profit']}22; color: {COLORS['profit']}; font-weight: bold"
-            elif group in ("CONFIRM", "CONFIRMATION"):
+            elif group in ("10 AM CHECK",):
                 styles[idx] = f"background-color: {COLORS['info']}22; color: {COLORS['info']}; font-weight: bold"
 
-        if "Gap Filter" in row.index:
-            idx = row.index.get_loc("Gap Filter")
-            status = str(row["Gap Filter"]).lower()
-            color = _GAP_STATUS_COLORS.get(status, COLORS["neutral"])
-            styles[idx] = f"color: {color}; font-weight: bold"
-
-        if "Dir" in row.index:
-            idx = row.index.get_loc("Dir")
-            direction = str(row["Dir"]).lower()
+        if dir_col in row.index:
+            idx = row.index.get_loc(dir_col)
+            direction = str(row[dir_col]).lower()
             if direction in ("long", "buy"):
                 styles[idx] = f"color: {COLORS['profit']}"
             elif direction in ("short", "sell"):
@@ -275,12 +336,16 @@ def _render_candidates_table(
 
         if "Status" in row.index:
             idx = row.index.get_loc("Status")
-            if str(row["Status"]).upper() == "HELD":
-                styles[idx] = (
-                    f"background-color: {COLORS['warning']}22; "
-                    f"color: {COLORS['warning']}; "
-                    f"font-weight: bold"
-                )
+            status_val = str(row["Status"]).upper()
+            # Match by prefix keyword since PASSED/FILTERED may have gap% appended
+            for keyword, color in _STATUS_COLORS.items():
+                if status_val.startswith(keyword.upper()):
+                    styles[idx] = (
+                        f"background-color: {color}22; "
+                        f"color: {color}; "
+                        f"font-weight: bold"
+                    )
+                    break
 
         return styles
 
@@ -290,15 +355,16 @@ def _render_candidates_table(
         hide_index=True,
     )
 
-    # Legend: gap filter status (in lifecycle order)
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-    gap_legend = [
-        (col1, COLORS["warning"], "Pending = Gap check in progress"),
-        (col2, COLORS["profit"], "Passed = Gap check OK"),
-        (col3, COLORS["loss"], "Filtered = Gap too large"),
-        (col4, COLORS["neutral"], "Skipped = Outside market hours"),
+    # Legend: candidate status (in lifecycle order)
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1])
+    status_legend = [
+        (col1, _STATUS_COLORS["scanned"], "SCANNED = Gap check pending"),
+        (col2, _STATUS_COLORS["passed"], "PASSED = Gap OK"),
+        (col3, _STATUS_COLORS["filtered"], "FILTERED = Gap too large"),
+        (col4, _STATUS_COLORS["skipped"], "SKIPPED = Outside market hours"),
+        (col5, _STATUS_COLORS["held"], "HELD = Already held"),
     ]
-    for col, color, text in gap_legend:
+    for col, color, text in status_legend:
         with col:
             st.markdown(
                 f'<span style="color:{color};font-size:0.85em">{text}</span>',
