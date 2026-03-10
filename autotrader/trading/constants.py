@@ -31,7 +31,7 @@ from __future__ import annotations
 MAX_LONG_POSITIONS: int = 8             # Iter 29: increased from 6
 MAX_SHORT_POSITIONS: int = 3
 MAX_TOTAL_POSITIONS: int = 9            # overall position cap
-MAX_PORTFOLIO_HEAT_PCT: float = 0.35    # max 35% of equity exposed (Iter 29)
+MAX_PORTFOLIO_HEAT_PCT: float = 0.90    # max 90% of equity exposed (Panel #37)
 
 # ---------------------------------------------------------------------------
 # 2. Per-strategy position caps

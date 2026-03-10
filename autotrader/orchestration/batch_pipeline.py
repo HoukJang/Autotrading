@@ -423,6 +423,62 @@ class BatchPipelineOrchestrator:
         except OSError:
             logger.warning("[PIPELINE] Could not write gap status to batch_results.json")
 
+    def _update_entry_status(
+        self,
+        entered_symbols: set[str],
+        rejections: list[dict],
+    ) -> None:
+        """Update entry_status and entry_block_reason in batch_results.json.
+
+        Called after ``execute_moo()`` to record which candidates were
+        successfully entered and which were blocked (with the reason).
+
+        Args:
+            entered_symbols: Set of symbols that received fills.
+            rejections: List of dicts with ``symbol``, ``strategy``, ``reason``
+                for candidates that were blocked at MOO.
+        """
+        results_path = os.path.join("data", "batch_results.json")
+        if not os.path.exists(results_path):
+            logger.warning("[PIPELINE] batch_results.json not found; cannot update entry status")
+            return
+
+        try:
+            with open(results_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("[PIPELINE] Could not read batch_results.json for entry status update")
+            return
+
+        # Build rejection lookup: symbol -> reason
+        rejection_map: dict[str, str] = {}
+        for rej in rejections:
+            rejection_map[rej["symbol"]] = rej.get("reason", "unknown")
+
+        candidates_list = data.get("candidates", [])
+        for cand_dict in candidates_list:
+            sym = cand_dict.get("symbol", "")
+            if sym in entered_symbols:
+                cand_dict["entry_status"] = "entered"
+            elif sym in rejection_map:
+                cand_dict["entry_status"] = "blocked"
+                cand_dict["entry_block_reason"] = rejection_map[sym]
+
+        try:
+            tmp_path = results_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, results_path)
+            logger.info(
+                "[PIPELINE] Entry status written: entered=%s, blocked=%s",
+                entered_symbols,
+                list(rejection_map.keys()),
+            )
+        except OSError:
+            logger.warning("[PIPELINE] Could not write entry status to batch_results.json")
+
     def mark_candidates_skipped(self, reason: str = "outside_market_hours") -> None:
         """Mark all candidates in batch_results.json as skipped.
 
@@ -494,6 +550,12 @@ class BatchPipelineOrchestrator:
         except Exception:
             logger.exception("MOO execution failed")
             return
+
+        # Persist entry status (entered/blocked) into batch_results.json
+        self._update_entry_status(
+            entered_symbols={h.symbol for h in new_positions},
+            rejections=entry_manager.last_rejections,
+        )
 
         # Phase 2: Record each position independently -- one failure must
         # not block recording of the remaining positions

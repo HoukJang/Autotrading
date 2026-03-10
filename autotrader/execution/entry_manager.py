@@ -139,6 +139,12 @@ class EntryManager:
         # HeldPosition objects created this session (handed to PositionMonitor)
         self._new_positions: list[HeldPosition] = []
 
+        # Rejections from the last execute_moo() call
+        self._last_rejections: list[dict] = []
+
+        # Last block reason from _can_enter (set on each False return)
+        self._last_block_reason: str = ""
+
     # ------------------------------------------------------------------
     # Setup and lifecycle
     # ------------------------------------------------------------------
@@ -175,6 +181,14 @@ class EntryManager:
             self._new_positions.clear()
             logger.info("EntryManager reset for new trading day %s", today_et)
 
+    @property
+    def last_rejections(self) -> list[dict]:
+        """Candidates rejected during the most recent ``execute_moo()`` call.
+
+        Each dict has keys: ``symbol``, ``strategy``, ``reason``.
+        """
+        return list(self._last_rejections)
+
     # ------------------------------------------------------------------
     # Group A: Market-on-Open
     # ------------------------------------------------------------------
@@ -201,9 +215,15 @@ class EntryManager:
             List of HeldPosition objects for successfully opened positions.
         """
         entered: list[HeldPosition] = []
+        self._last_rejections = []
 
         for candidate in list(self._group_a):
             if not self._can_enter(candidate.signal, account, positions, regime, current_date_et):
+                self._last_rejections.append({
+                    "symbol": candidate.signal.symbol,
+                    "strategy": candidate.signal.strategy,
+                    "reason": self._last_block_reason,
+                })
                 continue
 
             result = await self._submit_entry(candidate, account, positions, regime)
@@ -407,11 +427,13 @@ class EntryManager:
         if self._gdr_manager is not None:
             if not self._gdr_manager.can_enter_strategy(strategy_name):
                 logger.info("GDR blocked entry for %s (%s)", symbol, strategy_name)
+                self._last_block_reason = "GDR entry limit"
                 return False
 
         # Re-entry block (checked via ExitRuleEngine, before unified checker)
         if self._exit_rule_engine.is_reentry_blocked(symbol):
             logger.debug("Skipping %s: re-entry blocked today", symbol)
+            self._last_block_reason = "re-entry blocked"
             return False
 
         # --- Common constraint checks via unified checker ---
@@ -457,6 +479,7 @@ class EntryManager:
                 "Entry blocked for %s %s (%s): %s",
                 direction, symbol, strategy_name, result.reason,
             )
+            self._last_block_reason = result.reason
             return False
 
         # --- Post-checks: live-specific ---
@@ -466,16 +489,19 @@ class EntryManager:
         alloc = RegimeDetector.get_allocation(regime)
         if strategy_name == "breakout_momentum" and alloc.breakout_blocked:
             logger.info("Regime %s: breakout entry blocked", regime.value)
+            self._last_block_reason = f"regime {regime.value}: breakout blocked"
             return False
         if (strategy_name == "rsi_mean_reversion"
                 and direction == "short"
                 and alloc.mr_short_blocked):
             logger.info("Regime %s: MR short entry blocked", regime.value)
+            self._last_block_reason = f"regime {regime.value}: MR short blocked"
             return False
 
         # RiskManager validation (max positions, daily loss, drawdown)
         if not self._risk_manager.validate(signal, account, positions):
             logger.info("Risk rejected entry: %s %s", direction, symbol)
+            self._last_block_reason = "risk manager rejected"
             return False
 
         # AllocationEngine: strategy weight check
@@ -488,6 +514,7 @@ class EntryManager:
                 "AllocationEngine blocked entry: strategy=%s, regime=%s",
                 signal.strategy, regime.value,
             )
+            self._last_block_reason = "allocation engine blocked"
             return False
 
         return True

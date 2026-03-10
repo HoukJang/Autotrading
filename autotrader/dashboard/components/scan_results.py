@@ -11,7 +11,11 @@ import pandas as pd
 
 from autotrader.dashboard.theme import COLORS, STRATEGY_NAMES
 from autotrader.dashboard.utils.chart_helpers import get_chart_layout
-from autotrader.trading.constants import RISK_PER_TRADE_PCT, SL_ATR_MULT
+from autotrader.trading.constants import (
+    MAX_PORTFOLIO_HEAT_PCT,
+    RISK_PER_TRADE_PCT,
+    SL_ATR_MULT,
+)
 
 
 # Entry group color mapping
@@ -28,6 +32,22 @@ _STATUS_COLORS = {
     "filtered": COLORS["loss"],       # red - gap too large
     "skipped": COLORS["neutral"],     # gray - outside market hours
     "held": COLORS["warning"],        # orange-ish - already held
+    "entered": COLORS["profit"],      # green - MOO entry executed
+    "blocked": COLORS["loss"],        # red - entry blocked by constraint
+}
+
+# Friendly labels for entry_block_reason values from the entry checker
+_BLOCK_REASON_LABELS: dict[str, str] = {
+    "portfolio heat limit": "Exposure limit reached",
+    "strategy position cap": "Strategy full",
+    "max long positions": "Long limit reached",
+    "max short positions": "Short limit reached",
+    "total position cap": "Position limit reached",
+    "daily entry limit": "Daily entries maxed",
+    "re-entry block": "Re-entry blocked today",
+    "duplicate symbol": "Already held",
+    "gdr strategy entry limit": "GDR limit",
+    "safety net entry limit": "Safety net active",
 }
 
 
@@ -68,6 +88,9 @@ def render_scan_results(batch_data, dashboard_data=None) -> None:
     _render_scan_summary(scan_ts, total_scanned, signals_generated, candidates_df)
 
     st.divider()
+
+    # -- Portfolio exposure gauge -------------------------------------------
+    _render_exposure_gauge(dashboard_data)
 
     # -- Candidates table ---------------------------------------------------
     st.subheader("Top Candidates")
@@ -184,6 +207,68 @@ def _render_scan_summary(
         st.metric("Ready to Trade", str(selected_count), delta=delta_text)
 
 
+def _render_exposure_gauge(dashboard_data) -> None:
+    """Render a horizontal progress bar showing current portfolio exposure.
+
+    Computes exposure as sum(abs(market_value)) / equity from open
+    positions data, displayed against the MAX_PORTFOLIO_HEAT_PCT limit.
+    Color coding: green (0-50%), yellow (50-75%), red (75-100% of limit).
+    """
+    if dashboard_data is None:
+        return
+
+    equity = getattr(dashboard_data, "current_equity", 0.0)
+    if equity <= 0:
+        return
+
+    # Compute exposure from open positions
+    from autotrader.dashboard.data_loader import load_open_positions
+    open_positions = load_open_positions()
+
+    total_market_value = 0.0
+    for pos in open_positions.values():
+        qty = abs(pos.get("qty", 0))
+        price = pos.get("current_price") or pos.get("entry_price", 0)
+        total_market_value += qty * price
+
+    exposure_pct = total_market_value / equity if equity > 0 else 0.0
+    limit_pct = MAX_PORTFOLIO_HEAT_PCT
+
+    # Fraction of the limit consumed (0.0 to 1.0+)
+    usage_fraction = exposure_pct / limit_pct if limit_pct > 0 else 0.0
+    bar_width = min(usage_fraction * 100, 100)
+
+    # Color by usage fraction: green < 50%, yellow 50-75%, red >= 75%
+    if usage_fraction < 0.50:
+        bar_color = COLORS["profit"]
+    elif usage_fraction < 0.75:
+        bar_color = COLORS["warning"]
+    else:
+        bar_color = COLORS["loss"]
+
+    display_pct = exposure_pct * 100
+    limit_display = limit_pct * 100
+
+    st.markdown(
+        f'<div style="background:{COLORS["bg_card"]};border-radius:8px;'
+        f'padding:14px 18px;margin-bottom:8px">'
+        f'<div style="display:flex;justify-content:space-between;align-items:center;'
+        f'margin-bottom:6px">'
+        f'<span style="color:{COLORS["text_primary"]};font-weight:600;font-size:0.95em">'
+        f'Portfolio Exposure: {display_pct:.1f}% / {limit_display:.0f}%</span>'
+        f'<span style="color:{COLORS["text_muted"]};font-size:0.8em">'
+        f'How much of your capital is invested</span>'
+        f'</div>'
+        f'<div style="background:{COLORS["bg_section"]};border-radius:4px;'
+        f'height:12px;overflow:hidden">'
+        f'<div style="background:{bar_color};width:{bar_width:.1f}%;'
+        f'height:100%;border-radius:4px;transition:width 0.3s ease"></div>'
+        f'</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_candidates_table(
     candidates_df: pd.DataFrame,
     held_symbols: set[str] | None = None,
@@ -198,14 +283,27 @@ def _render_candidates_table(
         "sl_price", "tp_price", "atr",
     ]
 
-    # Build unified Status column: HELD > FILTERED > SKIPPED > PASSED > SCANNED
+    # Build unified Status column:
+    # Priority: HELD > ENTERED/BLOCKED > FILTERED > SKIPPED > PASSED > SCANNED
     gap_status_series = df.get("gap_filter_status", pd.Series("", index=df.index))
     gap_pct_series = pd.to_numeric(df.get("gap_pct", pd.Series(dtype=float)), errors="coerce")
+    entry_status_series = df.get("entry_status", pd.Series("", index=df.index))
+    block_reason_series = df.get("entry_block_reason", pd.Series("", index=df.index))
 
     def _compute_status(row_idx):
         sym = df["symbol"].iloc[row_idx] if "symbol" in df.columns else ""
         if held_symbols and sym in held_symbols:
             return "HELD"
+
+        # Post-MOO entry status (takes priority over gap filter)
+        entry_val = str(entry_status_series.iloc[row_idx]).lower().strip() if row_idx < len(entry_status_series) else ""
+        if entry_val == "entered":
+            return "ENTERED"
+        if entry_val == "blocked":
+            raw_reason = str(block_reason_series.iloc[row_idx]).strip() if row_idx < len(block_reason_series) else ""
+            friendly = _BLOCK_REASON_LABELS.get(raw_reason, raw_reason) if raw_reason else ""
+            return f"BLOCKED ({friendly})" if friendly else "BLOCKED"
+
         gap_val = str(gap_status_series.iloc[row_idx]).lower().strip() if row_idx < len(gap_status_series) else ""
         gap_pct_val = gap_pct_series.iloc[row_idx] if row_idx < len(gap_pct_series) else None
         has_pct = pd.notna(gap_pct_val)
@@ -356,13 +454,15 @@ def _render_candidates_table(
     )
 
     # Legend: candidate status (in lifecycle order)
-    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1])
+    legend_cols = st.columns(7)
     status_legend = [
-        (col1, _STATUS_COLORS["scanned"], "SCANNED = Gap check pending"),
-        (col2, _STATUS_COLORS["passed"], "PASSED = Gap OK"),
-        (col3, _STATUS_COLORS["filtered"], "FILTERED = Gap too large"),
-        (col4, _STATUS_COLORS["skipped"], "SKIPPED = Outside market hours"),
-        (col5, _STATUS_COLORS["held"], "HELD = Already held"),
+        (legend_cols[0], _STATUS_COLORS["scanned"], "SCANNED = Gap check pending"),
+        (legend_cols[1], _STATUS_COLORS["passed"], "PASSED = Gap OK"),
+        (legend_cols[2], _STATUS_COLORS["filtered"], "FILTERED = Gap too large"),
+        (legend_cols[3], _STATUS_COLORS["skipped"], "SKIPPED = Outside market hours"),
+        (legend_cols[4], _STATUS_COLORS["held"], "HELD = Already held"),
+        (legend_cols[5], _STATUS_COLORS["entered"], "ENTERED = Trade placed"),
+        (legend_cols[6], _STATUS_COLORS["blocked"], "BLOCKED = Entry denied"),
     ]
     for col, color, text in status_legend:
         with col:
@@ -514,7 +614,9 @@ def _render_risk_preview(candidates_df: pd.DataFrame, dashboard_data) -> None:
             f'</div>', unsafe_allow_html=True,
         )
     with c3:
-        heat_color = COLORS["loss"] if heat_pct > 35 else (COLORS["warning"] if heat_pct > 25 else COLORS["profit"])
+        _limit = MAX_PORTFOLIO_HEAT_PCT * 100
+        _ratio = heat_pct / _limit if _limit > 0 else 0
+        heat_color = COLORS["loss"] if _ratio > 0.75 else (COLORS["warning"] if _ratio > 0.50 else COLORS["profit"])
         st.markdown(
             f'<div style="background:{COLORS["bg_card"]};border-radius:8px;padding:12px;text-align:center">'
             f'<div style="color:{COLORS["text_muted"]};font-size:0.8em">Projected Heat</div>'
