@@ -48,6 +48,7 @@
   4. **New edge cases**: 수정이 새로운 실패 모드를 만드는지
   5. **Cross-system consistency**: 여러 tracking 시스템(held_positions, strategy_map, position_monitor, open_position_tracker) 간 일관성
   6. **N+1 API calls**: 루프 내 불필요한 반복 API 호출이 없는지
+  7. **SSOT consistency**: `python -m pytest tests/unit/test_ssot_consistency.py -v` 실행하여 상수 중복/하드코딩 위반이 없는지 확인. 새 상수 추가 또는 기존 상수 변경 시 반드시 실행
 - P0/P1 수정 후에는 반드시 impact review를 수행한 뒤 커밋한다
 - Review 결과 발견된 이슈는 같은 커밋 또는 직후 커밋에서 함께 수정한다
 
