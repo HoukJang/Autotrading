@@ -19,6 +19,7 @@ from autotrader.dashboard.utils.formatters import (
     fmt_pnl_pct,
     pnl_color,
 )
+from autotrader.trading.constants import MAX_LONG_POSITIONS
 
 
 def render_kpi_cards(data) -> None:
@@ -79,7 +80,7 @@ def render_kpi_cards(data) -> None:
     with r1c3:
         positions = getattr(data, "current_positions", [])
         pos_count = len(positions) if positions else 0
-        max_pos = 8
+        max_pos = MAX_LONG_POSITIONS
         deployed_pct = getattr(data, "capital_deployed_pct", 0.0)
 
         st.markdown(

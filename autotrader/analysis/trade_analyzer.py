@@ -11,18 +11,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-# Default SL/TP ATR multipliers (mirrors exit_rules.py)
-_DEFAULT_SL_ATR: dict[str, dict[str, float]] = {
-    "rsi_mean_reversion": {"long": 1.0, "short": 1.5},
-    "consecutive_down": {"long": 1.0},
-    "ema_cross_trend": {"long": 3.0, "short": 3.0},
-}
-
-_DEFAULT_TP_ATR: dict[str, float | None] = {
-    "rsi_mean_reversion": None,
-    "consecutive_down": None,
-    "ema_cross_trend": 5.0,
-}
+from autotrader.trading.constants import SL_ATR_MULT, TP_ATR_MULT
 
 
 # ---------------------------------------------------------------------------
@@ -211,8 +200,8 @@ class TradeAnalyzer:
         tp_config: dict[str, float | None] | None = None,
     ) -> None:
         self._trades = trades
-        self._sl = sl_config or _DEFAULT_SL_ATR
-        self._tp = tp_config or _DEFAULT_TP_ATR
+        self._sl = sl_config or SL_ATR_MULT
+        self._tp = tp_config or TP_ATR_MULT
 
     def analyze(self, strategy_filter: str | None = None) -> AnalysisResult:
         """Run full MFE/MAE analysis pipeline."""

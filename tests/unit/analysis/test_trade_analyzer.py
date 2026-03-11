@@ -237,11 +237,11 @@ class TestTradeAnalyzer:
         assert len(result.sltp_efficiency) > 0
         eff = result.sltp_efficiency[0]
         assert eff.strategy == "rsi_mean_reversion"
-        assert eff.sl_atr_mult == 1.0
+        assert eff.sl_atr_mult == 1.5
         # MAE in ATR = (0.01 * 100) / 2.0 = 0.5
         assert abs(eff.mae_median_atr - 0.5) < 0.01
-        # SL utilization = 0.5 / 1.0 = 50%
-        assert abs(eff.sl_utilization - 0.5) < 0.01
+        # SL utilization = 0.5 / 1.5 = 0.333...
+        assert abs(eff.sl_utilization - 0.5 / 1.5) < 0.01
 
     def test_sltp_efficiency_skips_unknown_strategy(self):
         trades = [
@@ -315,7 +315,7 @@ class TestTradeAnalyzer:
             _make_trade(direction="short", mfe_pct=0.03, mae_pct=0.02),
         ]
         result = TradeAnalyzer(trades).analyze()
-        # rsi_mean_reversion has both long (SL=1.0) and short (SL=1.5)
+        # rsi_mean_reversion has both long (SL=1.5) and short (SL=0.75)
         assert len(result.sltp_efficiency) == 2
         dirs = {e.direction for e in result.sltp_efficiency}
         assert dirs == {"long", "short"}

@@ -12,10 +12,12 @@ import pandas as pd
 from autotrader.dashboard.theme import COLORS, STRATEGY_NAMES
 from autotrader.dashboard.utils.chart_helpers import get_chart_layout
 from autotrader.trading.constants import (
+    DEFAULT_BASE_RISK,
     MAX_PORTFOLIO_HEAT_PCT,
-    RISK_PER_TRADE_PCT,
     SL_ATR_MULT,
+    STRATEGY_BASE_RISK,
 )
+from autotrader.trading.position_sizer import PositionSizer
 
 
 # Entry group color mapping
@@ -104,7 +106,8 @@ def render_scan_results(batch_data, dashboard_data=None) -> None:
         from autotrader.dashboard.data_loader import load_open_positions
         held_symbols.update(load_open_positions().keys())
 
-        _render_candidates_table(candidates_df, held_symbols=held_symbols)
+        equity = (getattr(dashboard_data, "current_equity", None) or 100_000) if dashboard_data else 100_000
+        _render_candidates_table(candidates_df, held_symbols=held_symbols, equity=equity)
 
     st.divider()
 
@@ -272,6 +275,7 @@ def _render_exposure_gauge(dashboard_data) -> None:
 def _render_candidates_table(
     candidates_df: pd.DataFrame,
     held_symbols: set[str] | None = None,
+    equity: float = 100_000,
 ) -> None:
     """Render the sortable, color-coded candidates table."""
     df = candidates_df.copy()
@@ -322,10 +326,10 @@ def _render_candidates_table(
         if col not in df.columns:
             df[col] = "--"
 
-    # Compute estimated position size from risk model:
-    # qty = floor(equity * risk_pct / (sl_mult * atr))
-    # size = qty * prev_close
-    _ESTIMATE_EQUITY = 100_000  # default equity assumption for display
+    # Compute estimated position size using the real PositionSizer algorithm.
+    # This matches live sizing: per-strategy risk, MAX_POSITION_PCT cap,
+    # SHORT_SIZE_RATIO reduction, and MIN_POSITION_VALUE floor.
+    sizer = PositionSizer()
     _raw_atr = pd.to_numeric(candidates_df.get("atr", pd.Series(dtype=float)), errors="coerce")
     _raw_prev = pd.to_numeric(candidates_df.get("prev_close", pd.Series(dtype=float)), errors="coerce")
     _raw_strat = candidates_df.get("strategy", pd.Series(dtype=str))
@@ -339,15 +343,13 @@ def _render_candidates_table(
         strat = str(_raw_strat.iloc[i]) if i < len(_raw_strat) else ""
         dirn = str(_raw_dir.iloc[i]).lower() if i < len(_raw_dir) else "long"
 
-        if pd.notna(atr_val) and atr_val > 0:
+        if pd.notna(atr_val) and atr_val > 0 and pd.notna(prev_val) and prev_val > 0:
             sl_mult = SL_ATR_MULT.get(strat, {}).get(dirn, 2.0)
-            risk_per_share = sl_mult * atr_val
-            qty = int(_ESTIMATE_EQUITY * RISK_PER_TRADE_PCT / risk_per_share)
-            est_qty_list.append(str(qty))
-            if pd.notna(prev_val) and prev_val > 0:
-                est_size_list.append(f"${qty * prev_val:,.0f}")
-            else:
-                est_size_list.append("--")
+            stop_distance = sl_mult * atr_val
+            risk_pct = STRATEGY_BASE_RISK.get(strat, DEFAULT_BASE_RISK)
+            qty = sizer.calculate(equity, prev_val, stop_distance, dirn, risk_pct)
+            est_qty_list.append(str(qty) if qty > 0 else "--")
+            est_size_list.append(f"${qty * prev_val:,.0f}" if qty > 0 else "--")
         else:
             est_qty_list.append("--")
             est_size_list.append("--")
@@ -572,17 +574,20 @@ def _render_risk_preview(candidates_df: pd.DataFrame, dashboard_data) -> None:
         new_longs = int((new_candidates_df["direction"].str.lower() == "long").sum())
         new_shorts = new_count - new_longs
 
-    # Estimate risk from candidates
+    # Estimate risk from candidates using the real PositionSizer
     if "atr" in new_candidates_df.columns and "strategy" in new_candidates_df.columns:
+        sizer = PositionSizer()
         for _, row in new_candidates_df.iterrows():
             atr_val = pd.to_numeric(row.get("atr", 0), errors="coerce") or 0
+            prev_val = pd.to_numeric(row.get("prev_close", 0), errors="coerce") or 0
             strat = str(row.get("strategy", ""))
             dirn = str(row.get("direction", "long")).lower()
-            if atr_val > 0 and current_equity > 0:
+            if atr_val > 0 and current_equity > 0 and prev_val > 0:
                 sl_mult = SL_ATR_MULT.get(strat, {}).get(dirn, 2.0)
-                risk_per_share = sl_mult * atr_val
-                qty = int(current_equity * RISK_PER_TRADE_PCT / risk_per_share) if risk_per_share > 0 else 0
-                projected_risk += risk_per_share * qty
+                stop_distance = sl_mult * atr_val
+                risk_pct = STRATEGY_BASE_RISK.get(strat, DEFAULT_BASE_RISK)
+                qty = sizer.calculate(current_equity, prev_val, stop_distance, dirn, risk_pct)
+                projected_risk += stop_distance * qty
 
     heat_pct = (projected_risk / current_equity * 100) if current_equity > 0 else 0.0
 

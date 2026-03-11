@@ -18,7 +18,7 @@ from autotrader.dashboard.data_loader import load_open_positions
 from autotrader.dashboard.theme import COLORS, EXIT_REASON_LABELS, STRATEGY_COLORS, STRATEGY_NAMES
 from autotrader.dashboard.utils.chart_helpers import get_chart_layout
 from autotrader.dashboard.utils.formatters import style_pnl
-from autotrader.trading.constants import SL_ATR_MULT, TP_ATR_MULT
+from autotrader.trading.constants import MAX_LONG_POSITIONS, SL_ATR_MULT, TP_ATR_MULT
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +336,7 @@ def render_position_panel(data) -> None:
     trades_df = getattr(data, "trades_df", None)
     pos_count = len(positions) if positions else 0
 
-    st.subheader(f"Open Positions ({pos_count} / 8)")
+    st.subheader(f"Open Positions ({pos_count} / {MAX_LONG_POSITIONS})")
 
     if not positions:
         _render_empty_state(trades_df)
@@ -356,7 +356,7 @@ def render_positions_tab(data) -> None:
     trades_df = getattr(data, "trades_df", None)
 
     # -- Open Positions Table -----------------------------------------------
-    st.subheader(f"Open Positions ({len(positions)} / 8)")
+    st.subheader(f"Open Positions ({len(positions)} / {MAX_LONG_POSITIONS})")
 
     if not positions:
         st.info("No open positions right now. Positions appear when the nightly scan finds opportunities.")

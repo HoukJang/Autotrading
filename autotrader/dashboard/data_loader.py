@@ -17,6 +17,7 @@ import pandas as pd
 import streamlit as st
 
 from autotrader.dashboard.utils.metrics import max_consecutive_losses
+from autotrader.trading.constants import MAX_DAILY_ENTRIES, MAX_LONG_POSITIONS
 
 logger = logging.getLogger(__name__)
 
@@ -87,11 +88,11 @@ class RiskMetrics:
     today_loss_pct: float = 0.0
     daily_loss_limit_pct: float = 0.02
     open_positions_count: int = 0
-    max_positions: int = 8
+    max_positions: int = MAX_LONG_POSITIONS
     long_count: int = 0
     short_count: int = 0
     entries_today: int = 0
-    max_entries_today: int = 3
+    max_entries_today: int = MAX_DAILY_ENTRIES
     reentry_blocks: list[str] = field(default_factory=list)
     worst_case_loss: float = 0.0
     worst_case_pct: float = 0.0
@@ -374,8 +375,8 @@ def compute_risk_metrics(
     data: DashboardData,
     max_drawdown_limit_pct: float = 0.15,
     daily_loss_limit_pct: float = 0.02,
-    max_positions: int = 8,
-    max_entries_today: int = 3,
+    max_positions: int = MAX_LONG_POSITIONS,
+    max_entries_today: int = MAX_DAILY_ENTRIES,
     open_positions: dict | None = None,
 ) -> RiskMetrics:
     """Calculate current risk utilization metrics.
@@ -392,9 +393,9 @@ def compute_risk_metrics(
     daily_loss_limit_pct:
         Maximum allowed daily loss as a fraction (default 0.02 = 2%).
     max_positions:
-        Maximum number of simultaneous open positions (default 8).
+        Maximum number of simultaneous open positions (default MAX_LONG_POSITIONS).
     max_entries_today:
-        Maximum new entries per day (default 3).
+        Maximum new entries per day (default MAX_DAILY_ENTRIES).
     """
     # -- Drawdown usage ----------------------------------------------------
     current_drawdown_pct = data.max_drawdown
@@ -814,6 +815,39 @@ def _compute_portfolio_heat(positions: dict[str, dict], equity: float) -> float:
     return worst_loss / equity if equity > 0 else 0.0
 
 
+def _is_regime_entry_blocked(regime: str) -> bool:
+    """Check if the regime blocks ALL strategy entries via ALLOCATION_TABLE.
+
+    A regime is only considered blocked when every strategy in the allocation
+    table has zero risk AND is explicitly blocked.  If any strategy can still
+    trade, the regime gate passes.
+
+    Returns True when entries are blocked, False when at least one strategy
+    can enter.
+    """
+    from autotrader.trading.regime import ALLOCATION_TABLE, MarketRegime
+
+    # Try to resolve the string to a MarketRegime enum
+    try:
+        regime_enum = MarketRegime(regime)
+    except ValueError:
+        # Unknown regime string -- conservative: allow entries
+        return False
+
+    alloc = ALLOCATION_TABLE.get(regime_enum)
+    if alloc is None:
+        return False
+
+    # Check if at least one strategy can trade:
+    # BM can trade if not explicitly blocked (breakout_blocked flag)
+    bm_can_trade = not alloc.breakout_blocked
+    # MR longs can always trade if risk > 0; mr_short_blocked only blocks shorts
+    mr_can_trade = alloc.rsi_mean_reversion > 0
+
+    # Entries are blocked only when NO strategy can trade at all
+    return not (bm_can_trade or mr_can_trade)
+
+
 def _compute_entry_checks(
     dd_pct: float,
     dd_limit: float,
@@ -828,6 +862,8 @@ def _compute_entry_checks(
 ) -> tuple[bool, list[dict]]:
     """Run 6 entry gate checks and return (can_enter, check_details)."""
     from autotrader.trading.constants import MAX_PORTFOLIO_HEAT_PCT
+
+    regime_blocked = _is_regime_entry_blocked(regime)
 
     checks: list[dict] = [
         {
@@ -857,7 +893,7 @@ def _compute_entry_checks(
         },
         {
             "name": "Regime",
-            "ok": regime not in ("HIGH_VOLATILITY", "HIGH_VOL"),
+            "ok": not regime_blocked,
             "detail": regime,
         },
     ]

@@ -10,6 +10,7 @@ import streamlit as st
 from autotrader.dashboard.data_loader import load_open_positions
 from autotrader.dashboard.theme import COLORS
 from autotrader.dashboard.utils.formatters import fmt_pct
+from autotrader.trading.constants import MAX_DAILY_ENTRIES, MAX_LONG_POSITIONS
 
 
 def render_risk_dashboard(risk_metrics, open_positions=None) -> None:
@@ -55,7 +56,7 @@ def render_risk_dashboard(risk_metrics, open_positions=None) -> None:
 
     with col_pos:
         open_count = getattr(risk_metrics, "open_positions_count", 0)
-        max_pos = getattr(risk_metrics, "max_positions", 8)
+        max_pos = getattr(risk_metrics, "max_positions", MAX_LONG_POSITIONS)
         _render_limit_bar(
             label="Position Slots",
             current=open_count / max_pos if max_pos > 0 else 0.0,
@@ -262,7 +263,7 @@ def _render_direction_exposure(risk_metrics) -> None:
 def _render_entry_count(risk_metrics) -> None:
     """Render today's entry count vs daily limit."""
     entries_today = getattr(risk_metrics, "entries_today", 0)
-    max_entries = getattr(risk_metrics, "max_entries_today", 3)
+    max_entries = getattr(risk_metrics, "max_entries_today", MAX_DAILY_ENTRIES)
     usage_ratio = min(1.0, entries_today / max_entries if max_entries > 0 else 0.0)
 
     if usage_ratio >= 1.0:

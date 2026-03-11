@@ -34,6 +34,7 @@ from autotrader.dashboard.components.position_panel import (
 from autotrader.dashboard.components.strategy_analysis import render_strategy_analysis
 from autotrader.dashboard.components.scan_results import render_scan_results
 from autotrader.dashboard.components.risk_dashboard import render_risk_dashboard
+from autotrader.trading.constants import MAX_LONG_POSITIONS
 
 # -- Page config ---------------------------------------------------------------
 st.set_page_config(
@@ -96,7 +97,7 @@ daily_loss_limit = st.sidebar.slider(
 _SETTINGS = {
     "rotation_day": 5,              # Saturday (weekday index 5)
     "weekly_loss_limit_pct": 0.05,
-    "max_open_positions": 8,
+    "max_open_positions": MAX_LONG_POSITIONS,
     "max_drawdown_limit_pct": max_drawdown_limit,
     "daily_loss_limit_pct": daily_loss_limit,
 }
