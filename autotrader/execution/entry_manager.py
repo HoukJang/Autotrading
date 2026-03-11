@@ -2,7 +2,9 @@
 
 Entry architecture:
   - Group A (breakout_momentum, rsi_mean_reversion):
-      Market-on-Open orders submitted at 9:30 AM ET.
+      Limit orders submitted at 9:30 AM ET with price cap
+      (prev_close * (1 +/- GAP_THRESHOLD)).  Unfilled orders are
+      auto-cancelled after LIMIT_ORDER_CANCEL_MINUTES (30 min).
       SL/TP anchored to actual fill price.
   - Group B (currently empty):
       Confirmation window 9:45-10:00 AM ET.
@@ -44,6 +46,7 @@ from autotrader.trading.constants import (
     GROUP_A_STRATEGIES as _GROUP_A_STRATEGIES,
     GROUP_B_STRATEGIES as _GROUP_B_STRATEGIES,
     GAP_TOLERANCE as _GAP_TOLERANCE,
+    DEFAULT_GAP_THRESHOLD as _GAP_THRESHOLD,
     MAX_DAILY_ENTRIES as _MAX_DAILY_ENTRIES,
     MAX_LONG_POSITIONS as _MAX_LONG_POSITIONS,
     MAX_SHORT_POSITIONS as _MAX_SHORT_POSITIONS,
@@ -145,6 +148,9 @@ class EntryManager:
         # Last block reason from _can_enter (set on each False return)
         self._last_block_reason: str = ""
 
+        # Pending limit orders awaiting fill (order_id -> candidate + metadata)
+        self._pending_limit_orders: dict[str, dict] = {}
+
     # ------------------------------------------------------------------
     # Setup and lifecycle
     # ------------------------------------------------------------------
@@ -179,6 +185,7 @@ class EntryManager:
             self._group_a.clear()
             self._group_b.clear()
             self._new_positions.clear()
+            self._pending_limit_orders.clear()
             logger.info("EntryManager reset for new trading day %s", today_et)
 
     @property
@@ -367,9 +374,21 @@ class EntryManager:
 
     def to_snapshot(self) -> dict:
         """Serialize ephemeral state for persistence."""
+        pending = {}
+        for order_id, info in self._pending_limit_orders.items():
+            pending[order_id] = {
+                "symbol": info["symbol"],
+                "strategy": info["strategy"],
+                "direction": info["direction"],
+                "qty": info["qty"],
+                "limit_price": info["limit_price"],
+                "atr": info["atr"],
+                "submitted_at": info["submitted_at"].isoformat(),
+            }
         return {
             "daily_entry_count": self._daily_entry_count,
             "last_entry_date": self._last_entry_date.isoformat() if self._last_entry_date else None,
+            "pending_limit_orders": pending,
         }
 
     def from_snapshot(self, data: dict) -> None:
@@ -381,6 +400,186 @@ class EntryManager:
             self._last_entry_date = date.fromisoformat(last_date)
         else:
             self._last_entry_date = None
+        # Restore pending limit orders (without candidate -- fills use broker data)
+        pending = data.get("pending_limit_orders", {})
+        for order_id, info in pending.items():
+            self._pending_limit_orders[order_id] = {
+                "symbol": info["symbol"],
+                "strategy": info["strategy"],
+                "direction": info["direction"],
+                "candidate": None,  # Not available after restart
+                "qty": info["qty"],
+                "limit_price": info["limit_price"],
+                "atr": info["atr"],
+                "submitted_at": datetime.fromisoformat(info["submitted_at"]),
+            }
+        if self._pending_limit_orders:
+            logger.info(
+                "Restored %d pending limit orders from snapshot",
+                len(self._pending_limit_orders),
+            )
+
+    # ------------------------------------------------------------------
+    # Pending limit order management
+    # ------------------------------------------------------------------
+
+    @property
+    def pending_limit_orders(self) -> dict[str, dict]:
+        """Pending limit orders awaiting fill (order_id -> metadata)."""
+        return dict(self._pending_limit_orders)
+
+    async def check_pending_fills(
+        self,
+        current_date_et: date,
+    ) -> list[HeldPosition]:
+        """Poll broker for filled limit orders and register positions.
+
+        Called periodically (e.g. every 30s) after MOO to detect limit
+        order fills.  Orders that exceed LIMIT_ORDER_CANCEL_MINUTES
+        are cancelled.
+
+        Returns:
+            List of HeldPosition objects for newly filled orders.
+        """
+        from autotrader.trading.constants import LIMIT_ORDER_CANCEL_MINUTES
+
+        if not self._pending_limit_orders:
+            return []
+
+        filled_positions: list[HeldPosition] = []
+        to_remove: list[str] = []
+        now = datetime.now(timezone.utc)
+
+        _FILL_OK = {"filled", "partially_filled"}
+        _TERMINAL = {"cancelled", "canceled", "expired", "rejected"}
+
+        for order_id, info in list(self._pending_limit_orders.items()):
+            try:
+                status = await self._order_manager.get_order_status(order_id)
+            except Exception:
+                logger.exception("Failed to check pending order %s (%s)", order_id, info["symbol"])
+                continue
+
+            if status is None:
+                logger.warning(
+                    "Pending order %s (%s) not found at broker -- removing "
+                    "and restoring reserved entry count",
+                    order_id, info["symbol"],
+                )
+                # Restore the entry count that was reserved at submission time
+                if self._daily_entry_count > 0:
+                    self._daily_entry_count -= 1
+                if self._gdr_manager is not None:
+                    self._gdr_manager.reverse_entry(info["strategy"])
+                to_remove.append(order_id)
+                continue
+
+            if status.status in _FILL_OK:
+                logger.info(
+                    "Limit order FILLED: %s %s %.0f @ %.2f (order=%s)",
+                    info["direction"], info["symbol"],
+                    status.filled_qty, status.filled_price, order_id,
+                )
+                # Record fill in ledger
+                self._order_manager.record_fill(
+                    order_id, status.filled_qty, status.filled_price,
+                    partial=status.status == "partially_filled",
+                )
+                candidate = info["candidate"]
+                if candidate is not None:
+                    held = self._create_held_position(
+                        signal=candidate.signal,
+                        fill_price=status.filled_price,
+                        fill_qty=status.filled_qty,
+                        atr=info["atr"],
+                        entry_date_et=current_date_et,
+                    )
+                else:
+                    # Restart recovery: no candidate, build HeldPosition from saved info
+                    held = HeldPosition(
+                        symbol=info["symbol"],
+                        strategy=info["strategy"],
+                        direction=info["direction"],
+                        entry_price=status.filled_price,
+                        entry_atr=info["atr"],
+                        entry_date_et=current_date_et,
+                        qty=status.filled_qty,
+                    )
+                filled_positions.append(held)
+                self._new_positions.append(held)
+                # Note: daily_entry_count and GDR were already reserved at submission time
+
+                # Submit broker-side stop-loss
+                if candidate is not None:
+                    await self._submit_broker_sl(
+                        candidate.signal, status.filled_price,
+                        status.filled_qty, order_id, atr=info["atr"],
+                    )
+                else:
+                    # Restart recovery: build minimal Signal for SL submission
+                    from autotrader.core.types import Signal as _Signal
+                    recovery_signal = _Signal(
+                        strategy=info["strategy"],
+                        symbol=info["symbol"],
+                        direction=info["direction"],
+                        strength=1.0,
+                        metadata={"entry_atr": info["atr"]},
+                    )
+                    await self._submit_broker_sl(
+                        recovery_signal, status.filled_price,
+                        status.filled_qty, order_id, atr=info["atr"],
+                    )
+                to_remove.append(order_id)
+                continue
+
+            if status.status in _TERMINAL:
+                logger.info(
+                    "Pending order %s (%s) reached terminal state: %s -- "
+                    "restoring reserved entry count",
+                    order_id, info["symbol"], status.status,
+                )
+                # Restore the entry count that was reserved at submission time
+                if self._daily_entry_count > 0:
+                    self._daily_entry_count -= 1
+                if self._gdr_manager is not None:
+                    self._gdr_manager.reverse_entry(info["strategy"])
+                to_remove.append(order_id)
+                continue
+
+            # Check timeout: cancel if past LIMIT_ORDER_CANCEL_MINUTES
+            age_minutes = (now - info["submitted_at"]).total_seconds() / 60.0
+            if age_minutes >= LIMIT_ORDER_CANCEL_MINUTES and not info.get("_cancel_sent"):
+                logger.info(
+                    "Cancelling unfilled limit order %s (%s) after %.0f min",
+                    order_id, info["symbol"], age_minutes,
+                )
+                try:
+                    await self._order_manager.cancel_order(order_id)
+                except Exception:
+                    logger.exception("Failed to cancel stale limit order %s", order_id)
+                # Mark cancel sent -- next poll cycle will verify terminal state
+                # (handles race condition where order fills between cancel request
+                # and broker acknowledgement)
+                info["_cancel_sent"] = True
+            elif info.get("_cancel_sent"):
+                # Cancel was sent last cycle but order still pending --
+                # broker may be slow. Force remove to avoid infinite loop.
+                logger.warning(
+                    "Order %s (%s) still pending after cancel -- force removing "
+                    "and restoring reserved entry count",
+                    order_id, info["symbol"],
+                )
+                # Restore the entry count that was reserved at submission time
+                if self._daily_entry_count > 0:
+                    self._daily_entry_count -= 1
+                if self._gdr_manager is not None:
+                    self._gdr_manager.reverse_entry(info["strategy"])
+                to_remove.append(order_id)
+
+        for order_id in to_remove:
+            self._pending_limit_orders.pop(order_id, None)
+
+        return filled_positions
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -573,17 +772,52 @@ class EntryManager:
             return None
 
         side: Literal["buy", "sell"] = "buy" if direction == "long" else "sell"
+
+        # Limit order price cap: prevents buying into a large gap.
+        # Long: allow up to prev_close * (1 + GAP_THRESHOLD)
+        # Short: allow down to prev_close * (1 - GAP_THRESHOLD)
+        if direction == "long":
+            limit_price = round(candidate.prev_close * (1.0 + _GAP_THRESHOLD), 2)
+        else:
+            limit_price = round(candidate.prev_close * (1.0 - _GAP_THRESHOLD), 2)
+
         result = await self._order_manager.submit_entry(
             symbol=signal.symbol,
             side=side,
             qty=float(qty),
-            order_type="market",
+            order_type="limit",
+            limit_price=limit_price,
             strategy=signal.strategy,
             direction=direction,
             entry_atr=atr,
             metadata=signal.metadata or {},
         )
-        if result is None or result.status not in ("filled", "partially_filled"):
+        if result is None:
+            return None
+        # Limit orders may return 'accepted'/'new' before fill -- that's normal.
+        # If already filled at submission, process immediately.
+        # Otherwise, the fill will be handled by the pending order tracker.
+        _FILL_OK = {"filled", "partially_filled"}
+        if result.status not in _FILL_OK:
+            logger.info(
+                "Limit entry for %s accepted (status=%s, limit=%.2f) -- awaiting fill",
+                signal.symbol, result.status, limit_price,
+            )
+            # Track pending order for fill polling and timeout cancel
+            self._pending_limit_orders[result.order_id] = {
+                "symbol": signal.symbol,
+                "strategy": signal.strategy,
+                "direction": direction,
+                "candidate": candidate,
+                "qty": float(qty),
+                "limit_price": limit_price,
+                "atr": atr,
+                "submitted_at": datetime.now(timezone.utc),
+            }
+            # Reserve entry count so subsequent candidates see correct limits
+            self._daily_entry_count += 1
+            if self._gdr_manager is not None:
+                self._gdr_manager.record_entry(signal.strategy)
             return None
 
         # Cancel remaining quantity on partial fills to prevent ghost positions

@@ -1,7 +1,7 @@
 """OrderManager: order lifecycle management wrapping a BrokerAdapter.
 
 Responsible for:
-- Submitting market and limit entry orders
+- Submitting limit entry orders (with price cap for gap protection)
 - Submitting stop-loss orders as broker-side safety nets
 - Polling for fill prices with retries
 - Cancelling stale/pending orders
@@ -130,100 +130,24 @@ class OrderManager:
                         metadata=metadata or {},
                     ))
 
-                # --- Ghost fill guard for market orders ---
-                # Market orders that are NOT filled/partially_filled are
-                # dangerous: they may fill later and create ghost positions.
-                # Covers: accepted, pending_new, new, and any other non-terminal
-                # status that Alpaca may return under API congestion.
-                _MARKET_FILL_OK = {"filled", "partially_filled"}
+                _FILL_OK = {"filled", "partially_filled"}
                 _TERMINAL_CANCEL = {"cancelled", "canceled", "expired", "rejected"}
+                _PENDING_OK = {"new", "accepted", "pending_new"}
 
-                if order_type == "market" and result.status not in _MARKET_FILL_OK:
-                    if result.status in _TERMINAL_CANCEL:
-                        logger.warning(
-                            "Market order %s reached terminal non-fill status: %s",
-                            result.order_id, result.status,
-                        )
-                        if self._ledger:
-                            _state_map = {"cancelled": OrderState.CANCELLED, "canceled": OrderState.CANCELLED,
-                                          "expired": OrderState.EXPIRED, "rejected": OrderState.REJECTED}
-                            self._ledger.record_terminal(result.order_id,
-                                                         _state_map.get(result.status, OrderState.CANCELLED))
-                        return None
-
+                # Handle terminal non-fill states
+                if result.status in _TERMINAL_CANCEL:
                     logger.warning(
-                        "Market order %s not filled (status=%s) "
-                        "-- cancelling to prevent ghost fill",
+                        "Order %s reached terminal non-fill status: %s",
                         result.order_id, result.status,
                     )
-                    # Retry cancel up to 3 times to prevent ghost fills
-                    cancel_ok = False
-                    for cancel_attempt in range(1, 4):
-                        cancel_ok = await self._adapter.cancel_order(result.order_id)
-                        if cancel_ok:
-                            break
-                        # Cancel failed -- check if it filled in the meantime
-                        recheck = await self._adapter.get_order_status(result.order_id)
-                        if recheck and recheck.status in _MARKET_FILL_OK:
-                            logger.info(
-                                "Order %s filled after cancel attempt %d "
-                                "(status=%s, qty=%.0f, price=%.2f) "
-                                "-- processing as filled",
-                                recheck.order_id, cancel_attempt, recheck.status,
-                                recheck.filled_qty, recheck.filled_price,
-                            )
-                            result = recheck
-                            break
-                        if recheck and recheck.status in _TERMINAL_CANCEL:
-                            logger.info(
-                                "Order %s already in terminal state: %s",
-                                result.order_id, recheck.status,
-                            )
-                            if self._ledger:
-                                self._ledger.record_cancel(result.order_id)
-                            return None
-                        if cancel_attempt < 3:
-                            logger.warning(
-                                "Cancel attempt %d failed for order %s "
-                                "(status=%s), retrying...",
-                                cancel_attempt, result.order_id,
-                                recheck.status if recheck else "unknown",
-                            )
-                            await asyncio.sleep(1.0 * cancel_attempt)
-                        else:
-                            logger.critical(
-                                "GHOST FILL RISK: All cancel attempts failed "
-                                "for order %s (status=%s). Order may still "
-                                "be live at broker!",
-                                result.order_id,
-                                recheck.status if recheck else "unknown",
-                            )
-                            # Ledger keeps it in SUBMITTED state for reconciliation
-                            return None
+                    if self._ledger:
+                        _state_map = {"cancelled": OrderState.CANCELLED, "canceled": OrderState.CANCELLED,
+                                      "expired": OrderState.EXPIRED, "rejected": OrderState.REJECTED}
+                        self._ledger.record_terminal(result.order_id,
+                                                     _state_map.get(result.status, OrderState.CANCELLED))
+                    return None
 
-                    if cancel_ok and result.status not in _MARKET_FILL_OK:
-                        # Cancel succeeded -- but order may have filled in flight.
-                        # Brief wait + re-check to catch race condition fills.
-                        await asyncio.sleep(1.0)
-                        recheck = await self._adapter.get_order_status(
-                            result.order_id,
-                        )
-                        if recheck and recheck.status in _MARKET_FILL_OK:
-                            logger.warning(
-                                "Order %s filled AFTER cancel succeeded "
-                                "(status=%s, qty=%.0f, price=%.2f) "
-                                "-- processing as filled",
-                                recheck.order_id, recheck.status,
-                                recheck.filled_qty, recheck.filled_price,
-                            )
-                            result = recheck
-                            # Fall through to the filled handling below
-                        else:
-                            if self._ledger:
-                                self._ledger.record_cancel(result.order_id)
-                            return None
-
-                if result.status in _MARKET_FILL_OK:
+                if result.status in _FILL_OK:
                     if self._ledger:
                         partial = result.status == "partially_filled"
                         self._ledger.record_fill(
@@ -246,8 +170,9 @@ class OrderManager:
                         result.filled_price, attempt,
                     )
                     return result
-                # Non-market "accepted" orders (limit/stop) are expected
-                elif result.status == "accepted":
+                # Pending states (new/accepted/pending_new) are normal for
+                # limit orders -- the order is live at the broker awaiting fill.
+                elif result.status in _PENDING_OK:
                     active = ActiveOrder(
                         order_id=result.order_id,
                         symbol=symbol,
@@ -260,9 +185,9 @@ class OrderManager:
                     )
                     self._active_orders[result.order_id] = active
                     logger.info(
-                        "Entry submitted: %s %s %s %.0f @ %.2f (attempt %d)",
-                        side, symbol, order_type, result.filled_qty,
-                        result.filled_price, attempt,
+                        "Entry pending: %s %s %s %.0f (limit=%.2f, status=%s, attempt %d)",
+                        side, symbol, order_type, qty,
+                        limit_price or 0.0, result.status, attempt,
                     )
                     return result
                 else:
@@ -503,6 +428,22 @@ class OrderManager:
         to_remove = [oid for oid, o in self._active_orders.items() if o.symbol == symbol]
         for oid in to_remove:
             del self._active_orders[oid]
+
+    async def get_order_status(self, order_id: str) -> "OrderResult | None":
+        """Query broker for the current status of an order.
+
+        Args:
+            order_id: Alpaca-assigned order ID.
+
+        Returns:
+            OrderResult with current status, or None if not found.
+        """
+        return await self._adapter.get_order_status(order_id)
+
+    def record_fill(self, order_id: str, filled_qty: float, filled_price: float, *, partial: bool = False) -> None:
+        """Record a fill in the ledger (for external callers like fill polling)."""
+        if self._ledger:
+            self._ledger.record_fill(order_id, filled_qty, filled_price, partial=partial)
 
     @property
     def active_order_count(self) -> int:

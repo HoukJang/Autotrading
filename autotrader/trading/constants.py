@@ -200,10 +200,15 @@ MAX_POSITION_PCT: float = 0.25            # Max 25% of equity per position (Iter
 MIN_POSITION_VALUE: float = 200.0         # Minimum $200 per position
 
 # ---------------------------------------------------------------------------
-# 11. Gap filter
+# 11. Gap filter & entry order limits
 # ---------------------------------------------------------------------------
 
 DEFAULT_GAP_THRESHOLD: float = 0.03       # 3% max absolute gap fraction
+
+# Limit order price cap: entry limit = prev_close * (1 +/- GAP_THRESHOLD)
+# Long: prev_close * (1 + 0.03), Short: prev_close * (1 - 0.03)
+# Orders not filled within LIMIT_ORDER_CANCEL_MINUTES are auto-cancelled.
+LIMIT_ORDER_CANCEL_MINUTES: int = 30      # cancel unfilled entries 30 min after open
 
 # ---------------------------------------------------------------------------
 # 12. Scanner / warmup

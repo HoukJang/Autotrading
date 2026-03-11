@@ -324,6 +324,7 @@ class AutoTrader:
         self._batch_scheduler_task: asyncio.Task | None = None
         self._daily_regime_task: asyncio.Task | None = None
         self._reconciliation_task: asyncio.Task | None = None
+        self._pending_fill_task: asyncio.Task | None = None
         self._last_regime_update_date: date | None = None
 
         self._bar_count: int = 0
@@ -1494,11 +1495,12 @@ class AutoTrader:
         logger.info("[SCHEDULER] _on_gap_filter() complete")
 
     async def _on_moo(self) -> None:
-        """Execute Group A market-on-open orders at 9:30 AM ET."""
+        """Execute Group A limit orders at 9:30 AM ET."""
         logger.info("[SCHEDULER] _on_moo() -> delegating to batch_pipeline")
         await self._batch_pipeline.on_moo()
         logger.info("[SCHEDULER] _on_moo() complete")
         self._schedule_post_moo_reconciliation()
+        self._schedule_pending_fill_polling()
 
     def _schedule_post_moo_reconciliation(self) -> None:
         """Schedule a position reconciliation 5 minutes after MOO.
@@ -1527,6 +1529,81 @@ class AutoTrader:
 
         self._reconciliation_task = asyncio.create_task(_delayed_reconcile())
         logger.info("[SCHEDULER] post-MOO reconciliation scheduled in 300s")
+
+    def _schedule_pending_fill_polling(self) -> None:
+        """Poll pending limit orders for fills every 30s until all resolved.
+
+        Limit orders submitted at MOO may take seconds to minutes to fill.
+        This polls the broker every 30 seconds, registering filled positions
+        into PositionBook/Monitor.  Orders exceeding LIMIT_ORDER_CANCEL_MINUTES
+        are auto-cancelled by EntryManager.check_pending_fills().
+        """
+        async def _poll_loop() -> None:
+            try:
+                entry_mgr = self._entry_manager
+                if entry_mgr is None:
+                    return
+
+                today_et = datetime.now(timezone.utc).astimezone(_ET).date()
+                poll_count = 0
+
+                while entry_mgr.pending_limit_orders:
+                    await asyncio.sleep(30)
+                    poll_count += 1
+                    logger.debug("[FILL_POLL] polling pending limit orders (attempt %d)", poll_count)
+
+                    try:
+                        new_positions = await entry_mgr.check_pending_fills(today_et)
+                    except Exception:
+                        logger.exception("[FILL_POLL] check_pending_fills failed")
+                        continue
+
+                    # Register newly filled positions
+                    for held in new_positions:
+                        if self._position_book.has(held.symbol):
+                            logger.warning(
+                                "[FILL_POLL] %s already in PositionBook -- skipping",
+                                held.symbol,
+                            )
+                            continue
+                        try:
+                            self._position_book.add(held)
+                            if self._position_monitor is not None:
+                                self._position_monitor.add_position(held)
+                            # Log entry trade
+                            await self._batch_pipeline._log_entry_trade(
+                                held, await self._broker.get_account(),
+                            )
+                            await self._broker.add_bar_subscription(
+                                [held.symbol], self._on_bar,
+                            )
+                            logger.info(
+                                "[FILL_POLL] Registered filled position: %s %s %.0f @ %.2f",
+                                held.direction, held.symbol, held.qty, held.entry_price,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "[FILL_POLL] Failed to register %s after fill",
+                                held.symbol,
+                            )
+
+                    if new_positions:
+                        self._dump_open_positions()
+                        await self._log_equity_snapshot()
+
+                logger.info("[FILL_POLL] All pending limit orders resolved")
+            except asyncio.CancelledError:
+                logger.info("[FILL_POLL] Polling cancelled")
+            except Exception:
+                logger.exception("[FILL_POLL] Polling loop failed")
+
+        # Only start if there are pending orders
+        if self._entry_manager and self._entry_manager.pending_limit_orders:
+            self._pending_fill_task = asyncio.create_task(_poll_loop())
+            logger.info(
+                "[SCHEDULER] Pending fill polling started for %d order(s)",
+                len(self._entry_manager.pending_limit_orders),
+            )
 
     async def _on_confirmation_window(self) -> None:
         """Execute Group B confirmation entries between 9:45 and 10:00 AM ET."""
