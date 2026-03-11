@@ -50,6 +50,7 @@ class AlpacaAdapter(BrokerAdapter):
     async def disconnect(self) -> None:
         if self._stream:
             self._stream.stop()
+            self._stream = None
         self._client = None
         self.connected = False
         logger.info("Disconnected from Alpaca")
@@ -252,6 +253,13 @@ class AlpacaAdapter(BrokerAdapter):
         return result
 
     async def subscribe_bars(self, symbols: list[str], callback: Callable) -> None:
+        # Clean up existing stream to prevent orphan WebSocket connections
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+            except Exception:
+                pass
+            self._stream = None
         feed_enum = DataFeed.IEX if self._feed == "iex" else DataFeed.SIP
         self._stream = StockDataStream(self._api_key, self._secret_key, feed=feed_enum)
         self._loop = asyncio.get_running_loop()

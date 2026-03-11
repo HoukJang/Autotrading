@@ -915,6 +915,7 @@ class EntryManager:
         entry_date_et: date,
     ) -> HeldPosition:
         """Construct a HeldPosition from fill data."""
+        entry_adx = float(signal.metadata.get("entry_adx", 0.0)) if signal.metadata else 0.0
         return HeldPosition(
             symbol=signal.symbol,
             strategy=signal.strategy,
@@ -926,6 +927,7 @@ class EntryManager:
             qty=fill_qty,
             highest_price=fill_price,
             lowest_price=fill_price,
+            entry_adx=entry_adx,
         )
 
     @staticmethod

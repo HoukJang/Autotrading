@@ -446,6 +446,17 @@ class AutoTrader:
                 for sym, held in bootstrapped.items():
                     self._position_book.add(held)
 
+        # Sync risk_manager equity from broker (prevents stale current_equity after restart)
+        try:
+            _acct = await self._broker.get_account()
+            self._risk_manager.update_peak(_acct.equity)
+            logger.info(
+                "Risk manager equity synced from broker: %.2f",
+                _acct.equity,
+            )
+        except Exception:
+            logger.exception("Failed to sync risk manager equity from broker")
+
         # Reconcile any pending orders from ledger (ghost fill detection)
         await self._reconcile_pending_orders()
 
@@ -892,6 +903,7 @@ class AutoTrader:
                 if not isinstance(restored_bar_count, int) or restored_bar_count > 30:
                     restored_bar_count = 0
 
+                entry_adx = float(cached_meta.get("entry_adx", 0.0))
                 held = HeldPosition(
                     symbol=pos.symbol,
                     strategy=strategy,
@@ -902,8 +914,20 @@ class AutoTrader:
                     qty=pos.quantity,
                     highest_price=restored_highest,
                     lowest_price=restored_lowest,
+                    entry_adx=entry_adx,
                 )
                 held.bars_held = restored_bar_count
+                # Sanity: bars_held should roughly match days since entry (minus weekends)
+                if entry_date != date.today():
+                    days_since = (date.today() - entry_date).days
+                    # Approximate trading days (exclude ~2 weekend days per 7)
+                    approx_bars = max(1, days_since - (days_since // 7) * 2)
+                    if restored_bar_count < approx_bars - 1:
+                        logger.warning(
+                            "bars_held mismatch for %s: saved=%d, approx_trading_days=%d, using approx",
+                            pos.symbol, restored_bar_count, approx_bars,
+                        )
+                        held.bars_held = approx_bars
                 if saved:
                     logger.info(
                         "Restored position state for %s: highest=%.2f, lowest=%.2f, "
@@ -1580,6 +1604,9 @@ class AutoTrader:
                     if new_positions:
                         self._dump_open_positions()
                         await self._log_equity_snapshot()
+                        # Persist runtime state after new position entry
+                        if hasattr(self, "_runtime_state"):
+                            self._runtime_state.save(self._get_state_components())
 
                 logger.info("[FILL_POLL] All pending limit orders resolved")
             except asyncio.CancelledError:
@@ -1846,6 +1873,7 @@ class AutoTrader:
                     open_positions=[p.symbol for p in positions],
                 )
                 self._trade_logger.log_equity(snap)
+                self._risk_manager.update_peak(account.equity)
             except Exception:
                 logger.exception("Equity snapshot failed during bar processing")
 
