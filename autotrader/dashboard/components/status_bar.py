@@ -199,7 +199,7 @@ def _compute_next_event(now_utc: datetime) -> str:
 
     # Define event times in ET minutes
     nightly_scan_min = 22 * 60        # 22:00
-    moo_open_min = 9 * 60 + 30        # 09:30
+    moo_open_min = 9 * 60 + 30        # 09:30 (gap filter + MOO merged at open)
     confirm_min = 10 * 60             # 10:00
     review_min = 15 * 60 + 30         # 15:30
 

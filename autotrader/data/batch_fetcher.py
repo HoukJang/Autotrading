@@ -2,7 +2,7 @@
 
 Fetches daily OHLCV bars for up to 503 S&P 500 symbols in batches of 50
 symbols per request using Alpaca's IEX data feed. Also provides latest
-quote fetching for pre-market gap detection at 9:25 AM ET.
+quote fetching for post-open gap detection at 9:30 AM ET.
 
 Design decisions:
 - IEX feed (not SIP) -- the paper account does not have SIP access.
@@ -136,12 +136,12 @@ class BatchFetcher:
     async def fetch_latest_quotes(
         self, symbols: list[str]
     ) -> dict[str, float]:
-        """Fetch the latest ask/bid midpoint price for pre-market gap detection.
+        """Fetch the latest ask/bid midpoint price for post-open gap detection.
 
-        Used by GapFilter at 9:25 AM ET to detect gap-up/gap-down vs
+        Used by GapFilter at 9:30 AM ET to detect gap-up/gap-down vs
         previous close. Returns the midpoint of the latest ask and bid.
-        If a symbol has no quote data, it is omitted (caller treats this
-        as "no data available -> keep candidate").
+        If a symbol has no quote data, it is omitted (caller rejects
+        the candidate as illiquid).
 
         Args:
             symbols: List of trading symbols.

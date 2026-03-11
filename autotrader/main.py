@@ -4,8 +4,7 @@ Architecture overview:
   - 8:00 PM ET:   NightlyScanner.scan()  -> BatchResult (candidates)
   - 9:00 AM ET:   REST API daily bar refresh (pre-market)
   - 9:20 AM ET:   Daily reset (clear daily counters, re-entry blocks)
-  - 9:25 AM ET:   GapFilter.filter()     -> filtered Candidate list
-  - 9:30 AM ET:   EntryManager.execute_moo()           (Group A)
+  - 9:30 AM ET:   GapFilter + MOO merged  -> filter then execute (Group A)
   - 9:45 AM ET:   EntryManager.execute_confirmation()  (Group B starts)
   - 10:00 AM ET:  EntryManager.close_entry_window()    (discard unconfirmed)
   - Continuous:   Minute bars streamed for held positions only (0~9)
@@ -111,7 +110,7 @@ class NightlyScannerProtocol(Protocol):
 
 @runtime_checkable
 class GapFilterProtocol(Protocol):
-    """Protocol for the pre-market gap filter (9:25 AM ET)."""
+    """Protocol for the gap filter at market open (9:30 AM ET)."""
 
     async def filter(self, candidates: list[Any]) -> list[Any]:
         """Filter candidates based on overnight gap size.
@@ -169,11 +168,8 @@ class _NightlyScannerAdapter:
 _NIGHTLY_SCAN_HOUR: int = 20   # 8:00 PM ET
 _NIGHTLY_SCAN_MINUTE: int = 0
 
-_GAP_FILTER_HOUR: int = 9      # 9:25 AM ET
-_GAP_FILTER_MINUTE: int = 25
-
-_MOO_HOUR: int = 9             # 9:30 AM ET
-_MOO_MINUTE: int = 30
+_GAP_FILTER_HOUR: int = 9      # 9:30 AM ET (market open: gap filter + MOO merged)
+_GAP_FILTER_MINUTE: int = 30
 
 _CONFIRMATION_HOUR: int = 9    # 9:45 AM ET
 _CONFIRMATION_MINUTE: int = 45
@@ -184,7 +180,7 @@ _ENTRY_WINDOW_CLOSE_MINUTE: int = 0
 _DAILY_BAR_REFRESH_HOUR: int = 9   # 9:00 AM ET (pre-market daily bar fetch)
 _DAILY_BAR_REFRESH_MINUTE: int = 0
 
-_DAILY_RESET_HOUR: int = 9     # 9:20 AM ET (before gap_filter at 9:25)
+_DAILY_RESET_HOUR: int = 9     # 9:20 AM ET (before gap_filter at 9:30)
 _DAILY_RESET_MINUTE: int = 20
 
 # Upper bound for market-sensitive events (gap filter, MOO, confirmation).
@@ -1179,7 +1175,6 @@ class AutoTrader:
             "daily_bar_refresh": _refresh_and_push,
             "daily_reset": lambda: self._on_daily_reset(today_et),
             "gap_filter": self._on_gap_filter,
-            "moo": self._on_moo,
             "confirmation": self._on_confirmation_window,
             "entry_close": self._on_entry_window_close,
             "nightly_scan": self._on_nightly_scan,
@@ -1187,7 +1182,7 @@ class AutoTrader:
 
         # Market-sensitive events must only fire within market hours.
         # Same guard as the main polling loop (_MARKET_SESSION_END_HOUR).
-        _MARKET_SENSITIVE_EVENTS = {"gap_filter", "moo", "confirmation", "entry_close"}
+        _MARKET_SENSITIVE_EVENTS = {"gap_filter", "confirmation", "entry_close"}
         h_now = now_et.hour
 
         for event_name in catchup_events:
@@ -1311,7 +1306,6 @@ class AutoTrader:
             "daily_bar_refresh": None,
             "daily_reset": None,
             "gap_filter": None,
-            "moo": None,
             "confirmation": None,
             "entry_close": None,
             "nightly_scan": None,
@@ -1334,7 +1328,6 @@ class AutoTrader:
             "daily_bar_refresh": (_DAILY_BAR_REFRESH_HOUR, _DAILY_BAR_REFRESH_MINUTE),
             "daily_reset": (_DAILY_RESET_HOUR, _DAILY_RESET_MINUTE),
             "gap_filter": (_GAP_FILTER_HOUR, _GAP_FILTER_MINUTE),
-            "moo": (_MOO_HOUR, _MOO_MINUTE),
             "confirmation": (_CONFIRMATION_HOUR, _CONFIRMATION_MINUTE),
             "entry_close": (_ENTRY_WINDOW_CLOSE_HOUR, _ENTRY_WINDOW_CLOSE_MINUTE),
         }
@@ -1400,11 +1393,11 @@ class AutoTrader:
                 _state.mark_fired("daily_reset")
                 _state.save(self._state_path)
 
-            # 9:25 AM: Gap filter (requires live pre-market prices; skip outside market session)
+            # 9:30 AM: Gap filter + MOO merged (market open; skip outside market session)
             if h >= _GAP_FILTER_HOUR and (h > _GAP_FILTER_HOUR or m >= _GAP_FILTER_MINUTE) and _fired["gap_filter"] != today_et:
                 if h < _MARKET_SESSION_END_HOUR:
                     logger.info(
-                        "[GAP_FILTER] FIRING at h=%d m=%d (market hours OK, "
+                        "[GAP_FILTER+MOO] FIRING at h=%d m=%d (market hours OK, "
                         "_fired=%s, state_fired=%s)",
                         h, m, _fired["gap_filter"], _state.is_fired("gap_filter"),
                     )
@@ -1413,7 +1406,7 @@ class AutoTrader:
                     _state.mark_fired("gap_filter")
                 else:
                     logger.warning(
-                        "[GAP_FILTER] SKIPPED: outside market hours h=%d >= %d "
+                        "[GAP_FILTER+MOO] SKIPPED: outside market hours h=%d >= %d "
                         "(would have fired with stale prices!)",
                         h, _MARKET_SESSION_END_HOUR,
                     )
@@ -1423,21 +1416,9 @@ class AutoTrader:
                 _state.save(self._state_path)
             elif _loop_count % 10 == 0 and not _state.is_fired("gap_filter"):
                 logger.debug(
-                    "[GAP_FILTER] not yet: h=%d m=%d, need h>=%d m>=%d",
+                    "[GAP_FILTER+MOO] not yet: h=%d m=%d, need h>=%d m>=%d",
                     h, m, _GAP_FILTER_HOUR, _GAP_FILTER_MINUTE,
                 )
-
-            # 9:30 AM: Group A MOO entries (requires market to be open; skip outside market session)
-            if h >= _MOO_HOUR and (h > _MOO_HOUR or m >= _MOO_MINUTE) and _fired["moo"] != today_et:
-                if h < _MARKET_SESSION_END_HOUR:
-                    _fired["moo"] = today_et
-                    await self._on_moo()
-                    _state.mark_fired("moo")
-                else:
-                    logger.info("MOO entries skipped: outside market hours (h=%d)", h)
-                    _fired["moo"] = today_et
-                    _state.mark_fired("moo", result="skipped")
-                _state.save(self._state_path)
 
             # 9:45 AM: Group B confirmation window
             if (
@@ -1489,18 +1470,27 @@ class AutoTrader:
             self._gdr_manager.reset_daily_entries()
 
     async def _on_gap_filter(self) -> None:
-        """Apply gap filter to last batch result at 9:25 AM ET."""
-        logger.info("[SCHEDULER] _on_gap_filter() -> delegating to batch_pipeline")
-        await self._batch_pipeline.on_gap_filter()
-        logger.info("[SCHEDULER] _on_gap_filter() complete")
+        """Apply gap filter and execute MOO entries at 9:30 AM ET (merged step).
 
-    async def _on_moo(self) -> None:
-        """Execute Group A limit orders at 9:30 AM ET."""
-        logger.info("[SCHEDULER] _on_moo() -> delegating to batch_pipeline")
-        await self._batch_pipeline.on_moo()
-        logger.info("[SCHEDULER] _on_moo() complete")
+        Delegates to batch_pipeline.on_gap_filter() which internally chains
+        on_moo() after filtering. Then schedules post-MOO reconciliation
+        and pending fill polling.
+        """
+        logger.info("[SCHEDULER] _on_gap_filter() -> delegating to batch_pipeline (gap+moo merged)")
+        await self._batch_pipeline.on_gap_filter()
+        logger.info("[SCHEDULER] _on_gap_filter() complete (gap+moo)")
         self._schedule_post_moo_reconciliation()
         self._schedule_pending_fill_polling()
+
+    async def _on_moo(self) -> None:
+        """Execute Group A limit orders (no longer a separate scheduled event).
+
+        NOTE: gap_filter and MOO are now merged into a single step at 9:30 AM ET.
+        batch_pipeline.on_gap_filter() chains on_moo() internally.
+        This method is kept for backward compatibility with existing tests
+        that directly invoke _on_moo().
+        """
+        await self._batch_pipeline.on_moo()
 
     def _schedule_post_moo_reconciliation(self) -> None:
         """Schedule a position reconciliation 5 minutes after MOO.

@@ -2,7 +2,7 @@
 
 Entry architecture:
   - Group A (breakout_momentum, rsi_mean_reversion):
-      Limit orders submitted at 9:30 AM ET with price cap
+      Limit orders submitted at 9:30 AM ET with price cap (merged with gap filter)
       (prev_close * (1 +/- GAP_THRESHOLD)).  Unfilled orders are
       auto-cancelled after LIMIT_ORDER_CANCEL_MINUTES (30 min).
       SL/TP anchored to actual fill price.
@@ -98,7 +98,7 @@ class EntryManager:
     Lifecycle:
     1. At market open (after nightly scan), load candidates via
        ``load_candidates()``.
-    2. At 9:30 AM ET: call ``execute_moo()`` for Group A.
+    2. At 9:30 AM ET: call ``execute_moo()`` for Group A (chained from gap filter).
     3. Between 9:45 and 10:00 AM ET: call ``execute_confirmation()``
        repeatedly (or once at 9:45 and once at 10:00).
     4. At 10:00 AM ET: call ``close_entry_window()`` to discard remaining
@@ -207,7 +207,7 @@ class EntryManager:
         regime: MarketRegime,
         current_date_et: date,
     ) -> list[HeldPosition]:
-        """Submit Group A (MOO) market orders at market open (9:30 AM ET).
+        """Submit Group A (MOO) limit orders at 9:30 AM ET (chained from gap filter).
 
         Orders are submitted immediately as market orders.  After each fill,
         a stop-loss order is placed on the broker side as a safety net.

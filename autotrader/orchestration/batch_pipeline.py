@@ -133,7 +133,7 @@ class BatchPipelineOrchestrator:
         On process restart, the in-memory ``_last_batch_result`` is lost.
         This method reconstructs it from ``data/batch_results.json`` when the
         file exists and was produced within the last 18 hours (nightly scan at
-        8 PM, gap filter at 9:25 AM = ~13 h gap; 18 h provides safe margin).
+        8 PM, gap filter at 9:30 AM = ~13.5 h gap; 18 h provides safe margin).
         """
         results_path = os.path.join("data", "batch_results.json")
         if not os.path.exists(results_path):
@@ -218,15 +218,16 @@ class BatchPipelineOrchestrator:
         )
 
     async def on_gap_filter(self) -> None:
-        """Apply gap filter to last batch result at 9:25 AM ET.
+        """Apply gap filter and execute MOO entries at 9:30 AM ET (market open).
 
-        Converts batch pipeline Candidates to EntryManager Candidates and
-        loads them into the EntryManager for MOO execution at 9:30 AM.
+        Single merged step (gap_filter + moo, Panel approved):
+        1. Fetch live quotes and filter candidates by overnight gap size
+        2. Convert surviving candidates to EntryManager Candidates
+        3. Immediately execute MOO limit orders (no separate moo event)
 
         When no GapFilter is injected, all raw candidates pass through.
         When a GapFilter is present, only candidates with acceptable
-        pre-market gaps are kept.  In both cases the surviving batch
-        Candidates are converted to EntryManager Candidates and loaded.
+        gaps are kept.
         """
         logger.info(
             "[PIPELINE] on_gap_filter() CALLED -- last_batch_result=%s",
@@ -314,6 +315,9 @@ class BatchPipelineOrchestrator:
             passed_symbols=passed_syms,
             filtered_results=filtered_results,
         )
+
+        # Immediately execute MOO entries (merged step, no separate moo event)
+        await self.on_moo()
 
     def _update_batch_results_gap_status(
         self,
@@ -524,7 +528,7 @@ class BatchPipelineOrchestrator:
             logger.warning("[PIPELINE] Could not write skip status to batch_results.json")
 
     async def on_moo(self) -> None:
-        """Execute Group A market-on-open orders at 9:30 AM ET."""
+        """Execute Group A limit orders (chained from on_gap_filter at 9:30 AM ET)."""
         logger.info("[PIPELINE] on_moo() CALLED")
         host = self._host
         entry_manager = host._entry_manager

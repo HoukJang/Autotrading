@@ -1,16 +1,18 @@
-"""GapFilter: filters out candidates with large pre-market price gaps.
+"""GapFilter: filters out candidates with large opening price gaps.
 
-Runs at 9:25 AM ET (5 minutes before market open) to check pre-market
-prices for the 12 ranked candidates from NightlyScanner.
+Runs at 9:30 AM ET (market open) to check real-time
+prices for the 12 ranked candidates from NightlyScanner.  By running
+after market open, IEX provides live quotes regardless of pre-market
+activity, eliminating stale-quote issues.
 
 Gap definition:
-    gap_pct = (pre_market_price - prev_close) / prev_close
+    gap_pct = (current_price - prev_close) / prev_close
 
 Filter rule:
     - Gap > +3% -> filter out (gapped up excessively, entry too late)
     - Gap < -3% -> filter out (gapped down, potential bad news)
     - |gap| <= 3% -> keep
-    - Pre-market data unavailable -> KEEP (conservative default)
+    - Quote unavailable after market open -> REJECT (illiquid stock)
 
 The 3% threshold is configurable via the constructor.
 """
@@ -59,7 +61,7 @@ class GapFilter:
         self._gap_threshold = gap_threshold
 
     async def filter(self, candidates: list[Candidate]) -> list[FilteredCandidate]:
-        """Filter candidates by pre-market gap at ~9:25 AM ET.
+        """Filter candidates by opening gap at ~9:30 AM ET (market open).
 
         Fetches latest quotes for all candidate symbols concurrently,
         then applies the gap filter to each.
@@ -70,8 +72,8 @@ class GapFilter:
         Returns:
             List of FilteredCandidate objects.  Only those with
             passed_filter=True should be used for live trading.
-            Candidates with unavailable quotes are included with
-            passed_filter=True and gap_pct=None.
+            Candidates with unavailable quotes are REJECTED (no
+            excuse for missing quotes after market open).
         """
         if not candidates:
             return []
@@ -95,10 +97,11 @@ class GapFilter:
             prev_close = candidate.prev_close
             pre_market_price = latest_prices.get(sym)
 
-            # No quote data available -> keep the candidate
+            # No quote data after market open -> reject (illiquid stock)
             if pre_market_price is None or pre_market_price <= 0:
-                logger.debug(
-                    "GapFilter: %s -> no quote data, keeping (prev_close=%.2f)",
+                logger.warning(
+                    "GapFilter: %s REMOVED -- no quote data after market open "
+                    "(prev_close=%.2f), likely illiquid",
                     sym,
                     prev_close,
                 )
@@ -107,11 +110,11 @@ class GapFilter:
                         candidate=candidate,
                         pre_market_price=None,
                         gap_pct=None,
-                        passed_filter=True,
+                        passed_filter=False,
                         filter_reason="no_quote_data",
                     )
                 )
-                kept += 1
+                removed += 1
                 continue
 
             # No previous close available (should not happen) -> keep

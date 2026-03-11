@@ -4,7 +4,7 @@ Tests cover:
 - Filter out gaps > +3%
 - Filter out gaps < -3%
 - Keep gaps within +/-3%
-- Keep candidates when pre-market data unavailable
+- Reject candidates when quote data unavailable after market open
 - Negative gap (gap down) filtering
 - Edge case: exactly 3% gap (at boundary)
 - Empty candidate list
@@ -169,8 +169,8 @@ class TestGapFilterEdgeCases:
         assert result[0].passed_filter is False
 
     @pytest.mark.asyncio
-    async def test_no_pre_market_data_candidate_kept(self):
-        """When symbol is missing from quotes dict, candidate should be kept."""
+    async def test_no_quote_data_candidate_rejected(self):
+        """When symbol is missing from quotes dict after market open, candidate should be rejected."""
         fetcher = _make_fetcher({})  # No data for AAPL
         gf = GapFilter(fetcher, gap_threshold=0.03)
         candidates = [_make_candidate("AAPL", 100.0)]
@@ -179,20 +179,22 @@ class TestGapFilterEdgeCases:
 
         assert len(result) == 1
         fc = result[0]
-        assert fc.passed_filter is True
+        assert fc.passed_filter is False
+        assert fc.filter_reason == "no_quote_data"
         assert fc.gap_pct is None
         assert fc.pre_market_price is None
 
     @pytest.mark.asyncio
-    async def test_zero_price_treated_as_no_data(self):
-        """A pre-market price of 0 should be treated as unavailable -> keep."""
+    async def test_zero_price_treated_as_no_data_rejected(self):
+        """A price of 0 should be treated as unavailable -> reject after market open."""
         fetcher = _make_fetcher({"AAPL": 0.0})
         gf = GapFilter(fetcher, gap_threshold=0.03)
         candidates = [_make_candidate("AAPL", 100.0)]
 
         result = await gf.filter(candidates)
 
-        assert result[0].passed_filter is True
+        assert result[0].passed_filter is False
+        assert result[0].filter_reason == "no_quote_data"
         assert result[0].gap_pct is None
 
     @pytest.mark.asyncio

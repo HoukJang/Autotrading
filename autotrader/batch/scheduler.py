@@ -2,8 +2,8 @@
 
 Scheduled tasks (all times in US/Eastern):
     20:00 ET  -- NIGHTLY_SCAN    Run NightlyScanner for the next trading day
-    09:25 ET  -- GAP_FILTER      Run GapFilter on the 12 ranked candidates
-    09:30 ET  -- MARKET_OPEN     Market open notification / signal dispatch hook
+    09:30 ET  -- GAP_FILTER      Run GapFilter on the 12 ranked candidates (market open)
+    09:30 ET  -- GapFilter+MOO   Gap filter then limit order submission (merged)
     09:45 ET  -- OPEN_MONITOR    Post-open price check (optional hook)
     10:00 ET  -- POST_OPEN       Confirm open positions are in line with signals
 

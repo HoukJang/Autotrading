@@ -172,7 +172,7 @@ class BatchResult:
 
 @dataclass
 class FilteredCandidate:
-    """A candidate that passed the 9:25 AM gap filter check.
+    """A candidate that went through the 9:30 AM market-open gap filter.
 
     Attributes:
         candidate: The underlying ranked candidate.

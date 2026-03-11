@@ -703,7 +703,7 @@ class TestLoadBatchResultFromDisk:
 
     The method reads data/batch_results.json (relative to cwd), checks whether
     the scan timestamp is less than 18 hours old, and if so populates
-    self._last_batch_result so that the 9:25 AM gap filter has candidates
+    self._last_batch_result so that the 9:30 AM gap filter has candidates
     to work with (even after a restart).
 
     We use monkeypatch.chdir(tmp_path) so the hardcoded relative path
@@ -980,7 +980,6 @@ class TestSchedulerDeduplication:
             "daily_bar_refresh": None,
             "daily_reset": None,
             "gap_filter": None,
-            "moo": None,
             "confirmation": None,
             "entry_close": None,
             "nightly_scan": None,

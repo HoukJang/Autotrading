@@ -151,8 +151,8 @@ class TestScannerToGapFilter:
         assert normal_results[0].passed_filter is True
 
     @pytest.mark.asyncio
-    async def test_gap_filter_keeps_all_when_no_quotes(self):
-        """When fetcher returns no data, all candidates should pass filter."""
+    async def test_gap_filter_rejects_all_when_no_quotes(self):
+        """When fetcher returns no data after market open, all candidates should be rejected."""
         ranker = SignalRanker(top_n=12)
         scan_results = [
             _make_scan_result(f"SYM{i}", signal_strength=0.9 - i * 0.05)
@@ -167,7 +167,8 @@ class TestScannerToGapFilter:
         filtered = await gap_filter.filter(candidates)
 
         assert len(filtered) == 5
-        assert all(fc.passed_filter for fc in filtered)
+        assert all(not fc.passed_filter for fc in filtered)
+        assert all(fc.filter_reason == "no_quote_data" for fc in filtered)
 
     @pytest.mark.asyncio
     async def test_full_pipeline_produces_entry_candidates(self):

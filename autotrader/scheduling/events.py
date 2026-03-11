@@ -80,21 +80,14 @@ TRADING_EVENTS: dict[str, EventDefinition] = {
     "gap_filter": EventDefinition(
         name="gap_filter",
         scheduled_hour=9,
-        scheduled_minute=25,
+        scheduled_minute=30,
         catch_up_policy=CatchUpPolicy.CONDITIONAL,
         catch_up_deadline_hour=9,
-        catch_up_deadline_minute=35,
+        catch_up_deadline_minute=40,
         depends_on=["daily_bar_refresh", "daily_reset"],
     ),
-    "moo": EventDefinition(
-        name="moo",
-        scheduled_hour=9,
-        scheduled_minute=30,
-        catch_up_policy=CatchUpPolicy.WINDOW,
-        catch_up_deadline_hour=9,
-        catch_up_deadline_minute=45,
-        depends_on=["daily_reset", "gap_filter"],
-    ),
+    # NOTE: "moo" was merged into gap_filter (Panel approved).
+    # gap_filter now chains on_moo() internally at 9:30 AM ET.
     "confirmation": EventDefinition(
         name="confirmation",
         scheduled_hour=9,
@@ -102,7 +95,7 @@ TRADING_EVENTS: dict[str, EventDefinition] = {
         catch_up_policy=CatchUpPolicy.WINDOW,
         catch_up_deadline_hour=10,
         catch_up_deadline_minute=0,
-        depends_on=["moo"],
+        depends_on=["gap_filter"],
     ),
     "entry_close": EventDefinition(
         name="entry_close",

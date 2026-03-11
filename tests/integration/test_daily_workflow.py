@@ -4,15 +4,14 @@ Validates the ENTIRE daily event lifecycle to prevent state-corruption
 bugs caused by incorrect event ordering.  The fatal bug this suite was
 written to catch:
 
-    09:25 ET - gap_filter loads candidates into EntryManager
+    09:30 ET - gap_filter loads candidates into EntryManager
     09:29 ET - daily_reset calls EntryManager.on_new_trading_day() -> WIPES candidates
     09:30 ET - MOO window: EntryManager is empty -> no trades happen
 
 The correct sequence is:
     09:00  daily_bar_refresh
     09:20  daily_reset (clears daily counters)
-    09:25  gap_filter  (loads candidates into EntryManager)
-    09:30  MOO         (executes candidates)
+    09:30  gap_filter + MOO (filter then execute, merged step)
     09:45  confirmation
     10:00  entry_close
     20:00  nightly_scan
@@ -211,24 +210,22 @@ class TestEventOrdering:
         gap_ev = TRADING_EVENTS["gap_filter"]
         assert "daily_bar_refresh" in gap_ev.depends_on
 
-    def test_moo_depends_on_both_reset_and_gap_filter(self):
-        """MOO must run after both daily_reset and gap_filter."""
-        moo_ev = TRADING_EVENTS["moo"]
-        assert "daily_reset" in moo_ev.depends_on
-        assert "gap_filter" in moo_ev.depends_on
+    def test_confirmation_depends_on_gap_filter(self):
+        """Confirmation must run after gap_filter (which includes MOO)."""
+        confirm_ev = TRADING_EVENTS["confirmation"]
+        assert "gap_filter" in confirm_ev.depends_on
 
     def test_full_morning_chronological_order(self):
         """Verify complete morning event schedule is in chronological order.
 
         Expected: daily_bar_refresh (9:00) -> daily_reset (9:20)
-                  -> gap_filter (9:25) -> moo (9:30)
-                  -> confirmation (9:45) -> entry_close (10:00)
+                  -> gap_filter+MOO (9:30) -> confirmation (9:45)
+                  -> entry_close (10:00)
         """
         morning_order = [
             "daily_bar_refresh",
             "daily_reset",
             "gap_filter",
-            "moo",
             "confirmation",
             "entry_close",
         ]
@@ -244,46 +241,44 @@ class TestEventOrdering:
                 f"{morning_order[i+1]} (:{times[i+1] % 60:02d})"
             )
 
-    def test_resolver_preserves_correct_order_at_930(self):
-        """At 9:30 catch-up, the resolver must order events correctly.
+    def test_resolver_preserves_correct_order_at_935(self):
+        """At 9:35 catch-up, the resolver must order events correctly.
 
-        Critical: daily_reset BEFORE gap_filter BEFORE moo.
+        Critical: daily_reset BEFORE gap_filter (which includes MOO).
         """
         from zoneinfo import ZoneInfo
         _ET = ZoneInfo("America/New_York")
 
         resolver = StartupCatchUpResolver()
-        now_et = datetime(2026, 3, 2, 9, 30, tzinfo=_ET)
+        now_et = datetime(2026, 3, 2, 9, 35, tzinfo=_ET)
         result = resolver.resolve(now_et, today_is_market_day=True)
 
         idx = {name: i for i, name in enumerate(result)}
         assert "daily_bar_refresh" in idx
         assert "daily_reset" in idx
         assert "gap_filter" in idx
-        assert "moo" in idx
 
         assert idx["daily_bar_refresh"] < idx["daily_reset"]
         assert idx["daily_reset"] < idx["gap_filter"]
-        assert idx["gap_filter"] < idx["moo"]
 
     def test_no_event_destroys_state_needed_by_later_event(self):
         """Validate that the event DAG prevents state-destroying ordering.
 
         daily_reset (which clears EntryManager) must always precede
-        gap_filter (which loads EntryManager).
+        gap_filter (which loads EntryManager and executes MOO).
         """
         reset_ev = TRADING_EVENTS["daily_reset"]
         gap_ev = TRADING_EVENTS["gap_filter"]
-        moo_ev = TRADING_EVENTS["moo"]
 
-        # daily_reset at 9:20, gap_filter at 9:25
+        # daily_reset at 9:20, gap_filter at 9:30
         assert reset_ev.scheduled_minute < gap_ev.scheduled_minute
 
         # gap_filter depends on daily_reset -- enforced in DAG
         assert "daily_reset" in gap_ev.depends_on
 
-        # moo depends on gap_filter -- candidates must be loaded
-        assert "gap_filter" in moo_ev.depends_on
+        # confirmation depends on gap_filter (which now includes MOO)
+        confirm_ev = TRADING_EVENTS["confirmation"]
+        assert "gap_filter" in confirm_ev.depends_on
 
 
 # =====================================================================
@@ -490,7 +485,7 @@ class TestEndToEndEntryFlow:
         # 09:20 - daily_reset
         em.on_new_trading_day(TRADE_DATE)
 
-        # 09:25 - gap_filter converts and loads candidates
+        # 09:30 - gap_filter converts and loads candidates (market open)
         entry_candidates = [_batch_to_entry_candidate(bc) for bc in batch.candidates]
         em.load_candidates(entry_candidates)
 
@@ -678,13 +673,13 @@ class TestResetSafety:
 class TestGapFilterTiming:
     """Verify gap_filter only catches up within the pre-market window."""
 
-    def test_gap_filter_window_is_925_to_935(self):
-        """gap_filter's catch-up window is 09:25-09:35 ET."""
+    def test_gap_filter_window_is_930_to_940(self):
+        """gap_filter's catch-up window is 09:30-09:40 ET (market open)."""
         ev = TRADING_EVENTS["gap_filter"]
         assert ev.scheduled_hour == 9
-        assert ev.scheduled_minute == 25
+        assert ev.scheduled_minute == 30
         assert ev.catch_up_deadline_hour == 9
-        assert ev.catch_up_deadline_minute == 35
+        assert ev.catch_up_deadline_minute == 40
 
     def test_gap_filter_not_caught_up_at_evening(self):
         """gap_filter must NOT run during evening hours."""
@@ -717,25 +712,25 @@ class TestGapFilterTiming:
             )
 
     def test_gap_filter_caught_up_within_window(self):
-        """gap_filter IS caught up at 09:30 (within 09:25-09:35 window)."""
-        from zoneinfo import ZoneInfo
-        _ET = ZoneInfo("America/New_York")
-
-        resolver = StartupCatchUpResolver()
-        result = resolver.resolve(
-            datetime(2026, 3, 2, 9, 30, tzinfo=_ET),
-            today_is_market_day=True,
-        )
-        assert "gap_filter" in result
-
-    def test_gap_filter_excluded_at_deadline_boundary(self):
-        """gap_filter is excluded at exactly 09:35 (strict less-than)."""
+        """gap_filter IS caught up at 09:35 (within 09:31-09:40 window)."""
         from zoneinfo import ZoneInfo
         _ET = ZoneInfo("America/New_York")
 
         resolver = StartupCatchUpResolver()
         result = resolver.resolve(
             datetime(2026, 3, 2, 9, 35, tzinfo=_ET),
+            today_is_market_day=True,
+        )
+        assert "gap_filter" in result
+
+    def test_gap_filter_excluded_at_deadline_boundary(self):
+        """gap_filter is excluded at exactly 09:40 (strict less-than)."""
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+
+        resolver = StartupCatchUpResolver()
+        result = resolver.resolve(
+            datetime(2026, 3, 2, 9, 40, tzinfo=_ET),
             today_is_market_day=True,
         )
         assert "gap_filter" not in result
@@ -763,14 +758,14 @@ class TestCatchUpSequence:
         result = resolver.resolve(self._et(7, 0), today_is_market_day=True)
         assert result == ["nightly_scan"]
 
-    def test_startup_at_0926_includes_reset_before_gap_filter(self, resolver):
-        """Startup at 09:26: daily_reset must precede gap_filter in catch-up.
+    def test_startup_at_0932_includes_reset_before_gap_filter(self, resolver):
+        """Startup at 09:32: daily_reset must precede gap_filter in catch-up.
 
-        This is the critical test: at 9:26, both daily_reset (9:20) and
-        gap_filter (9:25) have been missed.  The catch-up must run
+        This is the critical test: at 9:32, both daily_reset (9:20) and
+        gap_filter (9:30) have been missed.  The catch-up must run
         daily_reset first so gap_filter loads into a clean state.
         """
-        result = resolver.resolve(self._et(9, 26), today_is_market_day=True)
+        result = resolver.resolve(self._et(9, 32), today_is_market_day=True)
 
         # Both should be caught up
         assert "daily_reset" in result
@@ -783,25 +778,23 @@ class TestCatchUpSequence:
             f"gap_filter (idx={idx['gap_filter']}) in catch-up sequence"
         )
 
-    def test_startup_at_0931_full_morning_catchup(self, resolver):
-        """Startup at 09:31: full morning sequence including MOO."""
-        result = resolver.resolve(self._et(9, 31), today_is_market_day=True)
+    def test_startup_at_0932_full_morning_catchup(self, resolver):
+        """Startup at 09:32: full morning sequence including gap_filter+MOO."""
+        result = resolver.resolve(self._et(9, 32), today_is_market_day=True)
 
-        expected = {"daily_bar_refresh", "daily_reset", "gap_filter", "moo"}
+        expected = {"daily_bar_refresh", "daily_reset", "gap_filter"}
         assert set(result) == expected
 
         idx = {name: i for i, name in enumerate(result)}
         # Verify strict ordering
         assert idx["daily_bar_refresh"] < idx["daily_reset"]
         assert idx["daily_reset"] < idx["gap_filter"]
-        assert idx["gap_filter"] < idx["moo"]
 
     def test_startup_at_1100_skips_time_sensitive_events(self, resolver):
-        """Startup at 11:00: gap_filter and moo are past their windows."""
+        """Startup at 11:00: gap_filter is past its window."""
         result = resolver.resolve(self._et(11, 0), today_is_market_day=True)
 
-        assert "gap_filter" not in result  # past 09:35 deadline
-        assert "moo" not in result  # past 09:45 deadline
+        assert "gap_filter" not in result  # past 09:40 deadline
         assert "confirmation" not in result  # past 10:00 deadline
         assert "daily_bar_refresh" in result  # ALWAYS policy
         assert "daily_reset" in result  # ALWAYS policy
@@ -867,8 +860,8 @@ class TestAutoTraderEventHandlers:
     """Test AutoTrader's event handlers in the correct sequence."""
 
     @pytest.mark.asyncio
-    async def test_autotrader_gap_filter_loads_entry_manager(self):
-        """AutoTrader._on_gap_filter converts batch candidates and loads EntryManager."""
+    async def test_autotrader_gap_filter_loads_and_executes_moo(self):
+        """AutoTrader._on_gap_filter converts candidates and executes MOO (merged step)."""
         app = _make_autotrader_app()
 
         # Inject mocked entry manager
@@ -880,12 +873,13 @@ class TestAutoTraderEventHandlers:
 
         await app._on_gap_filter()
 
-        # Verify candidates were loaded
-        assert len(app._entry_manager._group_a) == 2
+        # Verify candidates were loaded AND executed (merged step)
+        # _group_a is empty because MOO consumed the candidates
+        assert app._entry_manager._order_manager.submit_entry.call_count == 2
 
     @pytest.mark.asyncio
     async def test_autotrader_reset_then_gap_filter_preserves_candidates(self):
-        """Running _on_daily_reset then _on_gap_filter preserves candidates."""
+        """Running _on_daily_reset then _on_gap_filter: reset first, then load+execute."""
         app = _make_autotrader_app()
 
         # Inject dependencies
@@ -898,15 +892,15 @@ class TestAutoTraderEventHandlers:
         await app._on_daily_reset(TRADE_DATE)
         await app._on_gap_filter()
 
-        # Candidates should be present after the sequence
-        assert len(app._entry_manager._group_a) == 1
-        assert app._entry_manager._group_a[0].signal.symbol == "AAPL"
+        # MOO should have executed the single candidate
+        assert app._entry_manager._order_manager.submit_entry.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_autotrader_wrong_order_would_lose_candidates(self):
-        """Demonstrate the bug: gap_filter -> daily_reset would lose candidates.
+    async def test_autotrader_wrong_order_would_corrupt_state(self):
+        """Demonstrate the bug: gap_filter -> daily_reset would corrupt daily counters.
 
-        This test proves that the ordering fix is necessary.
+        With merged gap_filter+moo, orders get submitted, but then daily_reset
+        wipes counters, causing incorrect state for confirmation/entry_close.
         """
         app = _make_autotrader_app()
 
@@ -915,12 +909,14 @@ class TestAutoTraderEventHandlers:
         app._last_batch_result = _make_batch_result(["AAPL"])
         app._gdr_manager = None
 
-        # WRONG order: gap_filter first, then reset
+        # WRONG order: gap_filter+moo first (submits orders), then reset
         await app._on_gap_filter()
-        assert len(app._entry_manager._group_a) == 1  # loaded
+        # MOO ran -- order submitted
+        assert app._entry_manager._order_manager.submit_entry.call_count == 1
 
+        # Reset AFTER gap_filter+moo -- wipes daily counters (the bug)
         await app._on_daily_reset(TRADE_DATE)
-        assert len(app._entry_manager._group_a) == 0  # WIPED -- the bug!
+        assert app._entry_manager._daily_entry_count == 0  # Counter wiped!
 
     @pytest.mark.asyncio
     async def test_gap_filter_with_no_batch_result_is_safe(self):
@@ -984,14 +980,6 @@ class TestScheduleConstantsMatchEvents:
         ev = TRADING_EVENTS["gap_filter"]
         assert _GAP_FILTER_HOUR == ev.scheduled_hour
         assert _GAP_FILTER_MINUTE == ev.scheduled_minute
-
-    def test_moo_time_matches(self):
-        """main.py _MOO_HOUR/MINUTE must match events.py moo."""
-        from autotrader.main import _MOO_HOUR, _MOO_MINUTE
-
-        ev = TRADING_EVENTS["moo"]
-        assert _MOO_HOUR == ev.scheduled_hour
-        assert _MOO_MINUTE == ev.scheduled_minute
 
     def test_daily_bar_refresh_time_matches(self):
         """main.py _DAILY_BAR_REFRESH times must match events.py."""
