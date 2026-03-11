@@ -90,6 +90,18 @@ class GDRManager:
         self._entries_today[strategy] = self._entries_today.get(strategy, 0) + 1
         self._total_entries_today += 1
 
+    def reverse_entry(self, strategy: str) -> None:
+        """Reverse a previously recorded entry (e.g. limit order cancelled).
+
+        Decrements the per-strategy and total daily entry counts.
+        Safe to call even if counts are already zero.
+        """
+        current = self._entries_today.get(strategy, 0)
+        if current > 0:
+            self._entries_today[strategy] = current - 1
+        if self._total_entries_today > 0:
+            self._total_entries_today -= 1
+
     def reset_daily_entries(self) -> None:
         """Reset daily entry counters (call at start of each trading day)."""
         for s in self._entries_today:

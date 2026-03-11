@@ -14,6 +14,7 @@ class PaperBroker(BrokerAdapter):
         self._positions: dict[str, _PaperPosition] = {}
         self._short_positions: dict[str, _PaperPosition] = {}
         self._pending_orders: dict[str, Order] = {}
+        self._filled_orders: dict[str, OrderResult] = {}
         self._prices: dict[str, float] = {}
         self.connected = False
 
@@ -39,6 +40,12 @@ class PaperBroker(BrokerAdapter):
         )
 
     def _execute_market(self, order_id: str, order: Order) -> OrderResult:
+        result = self._execute_market_inner(order_id, order)
+        if result.status == "filled":
+            self._filled_orders[order_id] = result
+        return result
+
+    def _execute_market_inner(self, order_id: str, order: Order) -> OrderResult:
         price = self._prices.get(order.symbol, 0.0)
         cost = price * order.quantity
 
@@ -125,20 +132,31 @@ class PaperBroker(BrokerAdapter):
     async def cancel_all_orders(self) -> int:
         """Cancel all pending orders. Returns count of cancelled orders."""
         count = len(self._pending_orders)
+        for order_id, order in self._pending_orders.items():
+            self._filled_orders[order_id] = OrderResult(
+                order_id=order_id, symbol=order.symbol, status="cancelled",
+            )
         self._pending_orders.clear()
         return count
 
     async def cancel_order(self, order_id: str) -> bool:
-        return self._pending_orders.pop(order_id, None) is not None
+        order = self._pending_orders.pop(order_id, None)
+        if order is not None:
+            self._filled_orders[order_id] = OrderResult(
+                order_id=order_id, symbol=order.symbol, status="cancelled",
+            )
+            return True
+        return False
 
     async def get_order_status(self, order_id: str) -> OrderResult | None:
-        """Paper broker: orders are always immediately filled or pending."""
+        """Paper broker: check pending, then filled orders."""
         if order_id in self._pending_orders:
             order = self._pending_orders[order_id]
             return OrderResult(
                 order_id=order_id, symbol=order.symbol, status="accepted",
             )
-        # Order not in pending -- was either filled or cancelled; return None
+        if order_id in self._filled_orders:
+            return self._filled_orders[order_id]
         return None
 
     async def get_positions(self) -> list[Position]:
