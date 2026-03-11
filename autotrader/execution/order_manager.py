@@ -417,11 +417,26 @@ class OrderManager:
     # ------------------------------------------------------------------
 
     async def _cancel_sl_for_symbol(self, symbol: str) -> None:
-        """Cancel any live stop-loss order tracked for this symbol."""
+        """Cancel any live stop-loss order tracked for this symbol.
+
+        Falls back to OrderLedger if _active_orders was lost (e.g., after restart).
+        """
+        found = False
         for active in list(self._active_orders.values()):
             if active.symbol == symbol and active.sl_order_id:
                 await self.cancel_order(active.sl_order_id)
                 active.sl_order_id = None
+                found = True
+        # Fallback: check ledger for pending SL orders not in _active_orders
+        if not found and self._ledger:
+            pending_sls = self._ledger.get_pending_stop_losses()
+            sl_record = pending_sls.get(symbol)
+            if sl_record:
+                logger.info(
+                    "SL cancel fallback: found pending SL %s for %s in ledger",
+                    sl_record.order_id, symbol,
+                )
+                await self.cancel_order(sl_record.order_id)
 
     def _evict_symbol(self, symbol: str) -> None:
         """Remove all active order entries for a symbol after exit."""

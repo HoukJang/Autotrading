@@ -374,7 +374,19 @@ class AutoTrader:
             cancelled = await self._broker.cancel_all_orders()
             logger.info("Startup: cancelled %d pending orders", cancelled)
         except Exception as e:
-            logger.warning("Startup: failed to cancel pending orders: %s", e)
+            logger.warning("Startup: failed to cancel_all_orders: %s -- trying individual SL cancels", e)
+            # Fallback: cancel SL orders individually using ledger
+            if hasattr(self, '_order_ledger') and self._order_ledger:
+                try:
+                    pending_sls = self._order_ledger.get_pending_stop_losses()
+                    for sym, sl_rec in pending_sls.items():
+                        try:
+                            await self._broker.cancel_order(sl_rec.order_id)
+                            logger.info("Startup fallback: cancelled SL %s for %s", sl_rec.order_id, sym)
+                        except Exception:
+                            logger.warning("Startup fallback: failed to cancel SL %s for %s", sl_rec.order_id, sym)
+                except Exception:
+                    logger.exception("Startup fallback: failed to query pending SLs from ledger")
 
         account = await self._broker.get_account()
         logger.info("Account equity: %.2f", account.equity)
@@ -502,6 +514,7 @@ class AutoTrader:
 
         # Cancel all background tasks
         for task_attr in (
+            "_pending_fill_task",
             "_reconciliation_task",
             "_daily_regime_task",
             "_batch_scheduler_task",
@@ -1061,10 +1074,31 @@ class AutoTrader:
                     # Check if this position is already tracked
                     existing = self._open_position_tracker.get_position(record.symbol)
                     if existing is None:
+                        # Register directly using ledger metadata instead of
+                        # relying on broker reconciliation (preserves strategy info)
+                        from autotrader.trading.types import HeldPosition
+                        meta = record.metadata or {}
+                        ghost_held = HeldPosition(
+                            symbol=record.symbol,
+                            strategy=record.strategy or "unknown",
+                            direction=record.direction or "long",
+                            entry_price=broker_status.filled_price,
+                            entry_atr=record.entry_atr or 1.0,
+                            entry_date_et=datetime.now(timezone.utc).astimezone(_ET).date(),
+                            qty=broker_status.filled_qty,
+                            highest_price=broker_status.filled_price,
+                            lowest_price=broker_status.filled_price,
+                            entry_adx=float(meta.get("entry_adx", 0.0)),
+                        )
+                        self._position_book.add(ghost_held)
+                        if self._position_monitor is not None:
+                            self._position_monitor.add_position(ghost_held)
+                        self._dump_open_positions()
                         logger.warning(
-                            "Ghost fill %s (%s) has no tracked position -- "
-                            "position will be picked up by broker reconciliation",
+                            "Ghost fill %s (%s) registered directly into PositionBook "
+                            "(strategy=%s, price=%.2f, qty=%.0f)",
                             record.order_id, record.symbol,
+                            ghost_held.strategy, ghost_held.entry_price, ghost_held.qty,
                         )
                 elif broker_status.status in _TERMINAL:
                     from autotrader.execution.order_ledger import OrderState
@@ -1112,6 +1146,51 @@ class AutoTrader:
                         record.order_id, broker_status.filled_qty,
                         broker_status.filled_price,
                     )
+                    # Remove position and record PnL for offline SL fill
+                    held = self._position_book.remove(symbol)
+                    if held:
+                        pnl = self._order_manager.calculate_pnl(
+                            held.entry_price, broker_status.filled_price,
+                            broker_status.filled_qty, held.direction,
+                        )
+                        self._risk_manager.record_pnl(pnl)
+                        if self._gdr_manager:
+                            self._gdr_manager.record_trade_pnl(held.strategy, pnl)
+                        if self._trade_logger:
+                            try:
+                                rec = LiveTradeRecord(
+                                    timestamp=datetime.now(timezone.utc).isoformat(),
+                                    symbol=symbol,
+                                    strategy=held.strategy,
+                                    direction=held.direction,
+                                    side="exit",
+                                    quantity=broker_status.filled_qty,
+                                    price=broker_status.filled_price,
+                                    pnl=pnl,
+                                    regime=self._current_regime.value,
+                                    equity_after=0.0,
+                                    metadata={"exit_reason": "sl_hit_offline"},
+                                    exit_reason="sl_hit_offline",
+                                    mfe=held.mfe,
+                                    mae=held.mae,
+                                    bars_held=held.bar_count,
+                                )
+                                self._trade_logger.log_trade(rec)
+                            except Exception:
+                                logger.exception("Failed to log offline SL exit for %s", symbol)
+                        # Unsubscribe from bar stream for closed position
+                        try:
+                            await self._broker.remove_bar_subscription([symbol])
+                        except Exception:
+                            logger.debug("Failed to unsubscribe %s after offline SL fill", symbol)
+                        self._dump_open_positions()
+                        # Persist state after offline SL processing
+                        if hasattr(self, "_runtime_state"):
+                            self._runtime_state.save(self._get_state_components())
+                        logger.info(
+                            "Offline SL fill processed: %s, pnl=%.2f, strategy=%s",
+                            symbol, pnl, held.strategy,
+                        )
                 elif broker_status.status in _TERMINAL:
                     from autotrader.execution.order_ledger import OrderState
                     _state_map = {
@@ -2554,6 +2633,8 @@ class _PaperOrderManager(OrderManager):
         # Bypass OrderManager.__init__ which expects AlpacaAdapter
         self._broker_adapter = broker
         self._active_orders: dict = {}
+        self._ledger: OrderLedger | None = None
+        self._adapter = broker  # alias for parent class compatibility
 
     async def submit_entry(self, symbol, side, qty, order_type="market", limit_price=None, time_in_force="day",
                            *, strategy="unknown", direction="long", entry_atr=0.0, metadata=None):
