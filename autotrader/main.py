@@ -446,6 +446,36 @@ class AutoTrader:
                     "Merged PositionBook snapshot for %d symbols",
                     len(pb_snapshot),
                 )
+
+            # Supplement MFE/MAE from open_positions.json (updated every 30s)
+            # which may be fresher than runtime_state.json (updated every 5 min).
+            # Use the better value (higher highest, lower lowest) from either source.
+            import json as _json
+            try:
+                _snap_path = Path("data/open_positions.json")
+                if _snap_path.exists():
+                    _snap_data = _json.loads(_snap_path.read_text(encoding="utf-8"))
+                    _snap_map = {r["symbol"]: r for r in _snap_data if isinstance(r, dict)}
+                    for sym, snap_rec in _snap_map.items():
+                        pos = self._position_book.get(sym)
+                        if pos is None:
+                            continue
+                        snap_highest = snap_rec.get("highest_price", 0.0)
+                        snap_lowest = snap_rec.get("lowest_price", float("inf"))
+                        if snap_highest > pos.highest_price:
+                            pos.highest_price = snap_highest
+                            logger.info(
+                                "MFE supplemented from open_positions.json: %s highest=%.2f",
+                                sym, snap_highest,
+                            )
+                        if snap_lowest < pos.lowest_price:
+                            pos.lowest_price = snap_lowest
+                            logger.info(
+                                "MAE supplemented from open_positions.json: %s lowest=%.2f",
+                                sym, snap_lowest,
+                            )
+            except Exception:
+                logger.warning("Could not supplement MFE/MAE from open_positions.json")
         else:
             # First run or state file missing -- bootstrap from broker
             logger.info("No RuntimeState found, bootstrapping from broker...")
@@ -471,6 +501,16 @@ class AutoTrader:
 
         # Reconcile any pending orders from ledger (ghost fill detection)
         await self._reconcile_pending_orders()
+
+        # Save runtime_state immediately after full position load + merge
+        # so position_book snapshot is populated (prevents {} on next restart)
+        if self._position_book and len(self._position_book) > 0:
+            self._runtime_state.save(self._get_state_components())
+            self._dump_open_positions(allow_empty=False)
+            logger.info(
+                "Post-startup RuntimeState + open_positions saved (%d positions)",
+                len(self._position_book),
+            )
 
         # Start daily regime refresh scheduler
         self._daily_regime_task = asyncio.create_task(self._daily_regime_scheduler())
@@ -508,6 +548,12 @@ class AutoTrader:
         self._running = False
         self._scheduler_running = False
 
+        # Dump open positions BEFORE stopping components so MFE/MAE is preserved
+        try:
+            self._dump_open_positions(allow_empty=False)
+        except Exception:
+            logger.exception("Failed to dump open positions during shutdown")
+
         # Stop PositionMonitor
         if self._position_monitor is not None:
             await self._position_monitor.stop()
@@ -530,9 +576,19 @@ class AutoTrader:
                     pass
                 setattr(self, task_attr, None)
 
-        # Save state on graceful shutdown
+        # Save state on graceful shutdown -- guard against saving empty position_book
         if hasattr(self, "_runtime_state"):
-            self._runtime_state.save(self._get_state_components())
+            if hasattr(self, "_position_book") and len(self._position_book) == 0:
+                logger.warning(
+                    "PositionBook is empty at shutdown but broker may have positions; "
+                    "skipping position_book in RuntimeState save to prevent data loss"
+                )
+                # Save other components but exclude position_book
+                components = self._get_state_components()
+                components.pop("position_book", None)
+                self._runtime_state.save(components)
+            else:
+                self._runtime_state.save(self._get_state_components())
             logger.info("RuntimeState saved on shutdown")
 
         await self._broker.disconnect()
@@ -626,15 +682,39 @@ class AutoTrader:
                 source, len(untracked), sorted(untracked),
             )
 
-        # --- Tracker-only positions: warn but do not auto-remove ---
+        # --- Tracker-only positions: auto-remove if broker confirms absent ---
         orphaned = tracked_symbols - broker_symbols
         if orphaned:
-            logger.warning(
-                "RECONCILIATION[%s]: %d internal position(s) NOT at broker: %s. "
-                "These may indicate a missed fill or API delay. "
-                "NOT auto-removing -- manual review recommended.",
-                source, len(orphaned), sorted(orphaned),
-            )
+            for sym in sorted(orphaned):
+                logger.warning(
+                    "RECONCILIATION[%s]: %s in tracker but NOT at broker -- removing phantom position",
+                    source, sym,
+                )
+                held = self._position_book.get(sym)
+                if held is not None:
+                    # Write synthetic exit record so trade log is complete
+                    if self._trade_logger:
+                        try:
+                            recon_acct = await self._broker.get_account()
+                            record = LiveTradeRecord(
+                                timestamp=datetime.now(timezone.utc).isoformat(),
+                                symbol=sym,
+                                strategy=held.strategy,
+                                direction=held.direction,
+                                side="exit",
+                                quantity=held.qty,
+                                price=held.entry_price,  # best approximation
+                                pnl=0.0,  # unknown; broker already settled
+                                regime=self._current_regime.value,
+                                equity_after=recon_acct.equity,
+                                metadata={"exit_reason": "crash_recovery_recon"},
+                            )
+                            self._trade_logger.log_trade(record)
+                        except Exception:
+                            logger.exception("Failed to write recon exit for %s", sym)
+                    self._position_book.remove(sym)
+                    if self._position_monitor is not None:
+                        self._position_monitor.remove_position(sym)
 
         # --- Cross-system consistency check ---
         # With PositionBook as SSOT, tracker/held/monitor/strategy_map are
@@ -849,7 +929,9 @@ class AutoTrader:
 
         if not positions:
             logger.info("No existing positions at broker")
-            self._dump_open_positions()  # Clear stale file
+            # Do NOT overwrite open_positions.json here -- it may contain valid
+            # MFE/MAE snapshots from a previous session that are needed if broker
+            # temporarily returns empty (e.g., API hiccup during pre-market).
             return
 
         logger.info("Loading %d existing open positions into monitor", len(positions))
@@ -2382,11 +2464,17 @@ class AutoTrader:
         # Dump live position details (MFE/MAE, qty, etc.) for dashboard
         self._dump_open_positions()
 
-    def _dump_open_positions(self) -> None:
+    def _dump_open_positions(self, *, allow_empty: bool = True) -> None:
         """Write current open position details to data/open_positions.json.
 
         The dashboard reads this file to show real-time MFE/MAE and
         position sizes for held positions.
+
+        Args:
+            allow_empty: If False, skip writing when records list is empty
+                but the file already has data (protects against startup/shutdown
+                overwrites). Normal exit paths should use True (default) so
+                the dashboard correctly shows no positions after last exit.
         """
         import json as _json
 
@@ -2431,6 +2519,20 @@ class AutoTrader:
             })
 
         path = Path("data/open_positions.json")
+
+        # Guard: when allow_empty=False, do not overwrite existing snapshot
+        # with empty list. Protects MFE/MAE data during startup/shutdown.
+        if not allow_empty and not records and path.exists():
+            try:
+                existing = path.read_text(encoding="utf-8").strip()
+                if existing and existing != "[]":
+                    logger.debug(
+                        "Skipping open_positions dump: tracker empty but file has data"
+                    )
+                    return
+            except OSError:
+                pass
+
         tmp = path.with_suffix(".tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -2729,13 +2831,61 @@ def main() -> None:
     gap_filter = GapFilter(fetcher, gap_threshold=0.03)
     app._gap_filter = gap_filter
 
+    import signal as _signal
+    import atexit
+
+    _shutdown_event = asyncio.Event()
+
     async def run() -> None:
+        loop = asyncio.get_running_loop()
+
+        def _request_shutdown(sig_name: str = "atexit") -> None:
+            logger.info("Shutdown requested via %s", sig_name)
+            try:
+                loop.call_soon_threadsafe(_shutdown_event.set)
+            except RuntimeError:
+                # Loop already closed
+                pass
+
+        # Register signal handlers for graceful shutdown (Windows + Unix)
+        for sig_name in ("SIGINT", "SIGTERM"):
+            sig = getattr(_signal, sig_name, None)
+            if sig is not None:
+                try:
+                    loop.add_signal_handler(sig, _request_shutdown, sig_name)
+                except NotImplementedError:
+                    # Windows: add_signal_handler not supported, use signal.signal
+                    _signal.signal(sig, lambda s, f, name=sig_name: _request_shutdown(name))
+
+        # atexit as last-resort fallback (runs when interpreter exits)
+        atexit.register(lambda: logger.info("atexit handler fired"))
+
         await app.start()
+
+        # Periodic state save (every 5 minutes) so position_book survives crashes
+        async def _periodic_state_save() -> None:
+            while not _shutdown_event.is_set():
+                await asyncio.sleep(300)  # 5 minutes
+                try:
+                    if hasattr(app, "_runtime_state") and hasattr(app, "_position_book"):
+                        app._runtime_state.save(app._get_state_components())
+                        app._dump_open_positions(allow_empty=False)
+                        logger.debug("Periodic state save complete")
+                except Exception:
+                    logger.exception("Periodic state save failed")
+
+        periodic_task = asyncio.create_task(_periodic_state_save())
+
         try:
-            await asyncio.Event().wait()
+            await _shutdown_event.wait()
         except (KeyboardInterrupt, asyncio.CancelledError):
             pass
         finally:
+            periodic_task.cancel()
+            try:
+                await periodic_task
+            except (asyncio.CancelledError, Exception):
+                pass
             await app.stop()
 
     asyncio.run(run())
