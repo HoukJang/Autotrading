@@ -66,7 +66,8 @@ from autotrader.risk.manager import RiskManager
 from autotrader.rotation.event_driven import EventDrivenRotation
 from autotrader.rotation.manager import RotationManager
 from autotrader.scheduling import StartupCatchUpResolver
-from autotrader.scheduling.state import SchedulerState
+from autotrader.scheduling.state import EventRecord, SchedulerState
+from autotrader.data.state_store import StateStore
 from autotrader.state.runtime_state import RuntimeState, bootstrap_from_broker
 from autotrader.strategy.engine import StrategyEngine
 from autotrader.strategy.rsi_mean_reversion import RsiMeanReversion
@@ -248,7 +249,9 @@ class AutoTrader:
         )
 
         # --- Position tracking (single source of truth) ---
+        self._state_store = StateStore(db_path=settings.data.sqlite_path)
         self._position_book = PositionBook()
+        self._position_book.set_state_store(self._state_store)
         self._open_position_tracker = OpenPositionTracker(position_book=self._position_book)
 
         # Backward-compat properties: _held_positions and _position_strategy_map
@@ -312,6 +315,7 @@ class AutoTrader:
                 settings.performance.trade_log_path,
                 settings.performance.equity_snapshot_path,
             )
+            self._trade_logger.set_state_store(self._state_store)
         # --- Scheduler tasks ---
         self._running = False
         self._scheduler_running = False  # Guard against duplicate scheduler instances
@@ -447,35 +451,50 @@ class AutoTrader:
                     len(pb_snapshot),
                 )
 
-            # Supplement MFE/MAE from open_positions.json (updated every 30s)
-            # which may be fresher than runtime_state.json (updated every 5 min).
-            # Use the better value (higher highest, lower lowest) from either source.
+            # Supplement MFE/MAE from SQLite (updated every minute bar) and
+            # open_positions.json (updated every 30s) -- use the best value
+            # (higher highest, lower lowest) from all sources.
+            _supplement_sources: list[tuple[str, dict[str, dict]]] = []
+
+            # Source 1: SQLite (freshest, updated on every minute bar)
+            try:
+                _db_positions = self._state_store.load_positions()
+                if _db_positions:
+                    _supplement_sources.append(("SQLite", _db_positions))
+            except Exception:
+                logger.warning("Could not load positions from SQLite for MFE/MAE supplement")
+
+            # Source 2: open_positions.json (fallback)
             import json as _json
             try:
                 _snap_path = Path("data/open_positions.json")
                 if _snap_path.exists():
                     _snap_data = _json.loads(_snap_path.read_text(encoding="utf-8"))
                     _snap_map = {r["symbol"]: r for r in _snap_data if isinstance(r, dict)}
-                    for sym, snap_rec in _snap_map.items():
-                        pos = self._position_book.get(sym)
-                        if pos is None:
-                            continue
-                        snap_highest = snap_rec.get("highest_price", 0.0)
-                        snap_lowest = snap_rec.get("lowest_price", float("inf"))
-                        if snap_highest > pos.highest_price:
-                            pos.highest_price = snap_highest
-                            logger.info(
-                                "MFE supplemented from open_positions.json: %s highest=%.2f",
-                                sym, snap_highest,
-                            )
-                        if snap_lowest < pos.lowest_price:
-                            pos.lowest_price = snap_lowest
-                            logger.info(
-                                "MAE supplemented from open_positions.json: %s lowest=%.2f",
-                                sym, snap_lowest,
-                            )
+                    if _snap_map:
+                        _supplement_sources.append(("open_positions.json", _snap_map))
             except Exception:
-                logger.warning("Could not supplement MFE/MAE from open_positions.json")
+                logger.warning("Could not load open_positions.json for MFE/MAE supplement")
+
+            for _source_name, _source_map in _supplement_sources:
+                for sym, snap_rec in _source_map.items():
+                    pos = self._position_book.get(sym)
+                    if pos is None:
+                        continue
+                    snap_highest = snap_rec.get("highest_price", 0.0)
+                    snap_lowest = snap_rec.get("lowest_price", float("inf"))
+                    if snap_highest > pos.highest_price:
+                        pos.highest_price = snap_highest
+                        logger.info(
+                            "MFE supplemented from %s: %s highest=%.2f",
+                            _source_name, sym, snap_highest,
+                        )
+                    if snap_lowest < pos.lowest_price:
+                        pos.lowest_price = snap_lowest
+                        logger.info(
+                            "MAE supplemented from %s: %s lowest=%.2f",
+                            _source_name, sym, snap_lowest,
+                        )
         else:
             # First run or state file missing -- bootstrap from broker
             logger.info("No RuntimeState found, bootstrapping from broker...")
@@ -591,6 +610,13 @@ class AutoTrader:
                 self._runtime_state.save(self._get_state_components())
             logger.info("RuntimeState saved on shutdown")
 
+        # Close SQLite state store
+        if hasattr(self, '_state_store') and self._state_store:
+            try:
+                self._state_store.close()
+            except Exception:
+                logger.debug("Failed to close StateStore")
+
         await self._broker.disconnect()
         logger.info("AutoTrader v3 stopped")
 
@@ -605,6 +631,8 @@ class AutoTrader:
 
         # Initialise order ledger for persistent order tracking
         self._order_ledger = OrderLedger()
+        if hasattr(self, '_state_store') and self._state_store:
+            self._order_ledger.set_state_store(self._state_store)
         self._order_ledger.load()
 
         # OrderManager wraps the broker (expects AlpacaAdapter)
@@ -633,6 +661,8 @@ class AutoTrader:
 
         # RuntimeState persistence
         self._runtime_state = RuntimeState()
+        if hasattr(self, "_state_store") and self._state_store:
+            self._runtime_state.set_state_store(self._state_store)
 
         logger.info("V3 execution engine initialised")
 
@@ -649,6 +679,8 @@ class AutoTrader:
             components["exit_rules"] = self._exit_rule_engine
         if hasattr(self, "_position_book") and self._position_book is not None:
             components["position_book"] = self._position_book
+        if hasattr(self, "_scheduler_state") and self._scheduler_state is not None:
+            components["scheduler_state"] = self._scheduler_state
         return components
 
     async def _reconcile_positions(self, *, source: str = "startup") -> None:
@@ -896,15 +928,42 @@ class AutoTrader:
         import json as _json
 
         saved_positions: dict[str, dict] = {}
+
+        # Try SQLite first (updated every minute bar, most accurate)
+        try:
+            db_positions = self._state_store.load_positions()
+            if db_positions:
+                saved_positions.update(db_positions)
+                logger.info(
+                    "Loaded MFE/MAE snapshot for %d positions from SQLite",
+                    len(db_positions),
+                )
+        except Exception:
+            logger.warning("Could not load positions from SQLite, falling back to JSON")
+
+        # Supplement from JSON (may have data SQLite doesn't, use best values)
         try:
             snap_path = Path("data/open_positions.json")
             if snap_path.exists():
                 snap_data = _json.loads(snap_path.read_text(encoding="utf-8"))
                 for rec in snap_data:
-                    saved_positions[rec["symbol"]] = rec
+                    sym = rec["symbol"]
+                    if sym not in saved_positions:
+                        saved_positions[sym] = rec
+                    else:
+                        # Use the better MFE/MAE value from either source
+                        existing = saved_positions[sym]
+                        json_highest = rec.get("highest_price", 0.0)
+                        json_lowest = rec.get("lowest_price", float("inf"))
+                        db_highest = existing.get("highest_price", 0.0)
+                        db_lowest = existing.get("lowest_price", float("inf"))
+                        if json_highest > db_highest:
+                            existing["highest_price"] = json_highest
+                        if json_lowest < db_lowest:
+                            existing["lowest_price"] = json_lowest
                 logger.info(
-                    "Loaded MFE/MAE snapshot for %d positions from %s",
-                    len(saved_positions), snap_path,
+                    "Supplemented MFE/MAE snapshot from %s (%d entries)",
+                    snap_path, len(snap_data),
                 )
         except Exception:
             logger.warning("Could not load open_positions.json snapshot, MFE/MAE will reset")
@@ -1471,7 +1530,10 @@ class AutoTrader:
         """Internal implementation of the batch+intraday scheduler loop."""
         # --- Persistent state: know exactly what ran today ---
         self._state_path = Path("data/scheduler_state.json")
-        _state = SchedulerState.load(self._state_path)
+        _sched_store = self._state_store if hasattr(self, "_state_store") else None
+        _state = SchedulerState.load(self._state_path, store=_sched_store)
+        if _sched_store and not _state._store:
+            _state.set_state_store(_sched_store)
         _now_et = datetime.now(timezone.utc).astimezone(_ET)
         _today_str = _now_et.date().isoformat()
 
@@ -1479,12 +1541,34 @@ class AutoTrader:
             # Preserve nightly_scan if it targets today (run last evening)
             _old_nightly = _state.events.get("nightly_scan")
             _state = SchedulerState.fresh(_today_str)
+            if _sched_store:
+                _state.set_state_store(_sched_store)
             if _old_nightly and _old_nightly.target_date == _today_str:
                 _state.events["nightly_scan"] = _old_nightly
                 logger.info(
                     "Startup: preserved nightly_scan from previous day "
                     "(target_date=%s)", _old_nightly.target_date,
                 )
+
+        # Expose as instance attribute for RuntimeState periodic saves
+        self._scheduler_state = _state
+
+        # Supplementary restore: if scheduler_state.json was missing/corrupt
+        # but RuntimeState has a snapshot for the same date, merge events.
+        _rt_snapshots = self._runtime_state.load()
+        _sched_snap = _rt_snapshots.get("scheduler_state") if _rt_snapshots else None
+        if _sched_snap and _sched_snap.get("date") == _state.date:
+            for evt_name, evt_data in _sched_snap.get("events", {}).items():
+                if evt_name not in _state.events:
+                    _state.events[evt_name] = EventRecord(
+                        fired_at=evt_data.get("fired_at", ""),
+                        result=evt_data.get("result", "unknown"),
+                        target_date=evt_data.get("target_date", ""),
+                    )
+                    logger.info(
+                        "Restored scheduler event '%s' from RuntimeState snapshot",
+                        evt_name,
+                    )
 
         # Build legacy _fired dict from persistent state
         _fired: dict[str, date | None] = {
@@ -1539,6 +1623,8 @@ class AutoTrader:
             if _state.date != today_et.isoformat():
                 _old_nightly = _state.events.get("nightly_scan")
                 _state = SchedulerState.fresh(today_et.isoformat())
+                if _sched_store:
+                    _state.set_state_store(_sched_store)
                 if (
                     _old_nightly
                     and _old_nightly.target_date == today_et.isoformat()
@@ -1548,6 +1634,7 @@ class AutoTrader:
                         "Day rollover: preserved nightly_scan (target_date=%s)",
                         _old_nightly.target_date,
                     )
+                self._scheduler_state = _state
                 for k in _fired:
                     _fired[k] = None
                 # If nightly_scan was preserved, mark it in _fired too
@@ -1997,6 +2084,15 @@ class AutoTrader:
         self._open_position_tracker.update_prices(
             bar.symbol, bar.high, bar.low, bar.close,
         )
+        # Persist MFE/MAE to SQLite immediately (sub-ms write via WAL mode)
+        held = self._position_book.get(bar.symbol)
+        if held and self._state_store:
+            try:
+                self._state_store.update_mfe_mae(
+                    bar.symbol, held.highest_price, held.lowest_price,
+                )
+            except Exception:
+                pass  # non-critical: JSON dump below is the fallback
         # Dump updated position data at most once every 30s to limit I/O
         _now = time.monotonic()
         if _now - self._last_dump_time >= 30.0:
@@ -2465,19 +2561,17 @@ class AutoTrader:
         self._dump_open_positions()
 
     def _dump_open_positions(self, *, allow_empty: bool = True) -> None:
-        """Write current open position details to data/open_positions.json.
+        """Sync current open position details to SQLite for the dashboard.
 
-        The dashboard reads this file to show real-time MFE/MAE and
-        position sizes for held positions.
+        Updates current_price and unrealized_pnl for each held position
+        so the dashboard can display real-time data.
 
         Args:
-            allow_empty: If False, skip writing when records list is empty
-                but the file already has data (protects against startup/shutdown
-                overwrites). Normal exit paths should use True (default) so
-                the dashboard correctly shows no positions after last exit.
+            allow_empty: Legacy parameter, kept for call-site compatibility.
+                Previously controlled JSON overwrite protection; now only
+                affects whether SQLite rows are cleaned up when no positions
+                are held.
         """
-        import json as _json
-
         tracker = self._open_position_tracker
         records = []
         for symbol in tracker.open_symbols:
@@ -2497,7 +2591,6 @@ class AutoTrader:
             else:
                 pnl_per_share = held.entry_price - current_price
             unrealized_pnl = round(pnl_per_share * held.qty, 2)
-            unrealized_pnl_pct = round(pnl_per_share / held.entry_price, 6) if held.entry_price > 0 else 0.0
             records.append({
                 "symbol": held.symbol,
                 "strategy": held.strategy,
@@ -2506,43 +2599,88 @@ class AutoTrader:
                 "current_price": round(current_price, 2),
                 "qty": held.qty,
                 "unrealized_pnl": unrealized_pnl,
-                "unrealized_pnl_pct": unrealized_pnl_pct,
                 "highest_price": held.highest_price,
                 "lowest_price": held.lowest_price,
-                "mfe_pct": round(held.mfe, 6),
-                "mae_pct": round(held.mae, 6),
-                "mfe_dollar": round(held.mfe * held.entry_price * held.qty, 2),
-                "mae_dollar": round(held.mae * held.entry_price * held.qty, 2),
-                "bar_count": held.bar_count,
+                "bars_held": held.bar_count,
                 "entry_atr": held.entry_atr,
                 "entry_date_et": held.entry_date_et.isoformat(),
+                "entry_adx": getattr(held, "entry_adx", 0.0),
             })
 
-        path = Path("data/open_positions.json")
-
-        # Guard: when allow_empty=False, do not overwrite existing snapshot
-        # with empty list. Protects MFE/MAE data during startup/shutdown.
-        if not allow_empty and not records and path.exists():
+        # Sync to SQLite (primary store for dashboard reads) -- transactional
+        if hasattr(self, '_state_store') and self._state_store:
             try:
-                existing = path.read_text(encoding="utf-8").strip()
-                if existing and existing != "[]":
-                    logger.debug(
-                        "Skipping open_positions dump: tracker empty but file has data"
-                    )
-                    return
-            except OSError:
-                pass
+                self._state_store.begin_transaction()
+                for rec in records:
+                    self._state_store.upsert_position(rec["symbol"], rec)
+                # Clean up stale positions from SQLite
+                try:
+                    db_positions = self._state_store.load_positions()
+                    current_symbols = {rec["symbol"] for rec in records}
+                    for db_sym in db_positions:
+                        if db_sym not in current_symbols:
+                            self._state_store.remove_position(db_sym)
+                            logger.info("Removed stale position %s from SQLite", db_sym)
+                except Exception:
+                    logger.warning("Failed to clean stale positions from SQLite")
+                self._state_store.commit()
+            except Exception:
+                try:
+                    self._state_store.rollback()
+                except Exception:
+                    pass
+                logger.warning("Failed to sync positions to SQLite")
 
-        tmp = path.with_suffix(".tmp")
+        # Dual-write: JSON backup for migration safety
+        import json as _json
+        import tempfile
+        pos_path = Path("data/open_positions.json")
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(_json.dumps(records, indent=2) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(str(tmp), str(path))
-        except OSError:
-            logger.debug("Failed to dump open positions to %s", path)
+            # Compute derived fields for JSON compatibility
+            json_records = []
+            for rec in records:
+                r = dict(rec)
+                entry = r.get("entry_price", 0)
+                qty = abs(r.get("qty", 0))
+                high = r.get("highest_price", entry)
+                low = r.get("lowest_price", entry)
+                direction = r.get("direction", "long").lower()
+                cost = entry * qty if entry and qty else 0
+                if entry > 0:
+                    if direction == "long":
+                        r["mfe_pct"] = round((high - entry) / entry, 6) if high else 0.0
+                        r["mae_pct"] = round((low - entry) / entry, 6) if low else 0.0
+                    else:
+                        r["mfe_pct"] = round((entry - low) / entry, 6) if low else 0.0
+                        r["mae_pct"] = round((entry - high) / entry, 6) if high else 0.0
+                else:
+                    r["mfe_pct"] = 0.0
+                    r["mae_pct"] = 0.0
+                r["mfe_dollar"] = round(r["mfe_pct"] * cost, 2) if cost else 0.0
+                r["mae_dollar"] = round(r["mae_pct"] * cost, 2) if cost else 0.0
+                unrealized = r.get("unrealized_pnl", 0.0)
+                r["unrealized_pnl_pct"] = round(unrealized / cost, 6) if cost > 0 and unrealized else 0.0
+                r["bar_count"] = r.get("bars_held", 0)
+                json_records.append(r)
+            # Atomic write: tmp -> fsync -> replace
+            pos_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(pos_path.parent), suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as tmp_f:
+                    _json.dump(json_records, tmp_f, indent=2, default=str)
+                    tmp_f.flush()
+                    os.fsync(tmp_f.fileno())
+                Path(tmp_path).replace(pos_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception:
+            logger.debug("Failed to write open_positions.json backup")
 
     async def _daily_regime_scheduler(self) -> None:
         """Refresh regime from latest SPY daily bar once per day after 9 PM ET."""

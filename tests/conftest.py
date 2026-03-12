@@ -41,3 +41,26 @@ def _isolate_trade_logging(tmp_path, monkeypatch):
         _original_init(self, safe_trade, safe_equity)
 
     monkeypatch.setattr(TradeLogger, "__init__", _safe_init)
+
+
+_PRODUCTION_DB = "data/autotrader.db"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_state_store(tmp_path, monkeypatch):
+    """Redirect StateStore writes away from production database.
+
+    Any StateStore created with the default path gets a tmp_path-based
+    SQLite file instead, preventing test pollution of production data.
+    """
+    from autotrader.data.state_store import StateStore
+
+    _original_init = StateStore.__init__
+
+    def _safe_init(self, db_path: str = _PRODUCTION_DB) -> None:
+        safe_path = db_path
+        if Path(db_path).as_posix().endswith(_PRODUCTION_DB):
+            safe_path = str(tmp_path / "test_autotrader.db")
+        _original_init(self, db_path=safe_path)
+
+    monkeypatch.setattr(StateStore, "__init__", _safe_init)

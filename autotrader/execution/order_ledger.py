@@ -3,10 +3,10 @@
 Every order submitted to Alpaca is recorded to disk BEFORE the broker
 response is processed.  On startup, pending orders are reconciled.
 
-Storage: append-only JSONL at ``data/order_ledger.jsonl``.
-Each line is a complete OrderRecord snapshot at a state transition.
-On load(), all lines are replayed -- last line per order_id wins.
-Writes use flush() + os.fsync() for crash safety.
+Storage: SQLite (primary) + append-only JSONL (backup dual-write).
+Each JSONL line is a complete OrderRecord snapshot at a state transition.
+On load(), SQLite is tried first; falls back to JSONL replay if DB is empty.
+Writes use flush() + os.fsync() for crash safety on the JSONL path.
 """
 from __future__ import annotations
 
@@ -17,7 +17,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from autotrader.data.state_store import StateStore
 
 logger = logging.getLogger("autotrader.execution.order_ledger")
 
@@ -74,18 +77,55 @@ _DEFAULT_PATH = Path("data/order_ledger.jsonl")
 
 
 class OrderLedger:
-    """Append-only JSONL ledger for durable order state tracking."""
+    """Durable order state tracking with SQLite primary + JSONL backup."""
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or _DEFAULT_PATH
         self._orders: dict[str, OrderRecord] = {}
+        self._state_store: StateStore | None = None
+
+    def set_state_store(self, store: StateStore) -> None:
+        """Set the state store for write-through persistence."""
+        self._state_store = store
 
     def load(self) -> dict[str, OrderRecord]:
-        """Replay JSONL file; last line per order_id wins."""
+        """Load orders from SQLite if available; fall back to JSONL replay."""
         self._orders.clear()
+
+        # --- Try SQLite first ---
+        loaded_from_db = False
+        if self._state_store is not None:
+            try:
+                db_orders = self._state_store.load_orders()
+                if db_orders:
+                    for oid, row in db_orders.items():
+                        self._orders[oid] = self._dict_to_record(row)
+                    loaded_from_db = True
+                    logger.info(
+                        "Loaded order ledger from SQLite: %d order(s)",
+                        len(self._orders),
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to load orders from SQLite; falling back to JSONL",
+                    exc_info=True,
+                )
+
+        # --- Fall back to JSONL replay ---
+        if not loaded_from_db:
+            self._load_from_jsonl()
+
+        # --- One-time migration: JSONL -> DB ---
+        if not loaded_from_db and self._orders and self._state_store is not None:
+            self._migrate_to_db()
+
+        return self._orders
+
+    def _load_from_jsonl(self) -> None:
+        """Replay JSONL file; last line per order_id wins."""
         if not self._path.exists():
             logger.info("No ledger file at %s; starting empty", self._path)
-            return self._orders
+            return
         corrupted, total = 0, 0
         with open(self._path, "r", encoding="utf-8") as f:
             for line in f:
@@ -100,19 +140,69 @@ class OrderLedger:
                     corrupted += 1
                     logger.warning("Corrupted ledger line %d (%s); skipping", total, exc)
         logger.info(
-            "Loaded order ledger: %d order(s) from %d line(s) (%d corrupted)",
+            "Loaded order ledger from JSONL: %d order(s) from %d line(s) (%d corrupted)",
             len(self._orders), total, corrupted,
         )
-        return self._orders
+
+    def _migrate_to_db(self) -> None:
+        """One-time migration: populate SQLite from in-memory orders loaded via JSONL."""
+        migrated = 0
+        for record in self._orders.values():
+            try:
+                self._write_to_db(record)
+                migrated += 1
+            except Exception:
+                logger.warning(
+                    "Failed to migrate order %s to SQLite", record.order_id,
+                    exc_info=True,
+                )
+        if migrated:
+            logger.info("Migrated %d order(s) from JSONL to SQLite", migrated)
 
     def _append(self, record: OrderRecord) -> None:
-        """Append one record line with fsync for crash safety."""
+        """Persist record to SQLite (primary) + JSONL (backup dual-write)."""
+        # --- SQLite write (primary) ---
+        if self._state_store is not None:
+            try:
+                self._write_to_db(record)
+            except Exception:
+                logger.warning(
+                    "SQLite write failed for order %s; JSONL-only",
+                    record.order_id, exc_info=True,
+                )
+
+        # --- JSONL write (backup) ---
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, "a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
+
+        # --- Update in-memory dict ---
         self._orders[record.order_id] = record
+
+    def _write_to_db(self, record: OrderRecord) -> None:
+        """Write a single OrderRecord to SQLite via StateStore.
+
+        Uses INSERT for new orders, UPDATE for existing ones.
+        """
+        assert self._state_store is not None
+        rec_dict = asdict(record)
+        # Convert OrderState enum to its string value for DB storage
+        rec_dict["state"] = record.state.value
+
+        existing = self._state_store.load_order(record.order_id)
+        if existing is None:
+            self._state_store.insert_order(rec_dict)
+        else:
+            self._state_store.update_order_state(
+                order_id=record.order_id,
+                state=record.state.value,
+                qty_filled=record.qty_filled,
+                fill_price=record.fill_price,
+                sl_order_id=record.sl_order_id,
+                parent_order_id=record.parent_order_id,
+            )
 
     # -- State transitions --------------------------------------------------
 
@@ -209,7 +299,18 @@ class OrderLedger:
                     removed += 1
             except (ValueError, TypeError):
                 keep.append(record)
-        # Atomic rewrite: tmp + rename
+
+        # --- Compact SQLite ---
+        if self._state_store is not None:
+            try:
+                self._state_store.compact_orders(keep_hours=keep_hours)
+            except Exception:
+                logger.warning(
+                    "SQLite compact_orders failed; JSONL compact continues",
+                    exc_info=True,
+                )
+
+        # --- Atomic JSONL rewrite: tmp + rename ---
         tmp_path = self._path.with_suffix(".tmp")
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(tmp_path, "w", encoding="utf-8") as f:

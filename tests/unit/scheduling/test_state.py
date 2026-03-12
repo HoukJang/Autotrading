@@ -344,3 +344,94 @@ class TestTargetDateSerialization:
 
         raw = json.loads(path.read_text(encoding="utf-8"))
         assert raw["events"]["nightly_scan"]["target_date"] == "2026-03-05"
+
+
+class TestSnapshotProtocol:
+    """Test to_snapshot() / from_snapshot() for RuntimeState integration."""
+
+    def test_to_snapshot_empty_state(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        snap = state.to_snapshot()
+        assert snap == {"date": "2026-03-04", "events": {}}
+
+    def test_to_snapshot_with_events(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("gap_filter", result="success")
+        state.mark_fired("nightly_scan", result="success", target_date="2026-03-05")
+        snap = state.to_snapshot()
+        assert snap["date"] == "2026-03-04"
+        assert "gap_filter" in snap["events"]
+        assert snap["events"]["gap_filter"]["result"] == "success"
+        assert snap["events"]["nightly_scan"]["target_date"] == "2026-03-05"
+
+    def test_from_snapshot_restores_state(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        state.from_snapshot({
+            "date": "2026-03-05",
+            "events": {
+                "gap_filter": {
+                    "fired_at": "2026-03-05T09:25:00-05:00",
+                    "result": "success",
+                    "target_date": "",
+                },
+            },
+        })
+        assert state.date == "2026-03-05"
+        assert state.is_fired("gap_filter")
+        assert state.events["gap_filter"].result == "success"
+
+    def test_from_snapshot_clears_old_events(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("moo")
+        state.from_snapshot({
+            "date": "2026-03-05",
+            "events": {"gap_filter": {"fired_at": "t", "result": "success"}},
+        })
+        assert not state.is_fired("moo")
+        assert state.is_fired("gap_filter")
+
+    def test_snapshot_roundtrip(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("gap_filter", result="success")
+        state.mark_fired("nightly_scan", result="success", target_date="2026-03-05")
+
+        snap = state.to_snapshot()
+
+        restored = SchedulerState.fresh("1970-01-01")
+        restored.from_snapshot(snap)
+
+        assert restored.date == state.date
+        assert restored.is_fired("gap_filter")
+        assert restored.is_fired("nightly_scan")
+        assert restored.events["nightly_scan"].target_date == "2026-03-05"
+
+    def test_from_snapshot_handles_missing_target_date(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        state.from_snapshot({
+            "date": "2026-03-04",
+            "events": {
+                "gap_filter": {"fired_at": "t", "result": "success"},
+            },
+        })
+        assert state.events["gap_filter"].target_date == ""
+
+    def test_from_snapshot_empty_events(self) -> None:
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("moo")
+        state.from_snapshot({"date": "2026-03-05", "events": {}})
+        assert state.date == "2026-03-05"
+        assert state.events == {}
+
+    def test_to_snapshot_matches_save_format(self, tmp_path: Path) -> None:
+        """to_snapshot output should match the JSON written by save()."""
+        state = SchedulerState.fresh("2026-03-04")
+        state.mark_fired("gap_filter", result="success", target_date="")
+        state.mark_fired("nightly_scan", result="success", target_date="2026-03-05")
+
+        snap = state.to_snapshot()
+
+        path = tmp_path / "state.json"
+        state.save(path)
+        saved = json.loads(path.read_text(encoding="utf-8"))
+
+        assert snap == saved

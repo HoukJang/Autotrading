@@ -2,6 +2,10 @@
 
 Saves/loads snapshots from all stateful components to a single JSON file
 using atomic writes (tmp + fsync + replace) for crash safety.
+
+Phase 5 enhancement: dual-write to SQLite component_state table via
+StateStore, with JSON kept as backup.  SQLite is tried first on load,
+falling back to JSON when the database is empty or unavailable.
 """
 from __future__ import annotations
 
@@ -9,11 +13,18 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from autotrader.data.state_store import StateStore
 
 logger = logging.getLogger("autotrader.state.runtime_state")
 
 DEFAULT_PATH = Path("data/state/runtime_state.json")
+
+# Components that are persisted elsewhere and should NOT go into
+# the component_state table (they are already in dedicated tables).
+_SQLITE_EXCLUDED_COMPONENTS = frozenset({"position_book"})
 
 
 class Snapshottable(Protocol):
@@ -28,9 +39,14 @@ class RuntimeState:
 
     def __init__(self, path: Path = DEFAULT_PATH) -> None:
         self._path = path
+        self._store: StateStore | None = None
+
+    def set_state_store(self, store: "StateStore") -> None:
+        """Attach a StateStore for SQLite dual-write persistence."""
+        self._store = store
 
     def save(self, components: dict[str, Snapshottable]) -> None:
-        """Atomically save all component snapshots to disk."""
+        """Dual-write: save to SQLite first, then JSON as backup."""
         payload: dict[str, Any] = {}
         for name, component in components.items():
             try:
@@ -38,6 +54,22 @@ class RuntimeState:
             except Exception:
                 logger.exception("Failed to snapshot component: %s", name)
 
+        # --- SQLite write (primary) ---
+        if self._store is not None:
+            try:
+                sqlite_payload = {
+                    k: v for k, v in payload.items()
+                    if k not in _SQLITE_EXCLUDED_COMPONENTS
+                }
+                self._store.save_all_component_states(sqlite_payload)
+                logger.debug(
+                    "RuntimeState saved to SQLite (%d components)",
+                    len(sqlite_payload),
+                )
+            except Exception:
+                logger.exception("Failed to save RuntimeState to SQLite")
+
+        # --- JSON write (backup) ---
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._path.with_suffix(".tmp")
         try:
@@ -46,17 +78,31 @@ class RuntimeState:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(str(tmp_path), str(self._path))
-            logger.debug("RuntimeState saved (%d components)", len(payload))
+            logger.debug("RuntimeState saved to JSON (%d components)", len(payload))
         except Exception:
-            logger.exception("Failed to save RuntimeState")
+            logger.exception("Failed to save RuntimeState to JSON")
 
     def load(self) -> dict[str, dict]:
-        """Load persisted snapshots from disk.
+        """Load persisted snapshots: try SQLite first, fallback to JSON.
 
         Returns:
             dict mapping component name -> snapshot dict.
-            Empty dict if file doesn't exist or is corrupted.
+            Empty dict if no data is available.
         """
+        # --- Try SQLite first ---
+        if self._store is not None:
+            try:
+                db_data = self._store.load_component_states()
+                if db_data:
+                    logger.info(
+                        "RuntimeState loaded from SQLite (%d components)",
+                        len(db_data),
+                    )
+                    return db_data
+            except Exception:
+                logger.exception("Failed to load RuntimeState from SQLite")
+
+        # --- Fallback to JSON ---
         if not self._path.exists():
             logger.info(
                 "No RuntimeState file found at %s (first run or bootstrap needed)",
@@ -66,10 +112,24 @@ class RuntimeState:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
             logger.info(
-                "RuntimeState loaded (%d components) from %s",
+                "RuntimeState loaded from JSON (%d components) from %s",
                 len(data),
                 self._path,
             )
+            # Migrate JSON data to SQLite for future loads
+            if self._store is not None and data:
+                try:
+                    sqlite_payload = {
+                        k: v for k, v in data.items()
+                        if k not in _SQLITE_EXCLUDED_COMPONENTS
+                    }
+                    self._store.save_all_component_states(sqlite_payload)
+                    logger.info(
+                        "Migrated %d components from JSON to SQLite",
+                        len(sqlite_payload),
+                    )
+                except Exception:
+                    logger.exception("Failed to migrate RuntimeState to SQLite")
             return data
         except Exception:
             logger.exception("Failed to load RuntimeState from %s", self._path)
@@ -92,7 +152,14 @@ class RuntimeState:
 
     @property
     def exists(self) -> bool:
-        """Return True if the persisted state file exists on disk."""
+        """Return True if persisted state exists (SQLite or JSON)."""
+        if self._store is not None:
+            try:
+                db_data = self._store.load_component_states()
+                if db_data:
+                    return True
+            except Exception:
+                pass
         return self._path.exists()
 
 

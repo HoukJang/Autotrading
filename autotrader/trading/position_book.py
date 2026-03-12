@@ -20,8 +20,13 @@ logger = logging.getLogger("autotrader.trading.position_book")
 class PositionBook:
     """Centralized position registry -- single source of truth."""
 
-    def __init__(self) -> None:
+    def __init__(self, state_store=None) -> None:
         self._positions: dict[str, HeldPosition] = {}
+        self._state_store = state_store  # Optional StateStore for write-through
+
+    def set_state_store(self, store) -> None:
+        """Set the state store for write-through persistence."""
+        self._state_store = store
 
     def add(self, held: HeldPosition) -> bool:
         """Register a new position. Returns False if at capacity or duplicate."""
@@ -35,6 +40,11 @@ class PositionBook:
             )
             return False
         self._positions[held.symbol] = held
+        if self._state_store:
+            try:
+                self._state_store.upsert_position(held.symbol, self._position_to_dict(held))
+            except Exception:
+                logger.warning("PositionBook: failed to persist add for %s to SQLite", held.symbol)
         logger.info(
             "PositionBook: added %s %s (strategy=%s, entry=%.2f, qty=%.0f)",
             held.direction, held.symbol, held.strategy, held.entry_price, held.qty,
@@ -45,8 +55,43 @@ class PositionBook:
         """Remove and return a position. Returns None if not found."""
         held = self._positions.pop(symbol, None)
         if held:
+            if self._state_store:
+                try:
+                    self._state_store.remove_position(symbol)
+                except Exception:
+                    logger.warning("PositionBook: failed to remove %s from SQLite", symbol)
             logger.info("PositionBook: removed %s", symbol)
         return held
+
+    def _position_to_dict(self, pos: HeldPosition) -> dict:
+        """Convert HeldPosition to dict for StateStore."""
+        entry_date = pos.entry_date_et
+        if hasattr(entry_date, 'isoformat'):
+            entry_date_str = entry_date.isoformat()
+        else:
+            entry_date_str = str(entry_date)
+
+        entry_time = getattr(pos, '_entry_time', None)
+        if entry_time is not None and hasattr(entry_time, 'isoformat'):
+            entry_time_str = entry_time.isoformat()
+        else:
+            entry_time_str = str(entry_time) if entry_time is not None else None
+
+        return {
+            "symbol": pos.symbol,
+            "strategy": pos.strategy,
+            "direction": pos.direction,
+            "entry_price": pos.entry_price,
+            "entry_atr": pos.entry_atr,
+            "entry_date_et": entry_date_str,
+            "qty": pos.qty,
+            "bars_held": pos.bars_held,
+            "highest_price": pos.highest_price,
+            "lowest_price": pos.lowest_price,
+            "consecutive_loss_bars": pos.consecutive_loss_bars,
+            "entry_adx": getattr(pos, 'entry_adx', 0.0),
+            "entry_time": entry_time_str,
+        }
 
     def get(self, symbol: str) -> HeldPosition | None:
         """Get a position by symbol (non-destructive)."""

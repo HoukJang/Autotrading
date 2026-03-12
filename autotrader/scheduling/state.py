@@ -7,6 +7,10 @@ bugs documented in the design doc.
 
 State is stored as a single JSON file and written atomically (tmp+rename)
 to survive mid-write crashes.
+
+Phase 5 enhancement: dual-write to SQLite scheduler_events table via
+StateStore, with JSON kept as backup.  SQLite is tried first on load,
+falling back to JSON when the database is empty or unavailable.
 """
 from __future__ import annotations
 
@@ -16,9 +20,12 @@ import os
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from autotrader.data.state_store import StateStore
 
 logger = logging.getLogger("autotrader.scheduling.state")
 
@@ -45,6 +52,15 @@ class SchedulerState:
 
     date: str  # ISO date string, e.g. "2026-03-04"
     events: dict[str, EventRecord] = field(default_factory=dict)
+    _store: Any = field(default=None, repr=False, compare=False)
+
+    # ------------------------------------------------------------------
+    # StateStore integration
+    # ------------------------------------------------------------------
+
+    def set_state_store(self, store: "StateStore") -> None:
+        """Attach a StateStore for SQLite dual-write persistence."""
+        object.__setattr__(self, "_store", store)
 
     # ------------------------------------------------------------------
     # Factory / persistence
@@ -56,46 +72,113 @@ class SchedulerState:
         return SchedulerState(date=today, events={})
 
     @classmethod
-    def load(cls, path: Path) -> SchedulerState:
-        """Load state from disk.  Returns empty state on any failure."""
+    def load(cls, path: Path, store: "StateStore | None" = None) -> SchedulerState:
+        """Load state: try SQLite first, fallback to JSON.
+
+        Returns empty state on any failure.
+        """
+        # --- Try SQLite first ---
+        if store is not None:
+            try:
+                state_date, db_events = store.load_scheduler_state()
+                if state_date and db_events:
+                    events: dict[str, EventRecord] = {}
+                    for name, evt in db_events.items():
+                        events[name] = EventRecord(
+                            fired_at=evt.get("fired_at", ""),
+                            result=evt.get("result", "unknown"),
+                            target_date=evt.get("target_date", ""),
+                        )
+                    logger.info(
+                        "Loaded scheduler state from SQLite: date=%s, %d event(s)",
+                        state_date,
+                        len(events),
+                    )
+                    instance = cls(date=state_date, events=events)
+                    instance.set_state_store(store)
+                    return instance
+            except Exception:
+                logger.exception("Failed to load scheduler state from SQLite")
+
+        # --- Fallback to JSON ---
         try:
             if not path.exists():
                 logger.info("No scheduler state file at %s; starting fresh", path)
-                return cls._fresh_today()
+                instance = cls._fresh_today()
+                if store is not None:
+                    instance.set_state_store(store)
+                return instance
 
             raw = path.read_text(encoding="utf-8")
             data: dict[str, Any] = json.loads(raw)
 
-            state_date = data.get("date", "")
+            state_date_json = data.get("date", "")
             events_raw = data.get("events", {})
-            events: dict[str, EventRecord] = {}
+            events_json: dict[str, EventRecord] = {}
             for name, rec in events_raw.items():
-                events[name] = EventRecord(
+                events_json[name] = EventRecord(
                     fired_at=rec.get("fired_at", ""),
                     result=rec.get("result", "unknown"),
                     target_date=rec.get("target_date", ""),
                 )
 
             logger.info(
-                "Loaded scheduler state: date=%s, %d event(s)",
-                state_date,
-                len(events),
+                "Loaded scheduler state from JSON: date=%s, %d event(s)",
+                state_date_json,
+                len(events_json),
             )
-            return cls(date=state_date, events=events)
+            instance = cls(date=state_date_json, events=events_json)
+            if store is not None:
+                instance.set_state_store(store)
+
+            # Migrate JSON data to SQLite for future loads
+            if store is not None and events_json:
+                try:
+                    sqlite_events = {
+                        name: asdict(rec) for name, rec in events_json.items()
+                    }
+                    store.save_scheduler_state(state_date_json, sqlite_events)
+                    logger.info(
+                        "Migrated scheduler state to SQLite: date=%s, %d event(s)",
+                        state_date_json,
+                        len(sqlite_events),
+                    )
+                except Exception:
+                    logger.exception("Failed to migrate scheduler state to SQLite")
+
+            return instance
 
         except (json.JSONDecodeError, KeyError, TypeError, OSError) as exc:
             logger.warning("Corrupted scheduler state (%s); starting fresh", exc)
-            return cls._fresh_today()
+            instance = cls._fresh_today()
+            if store is not None:
+                instance.set_state_store(store)
+            return instance
 
     def save(self, path: Path) -> None:
-        """Atomic write: write to .tmp then rename."""
+        """Dual-write: save to SQLite first, then JSON as backup."""
+        events_dict = {
+            name: asdict(rec) for name, rec in self.events.items()
+        }
+
+        # --- SQLite write (primary) ---
+        if self._store is not None:
+            try:
+                self._store.save_scheduler_state(self.date, events_dict)
+                logger.debug(
+                    "Scheduler state saved to SQLite: date=%s, %d event(s)",
+                    self.date,
+                    len(events_dict),
+                )
+            except Exception:
+                logger.exception("Failed to save scheduler state to SQLite")
+
+        # --- JSON write (backup) ---
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".tmp")
         payload = {
             "date": self.date,
-            "events": {
-                name: asdict(rec) for name, rec in self.events.items()
-            },
+            "events": events_dict,
         }
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
@@ -174,6 +257,31 @@ class SchedulerState:
         """
         today = date.fromisoformat(self.date)
         return {name: today for name in self.events}
+
+    # ------------------------------------------------------------------
+    # Snapshottable protocol (for RuntimeState periodic saves)
+    # ------------------------------------------------------------------
+
+    def to_snapshot(self) -> dict:
+        """Serialize state for RuntimeState persistence."""
+        return {
+            "date": self.date,
+            "events": {
+                name: asdict(rec) for name, rec in self.events.items()
+            },
+        }
+
+    def from_snapshot(self, data: dict) -> None:
+        """Restore state from RuntimeState snapshot."""
+        self.date = data.get("date", "")
+        events_raw = data.get("events", {})
+        self.events = {}
+        for name, rec in events_raw.items():
+            self.events[name] = EventRecord(
+                fired_at=rec.get("fired_at", ""),
+                result=rec.get("result", "unknown"),
+                target_date=rec.get("target_date", ""),
+            )
 
     # ------------------------------------------------------------------
     # Internal

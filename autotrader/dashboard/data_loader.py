@@ -1,12 +1,14 @@
 """Dashboard data loader with caching and derived metrics.
 
-Supports both live trade/equity JSONL files and nightly batch scan JSON files
-produced by the batch scanner component of AutoTrader v3.
+Supports SQLite as the primary data source with JSON/JSONL fallback.
+Also loads nightly batch scan JSON files produced by the batch scanner
+component of AutoTrader v3.
 """
 from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
@@ -20,6 +22,46 @@ from autotrader.dashboard.utils.metrics import max_consecutive_losses
 from autotrader.trading.constants import MAX_DAILY_ENTRIES, MAX_LONG_POSITIONS
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# SQLite read-only connection helper
+# ---------------------------------------------------------------------------
+_DB_VALIDATED: bool = False
+
+
+def _get_db_connection(db_path: str = "data/autotrader.db") -> sqlite3.Connection | None:
+    """Get a read-only SQLite connection.
+
+    Returns None if DB doesn't exist or hasn't been populated by the
+    live autotrader process (prevents reading stale test data).
+    """
+    global _DB_VALIDATED  # noqa: PLW0603
+    try:
+        if not Path(db_path).exists():
+            return None
+        conn = sqlite3.connect(db_path, timeout=5)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+        # One-time validation: ensure the DB was populated by autotrader
+        # (not left behind by tests). Check for component_state entries
+        # which are only written by the live process.
+        if not _DB_VALIDATED:
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM component_state"
+                ).fetchone()
+                if row["cnt"] == 0:
+                    conn.close()
+                    return None
+                _DB_VALIDATED = True
+            except Exception:
+                conn.close()
+                return None
+        return conn
+    except Exception:
+        return None
 
 # ---------------------------------------------------------------------------
 # Column definitions for empty DataFrames
@@ -106,12 +148,35 @@ class RiskMetrics:
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=30)
 def load_trades(path: str = "data/live_trades.jsonl") -> pd.DataFrame:
-    """Load the trades JSONL file into a DataFrame.
+    """Load trades, trying SQLite first with JSONL fallback.
 
-    Returns an empty DataFrame with the correct columns when the file is
-    missing or contains no valid records. Corrupt lines are skipped with
-    a warning.
+    Returns an empty DataFrame with the correct columns when no data
+    is available. Corrupt JSONL lines are skipped with a warning.
     """
+    # Try SQLite first
+    conn = _get_db_connection()
+    if conn is not None:
+        try:
+            df = pd.read_sql_query("SELECT * FROM trades ORDER BY id", conn)
+            if not df.empty:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601")
+                # Parse metadata JSON strings
+                if "metadata" in df.columns:
+                    df["metadata"] = df["metadata"].apply(
+                        lambda x: json.loads(x) if isinstance(x, str) else x
+                    )
+                return df
+        except Exception:
+            logger.warning("DB read failed for trades, falling back to JSONL")
+        finally:
+            conn.close()
+
+    # Fallback to JSONL
+    return _load_trades_from_jsonl(path)
+
+
+def _load_trades_from_jsonl(path: str) -> pd.DataFrame:
+    """Load trades from a JSONL file (fallback reader)."""
     file_path = Path(path)
     if not file_path.exists():
         return pd.DataFrame(columns=_TRADE_COLUMNS)
@@ -139,12 +204,37 @@ def load_trades(path: str = "data/live_trades.jsonl") -> pd.DataFrame:
 
 @st.cache_data(ttl=30)
 def load_equity(path: str = "data/equity_snapshots.jsonl") -> pd.DataFrame:
-    """Load equity snapshots JSONL into a DataFrame.
+    """Load equity snapshots, trying SQLite first with JSONL fallback.
 
-    Returns an empty DataFrame with the correct columns when the file is
-    missing or contains no valid records. Corrupt lines are skipped with
-    a warning.
+    Returns an empty DataFrame with the correct columns when no data
+    is available.
     """
+    # Try SQLite first
+    conn = _get_db_connection()
+    if conn is not None:
+        try:
+            df = pd.read_sql_query(
+                "SELECT * FROM equity_snapshots ORDER BY id", conn,
+            )
+            if not df.empty:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601")
+                # Parse open_positions JSON strings
+                if "open_positions" in df.columns:
+                    df["open_positions"] = df["open_positions"].apply(
+                        lambda x: json.loads(x) if isinstance(x, str) else x
+                    )
+                return df
+        except Exception:
+            logger.warning("DB read failed for equity, falling back to JSONL")
+        finally:
+            conn.close()
+
+    # Fallback to JSONL
+    return _load_equity_from_jsonl(path)
+
+
+def _load_equity_from_jsonl(path: str) -> pd.DataFrame:
+    """Load equity snapshots from a JSONL file (fallback reader)."""
     file_path = Path(path)
     if not file_path.exists():
         return pd.DataFrame(columns=_EQUITY_COLUMNS)
@@ -906,13 +996,75 @@ def _compute_entry_checks(
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=15)
 def load_open_positions(path: str = "data/open_positions.json") -> dict[str, dict]:
-    """Load live open-position details dumped by AutoTrader.
+    """Load live open-position details, trying SQLite first with JSON fallback.
 
     Returns a dict keyed by symbol with fields:
-    entry_price, qty, mfe, mae, mfe_dollar, mae_dollar, bar_count, etc.
+    entry_price, qty, mfe_pct, mae_pct, mfe_dollar, mae_dollar,
+    bar_count, current_price, unrealized_pnl, etc.
 
-    Empty dict when file is missing or malformed.
+    Empty dict when no data is available.
     """
+    # Try SQLite first
+    conn = _get_db_connection()
+    if conn is not None:
+        try:
+            cursor = conn.execute("SELECT * FROM positions")
+            positions: dict[str, dict] = {}
+            for row in cursor.fetchall():
+                d = dict(row)
+                _enrich_position_fields(d)
+                positions[d["symbol"]] = d
+            if positions:
+                return positions
+        except Exception:
+            logger.warning("DB read failed for positions, falling back to JSON")
+        finally:
+            conn.close()
+
+    # Fallback to JSON
+    return _load_positions_from_json(path)
+
+
+def _enrich_position_fields(d: dict) -> None:
+    """Compute derived MFE/MAE fields from raw SQLite position data.
+
+    The positions table stores highest_price and lowest_price but the
+    dashboard expects mfe_pct, mfe_dollar, mae_pct, mae_dollar, bar_count,
+    and unrealized_pnl_pct.  This function adds those fields in-place.
+    """
+    entry = d.get("entry_price", 0)
+    qty = abs(d.get("qty", 0))
+    high = d.get("highest_price", entry)
+    low = d.get("lowest_price", entry)
+    direction = d.get("direction", "long").lower()
+
+    if entry > 0:
+        if direction == "long":
+            d.setdefault("mfe_pct", round((high - entry) / entry, 6))
+            d.setdefault("mae_pct", round((low - entry) / entry, 6))
+        else:
+            d.setdefault("mfe_pct", round((entry - low) / entry, 6))
+            d.setdefault("mae_pct", round((entry - high) / entry, 6))
+    else:
+        d.setdefault("mfe_pct", 0.0)
+        d.setdefault("mae_pct", 0.0)
+
+    d.setdefault("mfe_dollar", round(d["mfe_pct"] * entry * qty, 2))
+    d.setdefault("mae_dollar", round(d["mae_pct"] * entry * qty, 2))
+
+    # Map bars_held -> bar_count for dashboard compatibility
+    if "bar_count" not in d and "bars_held" in d:
+        d["bar_count"] = d["bars_held"]
+
+    # Compute unrealized_pnl_pct from unrealized_pnl if missing
+    unrealized = d.get("unrealized_pnl", 0.0)
+    cost = entry * qty
+    if "unrealized_pnl_pct" not in d and cost > 0:
+        d["unrealized_pnl_pct"] = round(unrealized / cost, 6) if unrealized else 0.0
+
+
+def _load_positions_from_json(path: str) -> dict[str, dict]:
+    """Load open positions from JSON file (fallback reader)."""
     file_path = Path(path)
     if not file_path.exists():
         return {}
